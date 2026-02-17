@@ -64,8 +64,6 @@ You only ever run this once. The result is saved to `data/embeddings/`.
 # Ubuntu/Debian
 sudo apt install mpd mpc
 
-# macOS
-brew install mpd mpc
 
 # Point MPD at your music and build the database
 mpc update
