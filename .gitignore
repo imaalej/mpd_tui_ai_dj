@@ -1,0 +1,53 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+*.egg
+*.egg-info/
+dist/
+build/
+.eggs/
+.venv/
+venv/
+env/
+
+# User-specific learned data (personalized to each user's taste)
+data/state/user_taste.npz
+data/state/exploration_state.json
+data/state/feedback_history.json
+data/state/time_context.npz
+data/state/
+
+# Embeddings (large files generated from user's own music library)
+data/embeddings/track_embeddings.npz
+data/embeddings/
+
+# Keep the data directory structure but not the files
+!data/
+!data/.gitkeep
+!data/embeddings/.gitkeep
+!data/state/.gitkeep
+
+# OS files
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+
+# Editor
+.vscode/
+.idea/
+*.sublime-project
+*.sublime-workspace
+
+# Test scripts
+test_*.py
+
+# Logs
+*.log
+
+# Environment variables
+.env
+.env.local
