@@ -28,6 +28,7 @@ from typing import Optional, List
 
 try:
     import urwid
+
     URWID_AVAILABLE = True
 except ImportError:
     URWID_AVAILABLE = False
@@ -39,6 +40,7 @@ from album_art import get_album_art_renderer
 
 # ─── Console log interceptor ────────────────────────────────────────────────
 
+
 class _ConsoleCapture(io.TextIOBase):
     """
     Drop-in replacement for sys.stderr that:
@@ -46,14 +48,15 @@ class _ConsoleCapture(io.TextIOBase):
       • Passes everything through to the real stderr ONLY when the TUI is not
         active, so messages never bleed through the urwid layout.
     """
+
     MAX_LINES = 200
 
     def __init__(self, real_stderr):
         super().__init__()
         self._real = real_stderr
-        self._buf  = deque(maxlen=self.MAX_LINES)
+        self._buf = deque(maxlen=self.MAX_LINES)
         self._lock = threading.Lock()
-        self._partial = ""          # accumulate until newline
+        self._partial = ""  # accumulate until newline
         # Set to True by AdaptiveDJTUI.run() while the urwid loop is active.
         # When True, writes are captured only — never forwarded to the raw
         # terminal, which would bleed through the urwid layout.
@@ -67,11 +70,11 @@ class _ConsoleCapture(io.TextIOBase):
             self._real.write(text)
             self._real.flush()
         self._partial += text
-        while '\n' in self._partial:
-            line, self._partial = self._partial.split('\n', 1)
+        while "\n" in self._partial:
+            line, self._partial = self._partial.split("\n", 1)
             line = line.rstrip()
             if line:
-                ts = datetime.now().strftime('%H:%M:%S')
+                ts = datetime.now().strftime("%H:%M:%S")
                 with self._lock:
                     self._buf.append(f"[{ts}] {line}")
         return len(text)
@@ -92,6 +95,7 @@ class _ConsoleCapture(io.TextIOBase):
 # captured from the very first moment, including startup messages.
 _console_capture: Optional[_ConsoleCapture] = None
 
+
 def _install_console_capture():
     global _console_capture
     if _console_capture is None:
@@ -106,7 +110,7 @@ _install_console_capture()
 
 # Width (in terminal columns) reserved for the album-art column inside the
 # Now Playing box.  Includes the inner LineBox borders (2 cols each side = 2).
-ART_COLS = 33    # terminal columns wide for the album art area (no inner box)
+ART_COLS = 33  # terminal columns wide for the album art area (no inner box)
 
 # Header height in rows (urwid Frame header is exactly 1 row tall when the
 # header widget is a simple Filler(Text(…))).
@@ -161,88 +165,95 @@ class AdaptiveDJTUI:
 
     def _setup_urwid(self):
         palette = [
-            ('header',        'white,bold',      'dark blue'),
-            ('footer',        'white',            'dark blue'),
-            ('playing',       'light green,bold', 'default'),
-            ('paused',        'yellow,bold',      'default'),
-            ('track_info',    'white',            'default'),
-            ('vibe',          'light cyan',       'default'),
-            ('queue_item',    'light gray',       'default'),
-            ('queue_current', 'black,bold',       'light green'),
-            ('liked',         'light red,bold',   'default'),
-            ('seek_bar',      'white',            'dark gray'),
-            ('seek_progress', 'black',            'light green'),
-            ('console_text',  'dark cyan',        'default'),
-            ('console_warn',  'yellow',           'default'),
-            ('console_err',   'light red',        'default'),
-            ('queue_focused',  'black,bold',       'dark cyan'),
+            ("header", "white,bold", "dark blue"),
+            ("footer", "white", "dark blue"),
+            ("playing", "light green,bold", "default"),
+            ("paused", "yellow,bold", "default"),
+            ("track_info", "white", "default"),
+            ("vibe", "light cyan", "default"),
+            ("queue_item", "light gray", "default"),
+            ("queue_current", "black,bold", "light green"),
+            ("liked", "light red,bold", "default"),
+            ("seek_bar", "white", "dark gray"),
+            ("seek_progress", "black", "light green"),
+            ("console_text", "dark cyan", "default"),
+            ("console_warn", "yellow", "default"),
+            ("console_err", "light red", "default"),
+            ("queue_focused", "black,bold", "dark cyan"),
         ]
 
         # ── Header ──
-        self.header_text = urwid.Text(
-            "🎵 Adaptive Session AI DJ", align='center')
-        self.header = urwid.AttrMap(
-            urwid.Filler(self.header_text), 'header')
+        self.header_text = urwid.Text("🎵 Adaptive Session AI DJ", align="center")
+        self.header = urwid.AttrMap(urwid.Filler(self.header_text), "header")
 
         # ── Now Playing: right column widgets ──
-        self.status_text = urwid.Text(('paused', '⏸ Paused'))
+        self.status_text = urwid.Text(("paused", "⏸ Paused"))
         self.artist_text = urwid.Text("Artist: ---")
-        self.album_text  = urwid.Text("Album: ---")
-        self.track_text  = urwid.Text("Track: ---")
-        self.vibe_text   = urwid.Text(('vibe', "Vibe: Starting session…"))
+        self.album_text = urwid.Text("Album: ---")
+        self.track_text = urwid.Text("Track: ---")
+        self.vibe_text = urwid.Text(("vibe", "Vibe: Starting session…"))
 
         self.seek_bar_progress = urwid.ProgressBar(
-            'seek_bar', 'seek_progress', current=0, done=100)
-        self.seek_time_text = urwid.Text("0:00 / 0:00", align='center')
+            "seek_bar", "seek_progress", current=0, done=100
+        )
+        self.seek_time_text = urwid.Text("0:00 / 0:00", align="center")
 
-        right_col = urwid.Pile([
-            urwid.AttrMap(self.status_text, 'track_info'),
-            urwid.Divider(),
-            urwid.AttrMap(self.artist_text, 'track_info'),
-            urwid.AttrMap(self.album_text,  'track_info'),
-            urwid.AttrMap(self.track_text,  'track_info'),
-            urwid.Divider(),
-            urwid.AttrMap(self.seek_bar_progress, 'seek_bar'),
-            self.seek_time_text,
-            urwid.Divider(),
-            urwid.AttrMap(self.vibe_text, 'vibe'),
-        ])
+        right_col = urwid.Pile(
+            [
+                urwid.AttrMap(self.status_text, "track_info"),
+                urwid.Divider(),
+                urwid.AttrMap(self.artist_text, "track_info"),
+                urwid.AttrMap(self.album_text, "track_info"),
+                urwid.AttrMap(self.track_text, "track_info"),
+                urwid.Divider(),
+                urwid.AttrMap(self.seek_bar_progress, "seek_bar"),
+                self.seek_time_text,
+                urwid.Divider(),
+                urwid.AttrMap(self.vibe_text, "vibe"),
+            ]
+        )
 
         # ── Now Playing: left column (album art area) ──
         # No LineBox here — a border widget renders visible box characters in
         # the terminal that show through behind the ueberzug overlay.
         # The art area is a plain Filler; ueberzug draws the image on top.
-        self.album_art_placeholder = urwid.Text(" ", align='center')
-        art_inner = urwid.Filler(self.album_art_placeholder, valign='middle')
+        self.album_art_placeholder = urwid.Text(" ", align="center")
+        art_inner = urwid.Filler(self.album_art_placeholder, valign="middle")
 
         # Two-column row: art (fixed width) | track info (rest)
-        np_columns = urwid.Columns([
-            ('fixed', ART_COLS, art_inner),
-            ('weight', 1, urwid.Padding(right_col, left=1)),
-        ])
+        np_columns = urwid.Columns(
+            [
+                ("fixed", ART_COLS, art_inner),
+                ("weight", 1, urwid.Padding(right_col, left=1)),
+            ]
+        )
 
-        now_playing_content = urwid.Pile([
-            urwid.Divider(),
-            np_columns,
-            urwid.Divider(),
-        ])
+        now_playing_content = urwid.Pile(
+            [
+                urwid.Divider(),
+                np_columns,
+                urwid.Divider(),
+            ]
+        )
 
-        self.now_playing_box = urwid.LineBox(
-            now_playing_content, title="♪ Now Playing")
+        self.now_playing_box = urwid.LineBox(now_playing_content, title="♪ Now Playing")
 
         # ── Console panel ──
         self.console_walker = urwid.SimpleFocusListWalker(
-            [urwid.Text(('console_text', "── console ready ──"))])
+            [urwid.Text(("console_text", "── console ready ──"))]
+        )
         console_lb = urwid.ListBox(self.console_walker)
         # BoxAdapter gives the ListBox a fixed height inside a Pile
         self.console_box = urwid.LineBox(
-            urwid.BoxAdapter(console_lb, CONSOLE_ROWS),
-            title="System Console")
+            urwid.BoxAdapter(console_lb, CONSOLE_ROWS), title="System Console"
+        )
 
         # ── Queue panel ── (navigable with ↑↓, press Enter to play)
         self.queue_walker = urwid.SimpleFocusListWalker([])
         self.queue_listbox = urwid.ListBox(self.queue_walker)
-        self.queue_box = urwid.LineBox(self.queue_listbox, title="Upcoming Queue  [↑↓ navigate · ENTER play]")
+        self.queue_box = urwid.LineBox(
+            self.queue_listbox, title="Upcoming Queue  [↑↓ navigate · ENTER play]"
+        )
 
         # ── Main layout ──
         # now_playing_box: weight 0 means it takes only its natural (pack) height.
@@ -250,26 +261,34 @@ class AdaptiveDJTUI:
         # is to give now_playing a fixed row count computed at render time.
         # Instead we use weight proportions and let urwid divide the space.
         # Proportions: now_playing=3, queue=2 gives now_playing ~60% of body.
-        main_pile = urwid.Pile([
-            ('weight', 3, self.now_playing_box),
-            (CONSOLE_ROWS + 2, self.console_box),   # fixed: CONSOLE_ROWS + 2 border rows
-            ('weight', 2, self.queue_box),
-        ])
+        main_pile = urwid.Pile(
+            [
+                ("weight", 3, self.now_playing_box),
+                (
+                    CONSOLE_ROWS + 2,
+                    self.console_box,
+                ),  # fixed: CONSOLE_ROWS + 2 border rows
+                ("weight", 2, self.queue_box),
+            ]
+        )
 
         # ── Footer ──
-        footer_text = urwid.Text([
-            " SPACE=Play/Pause  ",
-            "N=Next  ",
-            "V=Vibe  ",
-            "L=Like  ",
-            "<,>=Vol  ",
-            "←→=Seek  ",
-            "↑↓=Queue  ",
-            "ENTER=Play  ",
-            "I=Info  ",
-            "Q=Quit",
-        ], align='center')
-        self.footer = urwid.AttrMap(urwid.Filler(footer_text), 'footer')
+        footer_text = urwid.Text(
+            [
+                " SPACE=Play/Pause  ",
+                "N=Next  ",
+                "V=Vibe  ",
+                "L=Like  ",
+                "<,>=Vol  ",
+                "←→=Seek  ",
+                "↑↓=Queue  ",
+                "ENTER=Play  ",
+                "I=Info  ",
+                "Q=Quit",
+            ],
+            align="center",
+        )
+        self.footer = urwid.AttrMap(urwid.Filler(footer_text), "footer")
 
         # ── Frame ──
         self.frame = urwid.Frame(
@@ -298,31 +317,44 @@ class AdaptiveDJTUI:
         # Don't lowercase arrow keys or special keys
         key_lower = key.lower() if isinstance(key, str) else key
 
-        if   key_lower == 'q':      self._quit()
-        elif key_lower == ' ':      self._toggle_play_pause()
-        elif key_lower == 'n':      self._skip_track()
-        elif key_lower == 'v':      self._skip_vibe()
-        elif key_lower == 'l':      self._like_track()
-        elif key_lower == 'i':      self._show_context_info()
-        elif key == 'up':           self._queue_navigate(-1)
-        elif key == 'down':         self._queue_navigate(+1)
-        elif key == 'enter':        self._queue_play_selected()
-        elif key == 'right':        self._seek_forward()
-        elif key == 'left':         self._seek_backward()
-        elif key_lower in (',', '<'):  self._volume_down()
-        elif key_lower in ('.', '>'):  self._volume_up()
+        if key_lower == "q":
+            self._quit()
+        elif key_lower == " ":
+            self._toggle_play_pause()
+        elif key_lower == "n":
+            self._skip_track()
+        elif key_lower == "v":
+            self._skip_vibe()
+        elif key_lower == "l":
+            self._like_track()
+        elif key_lower == "i":
+            self._show_context_info()
+        elif key == "up":
+            self._queue_navigate(-1)
+        elif key == "down":
+            self._queue_navigate(+1)
+        elif key == "enter":
+            self._queue_play_selected()
+        elif key == "right":
+            self._seek_forward()
+        elif key == "left":
+            self._seek_backward()
+        elif key_lower in (",", "<"):
+            self._volume_down()
+        elif key_lower in (".", ">"):
+            self._volume_up()
 
     # ── Actions ──────────────────────────────────────────────────────────────
 
     def _toggle_play_pause(self):
         s = self.dj.mpd_controller.get_status()
-        if s['state'] == 'playing':
+        if s["state"] == "playing":
             self.dj.mpd_controller.pause()
         else:
             self.dj.mpd_controller.play()
 
     def _skip_track(self):
-        t = self.current_status.get('track_file')
+        t = self.current_status.get("track_file")
         if t:
             self.dj.feedback_handler.process_skip(t)
         # Mark skip time so background loop does not also fire process_full_listen
@@ -330,7 +362,7 @@ class AdaptiveDJTUI:
         self.dj.mpd_controller.next_track()
 
     def _skip_vibe(self):
-        t = self.current_status.get('track_file')
+        t = self.current_status.get("track_file")
         if t:
             self.dj.feedback_handler.process_vibe_skip(t)
         # Mark skip time so background loop does not also fire process_full_listen
@@ -338,7 +370,7 @@ class AdaptiveDJTUI:
         self.dj.mpd_controller.next_track()
 
     def _like_track(self):
-        t = self.current_status.get('track_file')
+        t = self.current_status.get("track_file")
         if t:
             self.dj.feedback_handler.process_like(t)
             self.liked_tracks.add(t)
@@ -361,20 +393,19 @@ class AdaptiveDJTUI:
         if not queue:
             return
         # Exclude the currently playing track from selectable items
-        current = self.current_status.get('track_file')
+        current = self.current_status.get("track_file")
         selectable = [t for t in queue if t != current]
         if not selectable:
             return
-        self.queue_focus_index = max(0, min(
-            len(selectable) - 1,
-            self.queue_focus_index + direction
-        ))
+        self.queue_focus_index = max(
+            0, min(len(selectable) - 1, self.queue_focus_index + direction)
+        )
         self._update_queue_display()
 
     def _queue_play_selected(self):
         """Play the highlighted queue item immediately."""
         queue = self.dj.queue_manager.get_upcoming_tracks()
-        current = self.current_status.get('track_file')
+        current = self.current_status.get("track_file")
         selectable = [t for t in queue if t != current]
         if not selectable or self.queue_focus_index >= len(selectable):
             return
@@ -394,8 +425,9 @@ class AdaptiveDJTUI:
             raise urwid.ExitMainLoop()
 
     def _show_context_info(self):
-        if not config.enable_time_context or \
-                not hasattr(self.dj.session_state, 'time_context'):
+        if not config.enable_time_context or not hasattr(
+            self.dj.session_state, "time_context"
+        ):
             return
 
         stats = self.dj.session_state.time_context.get_stats()
@@ -408,12 +440,13 @@ class AdaptiveDJTUI:
             "",
             "─" * 50,
         ]
-        for period, d in stats['periods'].items():
-            status = "✓" if d['has_data'] else "○"
-            last   = d['last_update'] or "never"
+        for period, d in stats["periods"].items():
+            status = "✓" if d["has_data"] else "○"
+            last = d["last_update"] or "never"
             lines.append(
                 f"{status} {period.capitalize():12} "
-                f"{d['updates']:4d} updates   last: {last}")
+                f"{d['updates']:4d} updates   last: {last}"
+            )
         lines += [
             "─" * 50,
             f"Total updates: {stats['total_updates']}",
@@ -422,13 +455,16 @@ class AdaptiveDJTUI:
         ]
 
         if self.use_urwid:
-            overlay_text  = urwid.Text("\n".join(lines))
-            overlay_fill  = urwid.Filler(overlay_text, valign='top')
-            overlay_box   = urwid.LineBox(overlay_fill, title="Context Info")
+            overlay_text = urwid.Text("\n".join(lines))
+            overlay_fill = urwid.Filler(overlay_text, valign="top")
+            overlay_box = urwid.LineBox(overlay_fill, title="Context Info")
             overlay = urwid.Overlay(
-                overlay_box, self.frame,
-                align='center',  width=('relative', 70),
-                valign='middle', height=('relative', 70),
+                overlay_box,
+                self.frame,
+                align="center",
+                width=("relative", 70),
+                valign="middle",
+                height=("relative", 70),
             )
             orig = self.loop.widget
             self.loop.widget = overlay
@@ -464,46 +500,44 @@ class AdaptiveDJTUI:
             return
 
         # Status / volume
-        volume = status.get('volume', 100)
-        state  = status.get('state', 'stopped')
-        if state == 'playing':
-            self.status_text.set_text(
-                ('playing', f'▶  Playing   Vol: {volume}%'))
-        elif state == 'paused':
-            self.status_text.set_text(
-                ('paused', f'⏸  Paused    Vol: {volume}%'))
+        volume = status.get("volume", 100)
+        state = status.get("state", "stopped")
+        if state == "playing":
+            self.status_text.set_text(("playing", f"▶  Playing   Vol: {volume}%"))
+        elif state == "paused":
+            self.status_text.set_text(("paused", f"⏸  Paused    Vol: {volume}%"))
         else:
-            self.status_text.set_text(f'⏹  Stopped   Vol: {volume}%')
+            self.status_text.set_text(f"⏹  Stopped   Vol: {volume}%")
 
         # Track metadata
-        artist     = status.get('artist', 'Unknown Artist')
-        album      = status.get('album',  'Unknown Album')
-        title      = status.get('title',  'Unknown Title')
-        track_file = status.get('track_file')
+        artist = status.get("artist", "Unknown Artist")
+        album = status.get("album", "Unknown Album")
+        title = status.get("title", "Unknown Title")
+        track_file = status.get("track_file")
 
         self.artist_text.set_text(f"Artist:  {artist}")
-        self.album_text.set_text( f"Album:   {album}")
+        self.album_text.set_text(f"Album:   {album}")
 
         if track_file and track_file in self.liked_tracks:
-            self.track_text.set_text(["Track:   ", ('liked', '❤ '), title])
+            self.track_text.set_text(["Track:   ", ("liked", "❤ "), title])
         else:
             self.track_text.set_text(f"Track:   {title}")
 
         # Seek bar
-        position = status.get('position', 0)
-        duration = status.get('duration', 0)
+        position = status.get("position", 0)
+        duration = status.get("duration", 0)
         if duration > 0:
-            self.seek_bar_progress.set_completion(
-                int((position / duration) * 100))
+            self.seek_bar_progress.set_completion(int((position / duration) * 100))
             self.seek_time_text.set_text(
-                f"{self._fmt(position)} / {self._fmt(duration)}")
+                f"{self._fmt(position)} / {self._fmt(duration)}"
+            )
         else:
             self.seek_bar_progress.set_completion(0)
             self.seek_time_text.set_text("0:00 / 0:00")
 
         # Vibe
         vibe = self.dj.session_state.get_vibe_description()
-        self.vibe_text.set_text(('vibe', f"Vibe:    {vibe}"))
+        self.vibe_text.set_text(("vibe", f"Vibe:    {vibe}"))
 
         # Console
         self._update_console()
@@ -563,9 +597,9 @@ class AdaptiveDJTUI:
         # RIGHT_COL_ROWS = 10 matches the fixed Pile height exactly.
         art_h = RIGHT_COL_ROWS
 
-        self.album_art_renderer.render(art_path,
-                                       x=x_art, y=y_art,
-                                       width=art_w, height=art_h)
+        self.album_art_renderer.render(
+            art_path, x=x_art, y=y_art, width=art_w, height=art_h
+        )
 
     # ── Console update ────────────────────────────────────────────────────────
 
@@ -581,14 +615,13 @@ class AdaptiveDJTUI:
         # Show only the last CONSOLE_ROWS lines so the widget fills neatly
         for line in lines[-CONSOLE_ROWS:]:
             # Colour-code by content
-            if any(w in line for w in ('error', 'Error', 'ERROR', 'failed', 'Failed')):
-                attr = 'console_err'
-            elif any(w in line for w in ('warn', 'Warn', 'WARN', 'shifted', 'Vibe')):
-                attr = 'console_warn'
+            if any(w in line for w in ("error", "Error", "ERROR", "failed", "Failed")):
+                attr = "console_err"
+            elif any(w in line for w in ("warn", "Warn", "WARN", "shifted", "Vibe")):
+                attr = "console_warn"
             else:
-                attr = 'console_text'
-            self.console_walker.append(
-                urwid.AttrMap(urwid.Text(line), attr))
+                attr = "console_text"
+            self.console_walker.append(urwid.AttrMap(urwid.Text(line), attr))
 
         # Scroll to bottom
         try:
@@ -599,8 +632,8 @@ class AdaptiveDJTUI:
     # ── Queue update ──────────────────────────────────────────────────────────
 
     def _update_queue_display(self):
-        queue         = self.dj.queue_manager.get_upcoming_tracks()
-        current_track = self.current_status.get('track_file')
+        queue = self.dj.queue_manager.get_upcoming_tracks()
+        current_track = self.current_status.get("track_file")
 
         self.queue_walker.clear()
 
@@ -614,28 +647,26 @@ class AdaptiveDJTUI:
         selectable_idx = 0
         display_num = 0
         for tf in queue:
-            meta   = playlist_meta.get(tf, {})
-            artist = meta.get('artist', 'Unknown Artist')
-            album  = meta.get('album',  'Unknown Album')
-            title  = meta.get('title',  Path(tf).stem)
-            label  = f"{artist} – {album} – {title}"
+            meta = playlist_meta.get(tf, {})
+            artist = meta.get("artist", "Unknown Artist")
+            album = meta.get("album", "Unknown Album")
+            title = meta.get("title", Path(tf).stem)
+            label = f"{artist} – {album} – {title}"
             if tf in self.liked_tracks:
                 label = f"❤ {label}"
 
             if tf == current_track:
-                item = urwid.AttrMap(
-                    urwid.Text(f"  ▶ {label}"), 'queue_current')
+                item = urwid.AttrMap(urwid.Text(f"  ▶ {label}"), "queue_current")
             else:
                 display_num += 1
-                is_focused = (selectable_idx == self.queue_focus_index)
+                is_focused = selectable_idx == self.queue_focus_index
                 if is_focused:
                     prefix = f"  » {display_num}."
-                    attr = 'queue_focused'
+                    attr = "queue_focused"
                 else:
                     prefix = f"  {display_num}."
-                    attr = 'queue_item'
-                item = urwid.AttrMap(
-                    urwid.Text(f"{prefix} {label}"), attr)
+                    attr = "queue_item"
+                item = urwid.AttrMap(urwid.Text(f"{prefix} {label}"), attr)
                 selectable_idx += 1
             self.queue_walker.append(item)
 
@@ -647,24 +678,24 @@ class AdaptiveDJTUI:
     # ── Simple (non-urwid) display ────────────────────────────────────────────
 
     def _update_simple_display(self, status):
-        print("\033[2J\033[H", end='')
+        print("\033[2J\033[H", end="")
         print("=" * 60)
         print("Adaptive Session AI DJ  (simple mode)")
         print("=" * 60)
 
-        icon = "▶" if status['state'] == 'playing' else "⏸"
+        icon = "▶" if status["state"] == "playing" else "⏸"
         print(f"\n{icon} {status['state'].upper()}")
         print(f"\nArtist: {status.get('artist', 'Unknown')}")
-        print(f"Album:  {status.get('album',  'Unknown')}")
+        print(f"Album:  {status.get('album', 'Unknown')}")
 
-        tf = status.get('track_file')
-        t  = status.get('title', 'Unknown')
+        tf = status.get("track_file")
+        t = status.get("title", "Unknown")
         if tf and tf in self.liked_tracks:
             t = f"❤ {t}"
         print(f"Track:  {t}")
 
-        pos = status.get('position', 0)
-        dur = status.get('duration', 0)
+        pos = status.get("position", 0)
+        dur = status.get("duration", 0)
         if dur > 0:
             bar = "█" * int(pos / dur * 40) + "░" * (40 - int(pos / dur * 40))
             print(f"\n[{bar}]")
@@ -675,8 +706,7 @@ class AdaptiveDJTUI:
 
         print("\n" + "─" * 60)
         print("Upcoming Queue:")
-        for i, track in enumerate(
-                self.dj.queue_manager.get_upcoming_tracks()[:5], 1):
+        for i, track in enumerate(self.dj.queue_manager.get_upcoming_tracks()[:5], 1):
             liked = "❤ " if track in self.liked_tracks else ""
             print(f"  {i}. {liked}{Path(track).stem}")
 
@@ -717,6 +747,7 @@ class AdaptiveDJTUI:
 
     def _run_simple_mode(self):
         import select, termios, tty
+
         old = termios.tcgetattr(sys.stdin)
         try:
             tty.setcbreak(sys.stdin.fileno())
@@ -724,21 +755,30 @@ class AdaptiveDJTUI:
                 self._update_display()
                 if select.select([sys.stdin], [], [], 0.5)[0]:
                     key = sys.stdin.read(1)
-                    if key == '\x1b':
+                    if key == "\x1b":
                         if select.select([sys.stdin], [], [], 0.05)[0]:
                             key += sys.stdin.read(1)
                         if select.select([sys.stdin], [], [], 0.05)[0]:
                             key += sys.stdin.read(1)
 
-                    if   key.lower() == 'q':    self._quit()
-                    elif key == ' ':            self._toggle_play_pause()
-                    elif key.lower() == 'n':    self._skip_track()
-                    elif key.lower() == 'v':    self._skip_vibe()
-                    elif key.lower() == 'l':    self._like_track()
-                    elif key == '\x1b[A':       self._volume_up()
-                    elif key == '\x1b[B':       self._volume_down()
-                    elif key == '\x1b[C':       self._seek_forward()
-                    elif key == '\x1b[D':       self._seek_backward()
+                    if key.lower() == "q":
+                        self._quit()
+                    elif key == " ":
+                        self._toggle_play_pause()
+                    elif key.lower() == "n":
+                        self._skip_track()
+                    elif key.lower() == "v":
+                        self._skip_vibe()
+                    elif key.lower() == "l":
+                        self._like_track()
+                    elif key == "\x1b[A":
+                        self._volume_up()
+                    elif key == "\x1b[B":
+                        self._volume_down()
+                    elif key == "\x1b[C":
+                        self._seek_forward()
+                    elif key == "\x1b[D":
+                        self._seek_backward()
         except KeyboardInterrupt:
             pass
         finally:
