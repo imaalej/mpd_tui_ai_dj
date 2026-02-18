@@ -53,7 +53,7 @@ bash start.sh
 
 **First run only — embeddings:** The DJ needs audio fingerprints of your library to find musically similar tracks. You'll be offered two options:
 
-- **Real embeddings** via [CLAP](https://github.com/LAION-AI/CLAP) — audio-based, best quality, slow (~1–60 min depending on library size, requires ~4 GB model download)
+- **Real embeddings** via [CLAP](https://github.com/LAION-AI/CLAP) — audio-based, best quality, slow (~1–60 min depending on library size, requires ~1 GB model download)
 - **Demo embeddings** — random vectors, instant, good enough to try the interface
 
 You only ever run this once. The result is saved to `data/embeddings/`.
