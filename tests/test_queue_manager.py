@@ -153,3 +153,103 @@ def test_the_deleted_queue_api_stays_deleted():
                  '_sync_to_mpd', '_generate_tracks', 'get_upcoming_tracks',
                  'on_track_started'):
         assert not hasattr(QueueManager, name), f"{name} came back"
+
+
+# ── requeue_next: ENTER on the session-history panel (audit H1d) ─────────────
+
+
+def _start_playing(dj_parts):
+    dj_parts.queue_manager.ensure_one_ahead(mpd_state='stopped')
+    dj_parts.mpd.play()
+    dj_parts.queue_manager.ensure_one_ahead(mpd_state='playing')
+    return dj_parts.mpd.get_queue()
+
+
+def test_requeue_next_replaces_the_lookahead_with_the_chosen_track(dj_parts):
+    current, lookahead = _start_playing(dj_parts)
+    chosen = next(t for t in dj_parts.library.track_list
+                  if t not in (current, lookahead))
+
+    assert dj_parts.queue_manager.requeue_next(chosen) is True
+    assert dj_parts.mpd.get_queue() == [current, chosen]
+
+
+def test_requeue_next_adds_before_it_deletes(dj_parts):
+    """
+    The inverse of `replace_next()`'s order, and deliberately so.  The track is
+    already known here, so there is nothing to exclude — and appending first
+    means the queue is momentarily three deep rather than one deep, so a refusal
+    from MPD cannot leave the session short.
+    """
+    current, lookahead = _start_playing(dj_parts)
+    chosen = next(t for t in dj_parts.library.track_list
+                  if t not in (current, lookahead))
+    dj_parts.mpd.calls.clear()
+
+    dj_parts.queue_manager.requeue_next(chosen)
+
+    calls = dj_parts.mpd.calls
+    assert calls.index(f'add:{chosen}') < calls.index('del:2')
+    assert 'next' not in calls, "requeuing must not advance"
+    assert 'play' not in calls, "requeuing must not restart playback"
+
+
+def test_a_refused_track_leaves_the_queue_exactly_as_it_was(dj_parts):
+    current, lookahead = _start_playing(dj_parts)
+    chosen = next(t for t in dj_parts.library.track_list
+                  if t not in (current, lookahead))
+    dj_parts.mpd.refuse.add(chosen)
+
+    assert dj_parts.queue_manager.requeue_next(chosen) is False
+    assert dj_parts.mpd.get_queue() == [current, lookahead]
+
+
+def test_requeueing_with_no_lookahead_just_adds(dj_parts):
+    """
+    A skip that could not refill, or the moment right after a track boundary.
+    `mpc del 2` past the end of the queue exits non-zero (verified, §M1), so the
+    delete is skipped rather than attempted and ignored.
+    """
+    dj_parts.queue_manager.ensure_one_ahead(mpd_state='stopped')
+    dj_parts.mpd.queue = dj_parts.mpd.queue[:1]
+    dj_parts.mpd.play()
+    current = dj_parts.mpd.get_queue()[0]
+    chosen = next(t for t in dj_parts.library.track_list if t != current)
+    dj_parts.mpd.calls.clear()
+
+    assert dj_parts.queue_manager.requeue_next(chosen) is True
+    assert dj_parts.mpd.get_queue() == [current, chosen]
+    assert not any(c.startswith('del:') for c in dj_parts.mpd.calls)
+
+
+def test_the_dropped_lookahead_is_given_back_to_the_selector(dj_parts):
+    """
+    It never played, so leaving it recorded would sit it inside the 20-track
+    replay gap having never been heard — the same reasoning as `replace_next()`
+    and `TrackSelector.forget_selection()` (§0b, Stage 2).
+    """
+    current, lookahead = _start_playing(dj_parts)
+    chosen = next(t for t in dj_parts.library.track_list
+                  if t not in (current, lookahead))
+    assert lookahead in dj_parts.selector.play_history
+
+    dj_parts.queue_manager.requeue_next(chosen)
+
+    assert lookahead not in dj_parts.selector.play_history
+
+
+def test_a_deliberate_replay_is_not_recorded_as_a_selection(dj_parts):
+    """
+    It was chosen by the listener, not drawn, so recording it would let a replay
+    push the selector's own anti-repetition history around.
+    """
+    current, lookahead = _start_playing(dj_parts)
+    chosen = next(t for t in dj_parts.library.track_list
+                  if t not in (current, lookahead))
+    before = list(dj_parts.selector.recent_history)
+
+    dj_parts.queue_manager.requeue_next(chosen)
+
+    assert chosen not in dj_parts.selector.recent_history
+    assert list(dj_parts.selector.recent_history) == \
+        [t for t in before if t != lookahead]

@@ -199,9 +199,14 @@ class FakeMPD:
     def list_all_tracks(self):
         return list(self.known_tracks)
 
-    def get_playlist_metadata(self):
-        return {t: {'artist': 'Test Artist', 'album': 'Test Album',
-                    'title': Path(t).stem, 'file': t} for t in self.queue}
+    def fetch_track_tags(self, track_file):
+        # Per-track and cached in the real controller.  Note there is no
+        # `get_playlist_metadata` here: it was built from `mpc playlist`, and
+        # with consume on a played track is gone from it — so it could never
+        # answer for the tracks the session-history panel shows.
+        self.calls.append(f'tags:{track_file}')
+        return {'artist': 'Test Artist', 'album': 'Test Album',
+                'title': Path(track_file).stem, 'file': track_file}
 
     def set_volume(self, volume):
         self.volume = max(0, min(100, volume))
@@ -277,6 +282,125 @@ def dj_parts(library, fake_mpd, rng):
         user_taste=user_taste, exploration=exploration, selector=selector,
         queue_manager=queue_manager, feedback=feedback,
     )
+
+
+class FakeArtRenderer:
+    """
+    An album-art renderer that records what it was asked to draw.
+
+    Injected so the widget tests can build the real tree without detecting image
+    protocols and leaving a `ueberzugpp` child process behind — and so H8's
+    geometry can be asserted against the calls it produces rather than inferred
+    from the source.
+    """
+
+    def __init__(self, available=True):
+        self.available = available
+        self.protocol = None
+        self.renders = []
+        self.clears = 0
+        self.art_for = {}
+
+    def is_available(self):
+        return self.available
+
+    def find_album_art(self, track_file):
+        return self.art_for.get(track_file)
+
+    def render(self, path, x, y, width, height):
+        self.renders.append({'path': path, 'x': x, 'y': y,
+                             'width': width, 'height': height})
+
+    def clear(self):
+        self.clears += 1
+
+    def force_redraw(self):
+        pass
+
+
+@pytest.fixture
+def fake_art():
+    return FakeArtRenderer()
+
+
+@pytest.fixture
+def stub_bank(rng):
+    """A small DescriptorBank over an arbitrary space, for readout tests."""
+    from descriptor_bank import DescriptorBank
+
+    labels = ['calm', 'driving', 'nocturnal', 'orchestral', 'gritty', 'sparse']
+    text = rng.standard_normal((len(labels), 16)).astype(np.float32)
+    text /= np.linalg.norm(text, axis=1, keepdims=True)
+    return DescriptorBank(labels=labels, text_embeddings=text,
+                          mean=np.zeros(len(labels), dtype=np.float32),
+                          std=np.ones(len(labels), dtype=np.float32))
+
+
+@pytest.fixture
+def dj_stub(dj_parts, library):
+    """
+    An `AdaptiveDJWithTUI` stand-in carrying the real selection stack.
+
+    The TUI reaches into `dj.session_state`, `dj.queue_manager`,
+    `dj.feedback_handler`, `dj.mpd_controller`, `dj.track_selector`,
+    `dj.user_taste`, `dj.exploration_controller`, `dj.track_library` and
+    `dj.descriptor_bank`, plus `dj.skip_current_track()`.  All of them are the
+    real components except MPD, which is `FakeMPD` — the same principle
+    `dj_parts` is built on.
+    """
+    import types
+
+    from descriptor_bank import DescriptorBank
+
+    rng = np.random.default_rng(99)
+    labels = ['calm', 'driving', 'nocturnal', 'orchestral', 'gritty', 'sparse']
+    text = rng.standard_normal((len(labels), library.dimension)).astype(np.float32)
+    text /= np.linalg.norm(text, axis=1, keepdims=True)
+    bank = DescriptorBank(labels=labels, text_embeddings=text,
+                          mean=np.zeros(len(labels), dtype=np.float32),
+                          std=np.ones(len(labels), dtype=np.float32))
+
+    dj = types.SimpleNamespace(
+        mpd_controller=dj_parts.mpd,
+        session_state=dj_parts.session_state,
+        user_taste=dj_parts.user_taste,
+        exploration_controller=dj_parts.exploration,
+        track_selector=dj_parts.selector,
+        track_library=library,
+        queue_manager=dj_parts.queue_manager,
+        feedback_handler=dj_parts.feedback,
+        descriptor_bank=bank,
+    )
+    dj.skips = []
+    dj.skip_current_track = lambda: dj.skips.append(True)
+    return dj
+
+
+@pytest.fixture
+def tui(dj_stub, fake_art):
+    """
+    The real widget tree, built against the stand-in DJ.
+
+    Nothing in the suite constructed this before Stage 3 — which is how H1, C1
+    and C4 all shipped under a green suite, and how a `WidgetError` on every
+    terminal shorter than 33 rows shipped with them.
+    """
+    import signal as _signal
+
+    from tui import AdaptiveDJTUI
+
+    previous = _signal.getsignal(_signal.SIGWINCH)
+    instance = AdaptiveDJTUI(dj_stub, art_renderer=fake_art)
+    try:
+        yield instance
+    finally:
+        # `_setup_urwid` installs a SIGWINCH handler process-wide.
+        _signal.signal(_signal.SIGWINCH, previous)
+        if instance._exit_pipe is not None:
+            try:
+                instance.loop.remove_watch_pipe(instance._exit_pipe)
+            except Exception:
+                pass
 
 
 @pytest.fixture

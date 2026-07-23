@@ -13,16 +13,21 @@ A terminal-based DJ that learns your taste in real time and curates a continuous
 ║  │             │   Album:   Promises                               ║
 ║  │             │   Track:   ❤ LesAlpx                              ║
 ║  └─────────────┘   [████████████░░░░░░░░░░░░]  3:12 / 8:44         ║
-║                    Session: 14 tracks played                       ║
+║                    ♪ hypnotic · nocturnal · sparse                 ║
+║                    ⟳ 2 of 3 held over 5 tracks · 14 played         ║
 ╠════════════════════════════════════════════════════════════════════╣
 ║  System Console                                                    ║
 ║  [14:32:01] Exploration decreased to 0.18 (6 consecutive listens)  ║
 ╠════════════════════════════════════════════════════════════════════╣
-║  Up Next                                                           ║
-║    ↓ next:  Pharoah Sanders – Karma – The Creator Has a Master Plan ║
-║                                                                    ║
+║  Session                                                           ║
+║    ↓ next:  Pharoah Sanders – The Creator Has a Master Plan        ║
+║  ──────────────────────────────────────────────────────────────    ║
+║   ♥♪ Floating Points – LesAlpx                                     ║
+║    ✓ Alice Coltrane – Journey in Satchidananda                     ║
+║    ⏭ Kamasi Washington – Change of the Guard                       ║
 ╠════════════════════════════════════════════════════════════════════╣
-║ SPACE=Play/Pause  N=Next  L=Like  <,>=Vol  ←→=Seek  I=Info  Q=Quit ║
+║ [SPACE] Pause  [N] Skip  [L] Like  [↑↓] History  [ENTER] Replay    ║
+║ [,.] Vol  [←→] Seek  [I] Info  [Q] Quit                            ║
 ╚════════════════════════════════════════════════════════════════════╝
 ```
 
@@ -79,10 +84,17 @@ mpc status   # should show your track count
 | `Space` | Play / Pause |
 | `N` | Skip track — escalates if you keep pressing it (see below) |
 | `L` | Like current track |
+| `↑` / `↓` | Move the cursor through the session history |
+| `Enter` | Play the track under the cursor again — it becomes `↓ next:` |
 | `,` / `.` | Volume down / up |
 | `←` / `→` | Seek backward / forward 10s |
-| `I` | Show model state (sampling, taste, exploration, scoring weights) |
+| `I` | Show model state (descriptors, sampling, taste, exploration, weights) — `↑↓` scrolls it |
 | `Q` | Quit |
+
+These are the same bindings in the urwid interface and in the plain-text fallback,
+and the footer advertises exactly this list. A test drives every row of the table
+through the real key handler, because the footer, this table and the fallback
+used to disagree three ways.
 
 ---
 
@@ -144,17 +156,42 @@ A single **exploration value** (0.1–0.7) controls how adventurous the DJ is. I
 
 ### Describing the session
 
-The session line currently shows a track count and nothing else.
+The session line names what is playing, in words measured against your own library:
 
-It used to show a mood phrase — *"focused cohesive vibe, deep in the zone"* — assembled from three heuristics. All three were invented against scales nobody measured: the mood word came from an entropy-like quantity that is always ≈ 55 for a 512-dimensional unit vector, so it returned *eclectic* every time and its other two branches were unreachable; the *warming up → building → deep in the zone* stage word was a track counter in a costume. A blank line is honest and a counter is a fact; the phrase was neither.
+```
+♪ hypnotic · nocturnal · sparse
+⟳ 2 of 3 held over 5 tracks · 14 played
+```
 
-The replacement is half built. The data exists: 49 descriptor prompts — energy, affect, texture, rhythm, setting, instrumentation — embedded with CLAP's *text* encoder and stored with each word's mean and standard deviation over this library, so a score reads as a z-score against your own collection and *"hypnotic"* means "unusually hypnotic **for your music**". You can already ask for it from the command line:
+Those come from 49 descriptor prompts — energy, affect, texture, rhythm, setting, instrumentation — embedded with CLAP's *text* encoder and stored with each word's mean and standard deviation over your collection. A score is therefore a **z-score against your own music**, so *"hypnotic"* means "unusually hypnotic **for this library**" rather than "hypnotic in the abstract". That matters more than it sounds: CLAP's audio and text encoders are aligned but do not share a cone, so raw similarities are not comparable between words, and a naive top-3 would return the same three words forever.
+
+The second line says how many of those three words were also on screen a few tracks ago. It is a count rather than a similarity score on purpose — measured over 40 real sessions, the underlying cosine sits above 0.95 nine times out of ten, so it reads as "0.99" almost always, while the word count spans its whole range (median 2 of 3, and 0 or 1 after a run of skips). `[I]` shows both, with the cosine labelled.
+
+Nothing is shown before a track has played. The session vector starts at zero, and scoring a zero vector against the bank does not fail — it returns a confident-looking ranking of the bank's own baselines, which would be a description of nothing at all.
+
+You can also ask for any track's descriptors from the command line:
 
 ```bash
 python3 generate_embeddings.py --describe "Arctic Monkeys"
 ```
 
-Wiring it to the session line is the next piece of work. See `PROJECT_AUDIT.md` §H1.
+This replaced a mood phrase — *"focused cohesive vibe, deep in the zone"* — assembled from three heuristics, all invented against scales nobody measured. The mood word came from an entropy-like quantity that is always ≈ 55 for a 512-dimensional unit vector, so it returned *eclectic* every time and its other two branches were unreachable; the *warming up → building → deep in the zone* stage word was a track counter in a costume.
+
+### The Session panel
+
+Below the console, the **Session** panel shows the one track queued ahead, then what has actually played, newest first:
+
+```
+  ↓ next:  Pharoah Sanders – The Creator Has a Master Plan
+ ──────────────────────────────────────────────────────────
+ ♥♪ Floating Points – LesAlpx
+  ✓ Alice Coltrane – Journey in Satchidananda
+  ⏭ Kamasi Washington – Change of the Guard
+```
+
+`♥` is a track you have liked, at any point, across sessions. `✓` is a full listen, `⏭` a skip, `♪` the track playing now. `↑↓` move the cursor and `ENTER` queues that track to play again next.
+
+This replaced an "Upcoming Queue" panel that listed ten tracks read from `mpc playlist` — which, with the playback modes the DJ now uses, was the session's *history* displayed above the current track and numbered as if it were the future. The panel shows the past because the past is the part that is true; at a queue depth of one there is no future to list.
 
 Exactly **one** track sits in the queue ahead of the current one, refilled as each song ends so playback never stops. That depth is deliberate: with ten queued tracks, every one of them had been scored under the weights that existed ten songs ago, so a skip or a like was inaudible until they drained. At depth one, feedback changes what plays *next*.
 

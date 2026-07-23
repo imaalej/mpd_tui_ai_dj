@@ -161,6 +161,46 @@ class QueueManager:
 
         return track
 
+    def requeue_next(self, track: str) -> bool:
+        """
+        Put a *specific* track in the lookahead slot, replacing whatever is there.
+
+        This is what `ENTER` on the session-history panel does (audit H1d).  It
+        lives here rather than in the TUI because it is a queue operation, and
+        the ordering below is the same thing C4 and M1 are about — a display
+        layer that reimplemented it would be one more place for the sequence to
+        drift out of agreement with the verified MPD semantics.
+
+        The order is `add` **then** `del`, which is safer than `replace_next()`'s
+        `del` then `add`: the new track is appended to the end, so the queue is
+        momentarily `[current, old_next, new]` and the delete takes it back to
+        `[current, new]`.  If the add fails, nothing was removed and the queue is
+        untouched — where deleting first and failing to add would leave the
+        session one track deep until the poller noticed.  `replace_next()` cannot
+        do it in this order because it has to *choose* the replacement, and the
+        choice must exclude the entry it is about to drop.
+
+        The selector is not told about this track: it was chosen by the listener,
+        not drawn, so recording it would let a deliberate replay push the
+        selector's own history around.  The dropped lookahead *is* given back —
+        it never played, and leaving it recorded would sit it inside the 20-track
+        replay gap having never been heard.
+        """
+        queue = self.mpd_controller.get_queue()
+
+        if not self.mpd_controller.add_track(track):
+            print(f"Replay: MPD would not accept {track}", file=sys.stderr)
+            return False
+
+        # Position 2 is the lookahead; position 1 is what is playing.  When the
+        # queue held only the current track there was no lookahead to drop, and
+        # the track just added is already in the right place.
+        if len(queue) >= 2:
+            if self.mpd_controller.delete_position(2):
+                self.track_selector.forget_selection(queue[1])
+
+        return True
+
     def get_next_track(self, current_track: Optional[str] = None) -> Optional[str]:
         """
         The track queued to play next, for display.

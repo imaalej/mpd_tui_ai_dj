@@ -71,6 +71,25 @@ DELETED_SYMBOLS = [
     # Replaced by the solved repulsion (H9) and the zero seed (L7).
     "penalize_similar",
     "_initialize_session_vector",
+    # Stage 3.  `RIGHT_COL_ROWS` was the hand-counted height of the Now Playing
+    # right-hand column, and the album art was pinned to it — so every change to
+    # that column silently misplaced the image and nothing could notice (H8).
+    # `_art_geometry()` reads the widget tree instead.
+    "RIGHT_COL_ROWS",
+    "NP_BORDER_ROWS",
+    # `get_playlist_metadata` built its map from `mpc playlist`, and with
+    # `consume on` a played track is gone from it — so the one existing metadata
+    # path covered exactly the tracks the session-history panel shows (§8, Stage
+    # 3 trap 2).  `fetch_track_tags` is the per-track, cached replacement.
+    "get_playlist_metadata",
+    "_metadata_cache",
+    # The queue panel and its one-line successor, replaced by the Session panel
+    # (H1c), and the track counter the vibe line carried while the descriptor
+    # bank sat unwired (H1b).
+    "_update_queue_display",
+    "queue_walker",
+    "queue_listbox",
+    "_session_line",
 ]
 
 SEARCHED_SUFFIXES = {".py", ".sh"}

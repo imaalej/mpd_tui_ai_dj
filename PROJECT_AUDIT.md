@@ -11,7 +11,7 @@ decisions taken since the first audit, and where to pick the work back up.
 | **Environment tested** | Fedora (Linux 7.1.3), Python 3.14.6, numpy 1.26.4, transformers 5.1.0, torch 2.10.0+cu128, urwid 3.0.5, MPD/MPC present, ueberzugpp present, RTX 3070. Library: 692 MPD entries, 674 embedded (was 616 at audit time). |
 | **Audit date** | 22 July 2026 |
 | **Revision date** | 22 July 2026 — design decisions folded in, see §0 |
-| **Progress** | **Stages 0, 1 and 2 complete** (Stage 2: 23 July 2026). Stages 3–4 outstanding. See §0b for what landed and where it deviated from the plan. |
+| **Progress** | **Stages 0–3 complete** (Stage 3: 23 July 2026). Stage 4 outstanding. See §0b for what landed and where it deviated from the plan. |
 
 ---
 
@@ -32,11 +32,13 @@ conversation in context.
 - **§8** is the ordered plan. Each stage has a definition of done. **Each stage leaves the
   application runnable** — there is no point in the sequence where it is half-migrated and broken.
 - **§9** lists what is still undecided.
-- **§10 / §10b / §10c** are the evidence appendix, one per stage that measured anything, **newest
-  wins where they overlap**. §10 is the pre-Stage-1 library and is provenance only. §10b is the
-  embeddings, the centring and the descriptor bank. **§10c is the live record for anything about
+- **§10 / §10b / §10c / §10d** are the evidence appendix, one per stage that measured anything,
+  **newest wins where they overlap**. §10 is the pre-Stage-1 library and is provenance only. §10b is
+  the embeddings, the centring and the descriptor bank. **§10c is the live record for anything about
   skips, selection or the manifold** — it re-took §10b's two "Re-measured for Stage 2" tables by
-  driving the shipped code, and four of their figures did not reproduce.
+  driving the shipped code, and four of their figures did not reproduce. **§10d is the live record
+  for the display**: the descriptor drift distribution, the widget-tree geometry, and the terminal
+  sizes at which the pre-Stage-3 layout crashed.
 
 Where this document and the code disagree, the document describes the target. **Line references
 throughout §2–§5 are to `HEAD 8dc4275`, the pre-Stage-0 tree**, and are now stale for every file
@@ -73,10 +75,10 @@ distribution, or delete them.
 None of this is architectural. The reason it survived is that the test suite reports 66 passing checks
 while roughly half of them are hardcoded `True` literals.
 
-**Where it stands now.** Stages 0, 1 and 2 are done, and **the application does what the README
-describes.** The ground is cleared, the invented vocabulary is gone, the vector space underneath
-everything is trustworthy — 674 tracks embedded from full coverage, bit-reproducible, centred, named
-by a 49-word CLAP descriptor bank — and the player now plays.
+**Where it stands now.** Stages 0–3 are done, and **the application does what the README describes.**
+The ground is cleared, the invented vocabulary is gone, the vector space underneath everything is
+trustworthy — 674 tracks embedded from full coverage, bit-reproducible, centred, named by a 49-word
+CLAP descriptor bank — the player plays, and the display finally reads the bank.
 
 Stage 2 closed every critical finding. The queue is one deep and refills as each track ends; MPD's
 modes are forced, logged and restored on every exit path including SIGTERM; selection draws by
@@ -87,9 +89,19 @@ depth of exactly 2 in all 30 samples; four consecutive skips reporting 5% → 20
 and moving from Björk to Watain; the user's playback modes restored byte-identically after a
 `kill -TERM`.
 
-What remains is presentation. **Stage 3 is display only** — the descriptor readout, the session
-history panel, and the album-art geometry that must be derived from the widget tree before the layout
-moves (H8). The data every one of those reads was built in Stage 1 and has been sitting unused.
+Stage 3 closed the display. The vibe line names three descriptors z-scored against this library, the
+Session panel lists what actually played with `♥` / `⏭` / `✓` marks, `↑↓` and `ENTER` scroll and
+replay it, `[I]` reports both vectors' descriptors and scrolls, and the album art's position is
+derived from the widget tree rather than hand-counted.
+
+It also found a defect nobody was looking for, which is the argument for the stage's first line of
+work. **The application raised `WidgetError` on every terminal shorter than 33 rows** — including the
+default 80×24 — and had done since before the audit began. Nothing caught it because, across 311
+tests, nothing had ever constructed the widget tree. It is fixed, reproduced live against the
+pre-Stage-3 tree, and pinned by a test that renders at seven terminal sizes (**N1**).
+
+What remains is Stage 4: durability, the rest of the README's contradictions, and the four small
+open items in §6.
 
 ---
 
@@ -558,14 +570,159 @@ unused; the vibe line still shows a track count; the session-history panel does 
 geometry is still hand-counted constants (H8). Those are Stage 3. `[L]` is still not a toggle and
 `liked_tracks` still does not rehydrate from `feedback_history.json` (L4).
 
+### Stage 3 — complete, 23 July 2026
+
+Net effect: **two new modules** (`vibe_readout.py`, `session_history.py` — both pure, no urwid, no
+MPD), `tui.py` rebuilt around a derived geometry and a Session panel, and **+105 tests** (311 → 416,
+all green). The descriptor bank built in Stage 1 is finally read by something.
+
+| Plan item | Landed as |
+|---|---|
+| **H8 / L3** | `AdaptiveDJTUI._art_geometry(cols, rows)` walks the widget tree — `Frame.header.rows()`, `Pile.get_item_rows()`, `Pile.contents`, `Columns.column_widths()`, `Columns.rows()` — and returns `(x, y, width, height)` or None. `RIGHT_COL_ROWS` and `NP_BORDER_ROWS` are deleted and guarded by `test_deletions.py`. Two of the four hand-counted constants were **wrong**: `x` was 2 where the art column starts at 1, and the height was pinned to a Pile that Stage 3 takes from 10 rows to 11. Doing this first was correct and load-bearing — see item 1 below. |
+| **H1b** | `vibe_readout.VibeReadout`: top-3 descriptors by z-score on line 1, drift and the track count on line 2, both gated on `SessionState.is_seeded()`. The consistency figure is a **count of held words, not a cosine** — a measurement, not a preference (item 2). |
+| **H1c** | `session_history.SessionHistory` plus the `Session` panel: `↓ next:`, a divider, then plays newest-first with `♥` / `⏭` / `✓` / `♪`. Order comes from watching MPD's current track; outcomes come from draining `FeedbackHandler.feedback_history` from a cursor taken at `run()`. Neither required the player to grow a store. |
+| **L4** | `SessionHistory.rehydrate_likes()` reads the same `feedback_history.json` at construction. `TUI.liked_tracks` is gone; `history.liked` is the one set, and it spans sessions. |
+| **H1d** | `↑↓` and `ENTER` bound through `unhandled_input`; both list panels wrapped in `urwid.WidgetDisable` so the body Pile stops swallowing arrow keys. `[I]` gains a `DESCRIPTORS` block (session **and** taste, each gated on its own vector) and is now a `ListBox` that scrolls. `QueueManager.requeue_next()` is the one player-side addition — reasoning in the deviations below. |
+| **L9** | Footer, README table and fallback-mode bindings reconciled to one list. A test drives every advertised key through the real `_handle_input` and requires a distinct action, so a footer entry cannot outlive its binding. |
+| **N1** *(not in the plan)* | The `('weight', 3, …)` → `('pack', …)` layout fix for the sub-33-row `WidgetError`. |
+
+**Verification.** 416 pytest tests pass. The application was then driven end to end against the live
+MPD in a pty at 120×45 and at 80×24, with the user's queue, modes and volume snapshotted before and
+restored byte-identically after.
+
+| Criterion | Result |
+|---|---|
+| the vibe line names three recognisable descriptors | yes — Fleshgod Apocalypse's *King* read `piano-led · halftime · triumphant`; the seven §10b spot-checks reproduce exactly |
+| `[I]` explains the model without invented vocabulary | yes — every row is a number the system computed, including the drift cosine with its measured scale printed beside it |
+| the readout refuses before anything has played | yes — `♪ —  nothing has played yet`, where the bank alone answers `shimmering · orchestral · serene` |
+| the Session panel marks what happened | yes — `♥♪ Yes – America (single version)` above `⏭ Arctic Monkeys – D Is for Dangerous` |
+| `↑↓` / `ENTER` | yes — `Replay: Yes – America (single version) queued next`, one `add` before one `del`, no `play`, no `next` |
+| album art at the derived geometry | yes — ueberzugpp, geometry asserted equal to `_art_geometry` at seven terminal sizes |
+| **an 80×24 terminal** | **renders** — the same run against the pre-Stage-3 tree raises `WidgetError` and dumps a traceback over the UI |
+| modes restored after `kill -TERM` | byte-identical, queue byte-identical |
+
+### Three things the Stage 3 plan did not anticipate
+
+**1 · The layout had been crashing on short terminals the whole time.** Not a Stage 3 regression and
+not in any finding: the `Now Playing` box took `('weight', 3, …)` of the body, its content is a flow
+`Pile` wrapping a `Columns` whose left cell is a box `Filler`, so urwid resolved the `Columns` as a
+box widget, handed it the weighted height, and raised when it rendered its natural one instead.
+
+```
+  80x20 … 80x32   WidgetError: <Columns …> rendered (80 x 12) canvas when passed size (80, 6)!
+  80x33 … 80x45   OK
+```
+
+Live, against `HEAD 3558b88` in a pty at 80×24, the traceback prints over the interface and the
+session is unusable. `('pack', …)` gives the box exactly `rows()`, which fixes it at every size down
+to 80×6 — and has a second effect the geometry depends on: **the panel is now the same height at
+80×24 as at 80×60, so the album art's position stops varying with the terminal's height at all.**
+That is why the hardcoded `y = 3` was right at one size and wrong at others.
+
+The finding is recorded as **N1**. The thing worth carrying forward is not the bug; it is that a
+suite of 311 behavioural tests said nothing about it, because none of them called `render()`. §8's
+Stage 3 preamble warned that this stage started with no coverage in its own area. It was right, and
+the cost was already on the ground before the stage began.
+
+**2 · H1's consistency statistic is compressed, and the measurement changed the design.** H1
+specifies "the cosine between the session's descriptor z-vector now and five tracks ago". Driven
+through the shipped `SessionState` and `VibeReadout` over 40 sessions on the real library (§10d):
+
+```
+  cos(z_now, z_5ago)     min 0.721   p10 0.948   p50 0.989   p90 0.997
+  words held (0 of 3 … 3 of 3)   1%    12%    42%    45%      mean 2.31
+```
+
+Ninety per cent of ordinary listening sits in the top 5% of the cosine's nominal range, so the
+readout would print "0.99" essentially forever. **That is C5's shape and the entropy heuristic's
+shape**: a number whose scale the data never occupies, presented as information. What does occupy its
+range is how many of the three words on screen were also on screen five tracks ago — 0 through 3,
+median 2, and 0 or 1 after a skip run.
+
+So the line reports the count. It needs no threshold, no calibration and no vocabulary, and it is a
+statement about something the listener actually read. This is §8's trap 4 ("the only item in this
+stage that invents a threshold") resolved by its second option — ship the measurement — after the
+first option, calibrating a threshold, turned out to be calibrating one against a scale that does not
+discriminate. The cosine is still computed and still shown in `[I]`, with its measured distribution
+printed beside it so the number can be read.
+
+**2b · Making `[I]` scroll quietly broke the history panel, and only a deliberate check found it.**
+Stage 2's inspector dismissed on *any* key, so it was momentary. H1d makes ↑↓ scroll it instead, which
+means it can now be held open across a whole track — and the `[I]` loop owns the thread that records
+history. Measured: a track that started **and** finished while the overlay was up never reached the
+panel, and its `✓` was dropped, because `apply_event` had no entry to attach it to. The panel's whole
+claim is that it lists what actually played.
+
+The fix is `screen.set_input_timeouts(max_wait=0.5)` around the overlay loop, so it wakes without a
+keypress and runs `_sync_session_state()` — the bookkeeping half of `_update_display`, extracted for
+exactly this. Measured cost: 0.02 s of CPU over 6 s with the overlay open, against 0.04 s for an idle
+TUI. Pinned by `test_the_session_keeps_being_observed_while_the_inspector_is_open`, whose input script
+includes an empty `[]` wake-up because that is the case that matters.
+
+Worth naming the general shape, because Stage 4 will meet it: **the display now holds state that only
+the display's own tick maintains.** That is the right place for it (§9), but it means any code path
+that blocks the urwid loop is a path that stops observing the session. `[I]` was the only one; a
+Stage 4 modal — a confirmation prompt, a help overlay — would be another.
+
+**3 · The history panel needed no new store behind the display, but it did need a cursor.** Trap 3
+said "nothing stores what H1's consistency word compares against" and offered two options. Both the
+z-vector store and the play history ended up in the display layer, which is the honest place for
+them: neither is read by selection, and `SessionState` is closed. But `FeedbackHandler.feedback_history`
+is loaded from disk at startup and spans every previous session, so draining it naively back-fills
+tonight's panel with last week's skips. The cursor taken at `run()` is what makes it a *session*
+history, and it is tested directly.
+
+### Stage 3 — deviations from the plan's letter
+
+- **One method was added to `queue_manager.py`, which §8 says to stop and justify.** `ENTER` has to
+  put a chosen track in the lookahead slot, and that is a queue operation: doing it from `tui.py`
+  would put a second copy of the add/delete ordering — the thing C4 and M1 are about — in the display
+  layer. `requeue_next(track)` adds **then** deletes, the inverse of `replace_next()`, because it
+  already knows its track and has nothing to exclude; appending first means the queue is momentarily
+  three deep rather than one deep, so a refusal from MPD leaves the session untouched. Six tests
+  against `FakeMPD`'s call log.
+- **`get_playlist_metadata()` was deleted rather than left alone.** Trap 2 says to use
+  `_fetch_track_tags()` and promote it to public. Doing so left `get_playlist_metadata` with no
+  callers — it existed only for the panel that Stage 2 had already cut to one line — and it shelled
+  out an extra `mpc playlist` on every 0.5 s refresh to build a map keyed on tracks that, under
+  `consume on`, are exactly the ones no longer in the playlist. `fetch_track_tags` is public and
+  carries the cache the audit already described it as having.
+- **The vibe readout is two rows, not one.** H1's mock-up puts descriptors, consistency and counts on
+  a single line. At the real panel width the right-hand column is ~45 columns, and one line either
+  truncates or wraps unpredictably — which would then change the art height under H8. Two declared
+  rows are stable, and the geometry follows them automatically.
+- **`_session_line()` is deleted, not rewritten.** It reported the track count, which was the only
+  honest thing available while the bank was unwired. The count moved onto the drift line.
+- **The header and footer became flow widgets.** They were `Filler`s, which are box widgets that
+  `Frame` accepted by accident; a flow footer wraps its hints onto a second row on a narrow terminal
+  instead of clipping them, and both can now report `rows()` honestly, which `_art_geometry` reads
+  rather than assuming 1.
+- **The art renderer is injectable** (`AdaptiveDJTUI(dj, art_renderer=…)`). Constructing the widget
+  tree in a test otherwise detects image protocols and leaves a `ueberzugpp` child behind.
+
+### What Stage 3 did **not** do
+
+- **`[L]` is still not a toggle.** L8's status line says un-liking is Stage 3, but it is not a row in
+  §8's Stage 3 table, and it is not a display change: un-liking means subtracting a like from the
+  taste model, which is the player. Left for Stage 4, where the finding is now recorded.
+- **The `[I]` overlay's ListBox is sized by arithmetic, not by the tree.** `_show_model_info` computes
+  its inner size from the 70% relative width it declares. That is a hand-derived number of exactly
+  the kind H8 removed, in a place where being wrong costs a slightly-off scroll page rather than a
+  misplaced image. It is noted rather than fixed.
+- **Nothing in the *simple* fallback mode was tested.** Its bindings were reconciled with the urwid
+  mode and the README (L9), but there is no harness that drives a non-urwid terminal, so that
+  reconciliation is asserted only by reading. L2's non-functional art paths are untouched (Stage 4).
+- **No Stage 4 work was pulled forward.** M7's remaining README contradictions, L1's SIGWINCH
+  handler, L6's polling and the `.gitkeep` scaffolding are all still open.
+
 ---
 
 ## 1 · How the system actually works
 
-*Read this first if you are picking the project up cold. **As of Stage 2 this describes the system as
+*Read this first if you are picking the project up cold. **As of Stage 3 this describes the system as
 it is**, not as it is planned to be — the bracketed "currently…" notes that used to qualify each step
-are gone because the behaviour they described is gone. The only part of this section still ahead of
-the code is the descriptor readout, which is Stage 3.*
+are gone because the behaviour they described is gone. No part of this section is now ahead of the
+code.*
 
 Everything is driven by 512-dimensional CLAP audio embeddings, one per track, stored L2-normalised
 in `data/embeddings/track_embeddings.npz`. All similarity is a dot product **on centred vectors**
@@ -582,6 +739,9 @@ tui.py         background thread                mpd_controller.py
  0.5s redraw)   track change, fires               subprocess)
    │            full-listen, refills, seeds
    │            the session vector)
+   ├──▶ vibe_readout.py     descriptor_bank.py → top-3 z-scores + drift
+   ├──▶ session_history.py  what played · ♥ ⏭ ✓ · the ↑↓ cursor
+   │        (both display-only: nothing behind the display reads them)
    │               │
    ▼               ▼
 feedback_handler.py ──┬──▶ session_state.py   short-term vibe vector
@@ -968,32 +1128,37 @@ replacement.
 
 ---
 
-### H1 · The mood word in every vibe description is mathematically pinned to "eclectic". `PARTIALLY DONE — heuristic deleted (Stage 0); bank built (Stage 1); display outstanding (Stage 3)`
+### H1 · The mood word in every vibe description is mathematically pinned to "eclectic". `DONE — heuristic deleted (Stage 0); bank built (Stage 1); display shipped (Stage 3)`
 
-> **Status.** The defective code is gone (Stage 0, D4). The **data** is now built (Stage 1, D5a/D5b):
-> `descriptors.npz` carries 49 descriptors across the six axes below, their CLAP text-tower
-> embeddings, and each one's mean and std over the centred library. `descriptor_bank.DescriptorBank`
-> loads it, z-scores a vector against it and returns the top *n*; `main_tui` loads the bank at startup
-> and reports its size. The prompt template was chosen by measurement (§10), and the variance gate
-> ran and dropped nothing.
+> **Status.** Closed. The defective code went in Stage 0 (D4), the **data** was built in Stage 1
+> (D5a/D5b) — `descriptors.npz`, 49 descriptors across the six axes below, their CLAP text-tower
+> embeddings and each one's mean and std over the centred library — and Stage 3 wired the display:
+> the vibe readout (H1b), the Session panel (H1c) and the `[I]` extension (H1d) all ship.
+> `vibe_readout.VibeReadout` owns the readout; `session_history.SessionHistory` owns the panel.
 >
-> **One thing Stage 2 changed underneath this finding.** The session vector now starts at **zero**
-> (L7), a state that did not exist when H1 was specified — and z-scoring a zero vector does not fail
-> loudly. Every `sim` is exactly 0, so `z = −mean_d / std_d`: a finite, deterministic, plausible-
-> looking readout determined entirely by the bank's own baselines. On the real bank it reads
-> `shimmering · orchestral · serene`, about nothing at all. **That is H1's original defect in a new
-> costume**, and the bank cannot defend against it — the readout must be gated on
-> `SessionState.is_seeded()`. Pinned by
-> `tests/test_descriptor_bank.py::test_z_scoring_a_zero_vector_produces_a_confident_looking_readout`.
+> **The zero-vector hazard is gated, and the gate is where it has to be.** Stage 2 made the session
+> vector start at **zero** (L7), a state that did not exist when H1 was specified — and z-scoring a
+> zero vector does not fail loudly. Every `sim` is exactly 0, so `z = −mean_d / std_d`: a finite,
+> deterministic, plausible-looking readout determined entirely by the bank's own baselines. On the
+> real bank it reads `shimmering · orchestral · serene`, about nothing at all. **That is H1's original
+> defect in a new costume**, and the bank cannot defend against it because the arithmetic is valid.
+> Every entry point in `VibeReadout` is gated on `SessionState.is_seeded()`, and `[I]` gates the taste
+> row on `UserTaste.is_seeded()` separately. Pinned in three places:
+> `test_descriptor_bank.py::test_z_scoring_a_zero_vector_produces_a_confident_looking_readout` (the
+> hazard is real), `test_vibe_readout.py::test_a_zero_session_vector_is_refused_even_though_the_bank_answers`
+> (both halves at once), and `test_tui_display.py::test_the_vibe_line_refuses_before_anything_has_played`
+> (through the real `SessionState`).
 >
-> **What remains is display**: the vibe readout (H1b), the Session panel (H1c) and the `[I]` extension
-> (H1d) are all Stage 3. Until then the words are reachable only from the command line —
-> `python3 generate_embeddings.py --describe "Arctic Monkeys"`. The spot-check the acceptance step
-> asks for is in §10, and it reads well: Bathory's orchestral intro comes back as
-> `cavernous · orchestral · dense`, the Arcane score as `cinematic · tense · menacing`.
+> **Point 6's consistency word shipped as a count, not a cosine, and not a word.** See the amended
+> point 6 below: the cosine H1 specified turns out to be compressed into the top 5% of its range for
+> 90% of ordinary listening, which is the same failure this finding is about. The measurement is in
+> §10d and the reasoning in §0b.
 >
-> The consistency word in point 6 below — cosine between the session's descriptor z-vector now and
-> five tracks ago — is **not** built. It belongs with the display.
+> The spot-check the acceptance step asks for is in §10b and reproduces exactly under the shipped
+> code: Bathory's orchestral intro comes back as `cavernous · orchestral · dense`, the Arcane score as
+> `cinematic · tense · menacing`. Live, Fleshgod Apocalypse's *King* read
+> `piano-led · halftime · triumphant`. The words are also still reachable from the command line —
+> `python3 generate_embeddings.py --describe "Arctic Monkeys"`.
 
 **What.** `SessionState.get_vibe_description()` derives its mood word from the entropy-like quantity
 `−Σ|v|·log(|v|)` over the session vector, then branches on `> 5.0 → "eclectic"`, `> 4.0 → "diverse"`,
@@ -1064,41 +1229,64 @@ pass/fail, not a guess, and it is the reason to build the bank before wiring the
 building it early retires a real risk: if the descriptors do not separate *this* library, H1's design
 fails and you want to discover that from a script, not midway through a TUI rewrite.
 
-**6. The readout.** Top-3 descriptors by z-score, for the session vector:
+**6. The readout.** Top-3 descriptors by z-score for the session vector. As shipped, two rows:
 
 ```
-♪ hypnotic · nocturnal · sparse                    ⟳ drifting   ·   14 tracks · 52 min
+♪ hypnotic · nocturnal · sparse
+⟳ 2 of 3 held over 5 tracks · 14 played
 ```
 
-The consistency word — replacing the deleted momentum thresholds (D4) — becomes the cosine between
-the session's descriptor z-vector now and five tracks ago. That is a measurement of "how much has the
-character of this session moved," which is what the word was always trying to say, and its thresholds
-can be calibrated against observed drift rather than invented.
+> **Amended by measurement, Stage 3.** This point originally specified the consistency figure as *the
+> cosine between the session's descriptor z-vector now and five tracks ago*, with thresholds "to be
+> calibrated against observed drift rather than invented". Driven through the shipped code over 40
+> sessions on the real library (§10d), that cosine has p10 = 0.948 and median = 0.989 — **90% of
+> ordinary listening sits in the top 5% of its range**, so any word derived from it would be pinned to
+> one branch. That is precisely this finding's own defect, and C5's, arriving a third time.
+>
+> What occupies the range is *how many of the three words on screen were also on screen five tracks
+> ago*: measured 0 in 1% of readings, 1 in 12%, 2 in 42%, 3 in 45%, and 0 or 1 after a skip run. So
+> the shipped readout reports that count. It invents no threshold, needs no calibration, has no
+> vocabulary to justify, and is a statement about something the listener actually read.
+>
+> The cosine is still measured and still shown — in `[I]`, with its own distribution printed beside it
+> so a reader can tell 0.99 from 0.95. Neither line renders at all until `is_seeded()` is true.
 
-#### TUI consequences
+#### TUI consequences `ALL SHIPPED — Stage 3`
 
 The vibe readout is the payoff of D1 — it replaces the queue panel as the window into what the system
-is doing. The layout changes accordingly:
+is doing. The layout changed accordingly:
 
-- **Delete the "Upcoming Queue" panel.** There is nothing to list.
+- **Delete the "Upcoming Queue" panel.** There is nothing to list. — *Done: Stage 2 cut it to one
+  line, Stage 3 replaced it.*
 - **Add a "Session" panel** in its place: one `↓ next: <artist — title>` line at the top, a divider,
   then session history newest-first with feedback marks (`♥` liked, `⏭` skipped, `✓` full listen).
-  This is what you actually wanted visibility into — it is truthful, because it happened.
+  This is what you actually wanted visibility into — it is truthful, because it happened. — *Done,
+  plus `♪` for the track playing now, which would otherwise be the one row with no mark at all.*
 - **Repurpose `↑↓` + `ENTER`.** They currently index into the queue list and replay the session's first
   track (H2). Rebind to: scroll history, `ENTER` on a history entry **requeues that track as `next`**.
-  A "play that again" action the app currently lacks, reusing existing plumbing.
+  A "play that again" action the app currently lacks, reusing existing plumbing. — *Done. The indices
+  are `SessionHistory`'s own, newest-first, sharing no numbering with MPD; the plumbing reused is
+  `QueueManager`, which gained `requeue_next()` (§0b).*
 - **Repurpose `[I]`.** With time context gone (D6) the overlay has no content. Make it the model
   inspector: top descriptors for the **session** vector *and* the **taste** vector side by side,
   current exploration value, tracks played, taste update count. That is the honest answer to "what
-  does the system think it has learned," and it reuses the descriptor bank.
+  does the system think it has learned," and it reuses the descriptor bank. — *Done in two parts:
+  Stage 0 built the inspector, Stage 3 added the `DESCRIPTORS` block and made the overlay scroll.*
 - **L3 becomes a blocker.** Album-art geometry is hardcoded to `RIGHT_COL_ROWS = 10`, the exact row
-  count of the current Now-Playing pile (`tui.py:113–131, 563–602`). The vibe line is changing shape,
-  so this constant is about to be wrong. See L3.
-- **Update the footer and the README keybinding table together** — they already disagree (L9).
+  count of the current Now-Playing pile. The vibe line is changing shape, so this constant is about to
+  be wrong. See L3. — *Done first, as instructed. It was already wrong; see H8.*
+- **Update the footer and the README keybinding table together** — they already disagree (L9). —
+  *Done, together with the fallback mode, which disagreed with both.*
 
 ---
 
-### H2 · The "Upcoming Queue" panel lists tracks that already played. `DONE — panel removed in Stage 2`
+### H2 · The "Upcoming Queue" panel lists tracks that already played. `DONE — panel removed in Stage 2, replaced in Stage 3`
+
+> **Closed.** Stage 2 removed the panel, `get_upcoming_tracks()`, and the `↑↓`/`ENTER` bindings that
+> indexed into `mpc playlist`. Stage 3 put a **Session** panel in its place (H1c) which lists the same
+> tracks on purpose — as history, newest-first, marked with what happened to them — and rebound `↑↓`
+> and `ENTER` to indices derived from this session's own plays. `test_session_history.py::test_enter_
+> targets_the_row_under_the_cursor_not_the_first_track` is the direct regression guard.
 
 **What.** Same root cause as C1. `QueueManager.get_upcoming_tracks()` returns the whole MPD playlist,
 so the panel shows the session's history above the current track, numbered as if it were the future.
@@ -1328,11 +1516,75 @@ mismatch) is recorded as successfully queued, and the "Failed to add track" bran
 
 ---
 
-### H8 · Album-art geometry is hardcoded to a layout that is about to change. `ELEVATED from L3`
+### H8 · Album-art geometry is hardcoded to a layout that is about to change. `DONE — Stage 3, first item`
 
-*See L3 for the full text.* Promoted because the H1 TUI rework changes the Now-Playing pile's row
-count, which is exactly the constant `_render_art()` pins the image against. Fix it as part of the
-rework, not after.
+> **Status.** `AdaptiveDJTUI._art_geometry(cols, rows)` derives the rectangle from the widget tree —
+> `Frame.header.rows()` and `.footer.rows()`, `Pile.get_item_rows()`, `Pile.contents`,
+> `Columns.column_widths()`, `Columns.rows()` — and returns `(x, y, width, height)` or None when the
+> area is too small to be an image rather than a smear. `RIGHT_COL_ROWS` and `NP_BORDER_ROWS` are
+> deleted and guarded in `test_deletions.py`.
+>
+> **Two of the four constants were already wrong**, which is the argument for deriving rather than
+> re-counting:
+>
+> - `x = 2`. Its comment read "col 0 = terminal left edge, col 1 = LineBox left border, col 2 = art
+>   inner start" — but the LineBox's left border *is* column 0, so the art column starts at **1** and
+>   every cover was drawn one column right of its box.
+> - `height = RIGHT_COL_ROWS = 10`. Correct for the pile as it stood; Stage 3's two-row vibe readout
+>   takes it to **11**, which is exactly the change the finding predicted and exactly what a
+>   hand-counted comment cannot notice.
+>
+> `y = 3` and `width = 33` were right, and remain right — the derivation reproduces them.
+>
+> **The geometry is now independent of the terminal's height**, because N1's `('pack', …)` fix gives
+> the Now Playing box its natural height rather than a share of the body. Under the old weighted
+> layout the art's position varied with the terminal, which is why a single hardcoded `y` could be
+> correct at one size and wrong at another.
+>
+> Tested by rendering the real frame at seven terminal sizes and locating the art placeholder in the
+> canvas (`tests/test_art_geometry.py`), rather than by asserting the function's own arithmetic back
+> at it. The right-hand column's first and last rendered rows are required to be the rectangle's first
+> and last, which is the property the deleted constant existed to guarantee.
+
+*See L3 for the original text.* Promoted because the H1 TUI rework changes the Now-Playing pile's row
+count, which is exactly the constant `_render_art()` pinned the image against. Fixed as part of the
+rework, first, as planned.
+
+---
+
+### N1 · The layout raises `WidgetError` on any terminal shorter than 33 rows. `NEW — DONE Stage 3`
+
+> **Found while doing H8, not by looking for it.** Not a Stage 3 regression: it predates the audit and
+> shipped through Stages 0–2 under a green suite of 311 tests, none of which had ever called
+> `render()`.
+
+**What.** `main_pile` gave the Now Playing box `('weight', 3, …)` of the body. Its content is a flow
+`Pile` wrapping a `Columns` whose left cell is a box `Filler`, so urwid resolves the `Columns` as a
+box widget, hands it the weighted height, and raises when it renders its natural height instead.
+
+**Evidence.** Rendering the shipped tree at `HEAD 3558b88` across terminal heights:
+
+```
+  80x20 … 80x32   WidgetError: Widget <Columns …> rendered (80 x 12) canvas
+                  when passed size (80, 6)!
+  80x33 … 80x45   OK
+```
+
+Driven live in a pty at 80×24 against that tree, the traceback prints over the interface and the
+session is unusable. The same driver against the Stage 3 tree renders, plays, skips and opens `[I]`.
+
+**Why nothing caught it.** §8's Stage 3 preamble says "311 tests pass and not one constructs the
+widget tree — the suite covers everything *behind* the display". This is what that costs. The suite
+was behavioural and honest about the player; the display was simply outside it.
+
+> **Fix.** `('pack', self.now_playing_box)`. The box is a flow widget, so packing gives it exactly
+> `rows()` and the size mismatch cannot arise. Two consequences worth keeping:
+> - It renders down to 80×6, clipping the panels rather than raising.
+> - The Now Playing panel is the same height at every terminal height, which is what makes H8's
+>   derived geometry independent of the terminal.
+>
+> `tests/test_art_geometry.py::test_the_frame_renders_at_every_terminal_size` and
+> `::test_it_renders_down_to_absurdly_small_terminals` cover heights 6–33 and widths 40–90.
 
 ---
 
@@ -1851,13 +2103,29 @@ Because batch composition is load-bearing, `batch_size` is recorded in the artif
 
 ---
 
-### L1 · The SIGWINCH handler is almost certainly never invoked. `OPEN`
+### L1 · The SIGWINCH handler is never invoked. `OPEN — confirmed by measurement, Stage 3`
 
-`tui._setup_urwid()` installs `_on_sigwinch` at line 310, during `__init__`. urwid's `MainLoop` /
+> **No longer a hedge.** The original text said "almost certainly never invoked". Driven directly:
+>
+> ```
+> after _setup_urwid()    <bound method AdaptiveDJTUI._on_sigwinch …>
+> after Screen.start()    <bound method Screen._sigwinch_handler …>
+> ```
+>
+> urwid replaces it, exactly as suspected. **But the consequence is narrower than the finding reads,
+> and Stage 3 narrowed it further.** `_art_geometry()` is now re-derived from `get_cols_rows()` on
+> every 0.5 s tick, and `AlbumArtRenderer.render()` skips only when its key —
+> `(path, x, y, width, height)` — is unchanged. So a **resize** changes the geometry, changes the key,
+> and re-sends within half a second on its own. What still needs the handler is a **window move at
+> unchanged size**: same key, send skipped, stale image. That is the case `force_redraw()` was written
+> for, and it is the case that remains broken.
+>
+> Fix it, but describe it accurately in the commit: it restores redraw-on-monitor-move, not
+> redraw-on-resize.
+
+`tui._setup_urwid()` installs `_on_sigwinch` during `__init__`. urwid's `MainLoop` /
 `raw_display.Screen.start()` installs its own SIGWINCH handler afterwards, when `loop.run()` is called
-— replacing it. So `force_redraw()` on resize or monitor-move likely never fires, which is exactly the
-bug the handler's comment says it exists to prevent. Register through urwid's screen hooks, or
-re-install after `loop.run()` starts.
+— replacing it. Register through urwid's screen hooks, or re-install after `loop.run()` starts.
 
 ---
 
@@ -1871,7 +2139,7 @@ are effectively non-functional and should be marked as such or removed. `album_a
 
 ---
 
-### L3 · Album-art geometry is hardcoded to the current layout. `ELEVATED to H8`
+### L3 · Album-art geometry is hardcoded to the current layout. `ELEVATED to H8 — DONE Stage 3`
 
 `_render_art()` pins the image at `x=2, y=3` with `width=33, height=10`. Those constants encode
 "header is 1 row, LineBox border is 1 row, Divider is 1 row" and the exact row count of the right-hand
@@ -1889,14 +2157,23 @@ and the deleted queue panel frees vertical space. `RIGHT_COL_ROWS = 10` is about
 
 ---
 
-### L4 · Hearts vanish on restart even though likes are already on disk. `OPEN — folded into H1`
+### L4 · Hearts vanish on restart even though likes are already on disk. `DONE — Stage 3`
 
-`TUI.liked_tracks` is an in-memory set, populated only by pressing `[L]` during the current run. Every
+> **Status.** `TUI.liked_tracks` is deleted. `SessionHistory.liked` is the one set, rehydrated from
+> `feedback_history.json` when the TUI is constructed — which is after `persistence.load_all()`, so
+> the file is loaded by then. It drives the `♥` in the Session panel, the `❤` on the Now Playing
+> track line and the `❤` on the `↓ next:` line, all from the same place.
+>
+> The distinction the panel needed anyway: `♥` is persistent and spans sessions ("you like this
+> track"), while `⏭` and `✓` are this session's outcomes. They occupy separate mark slots, so a track
+> can show `♥⏭`. Tested in `test_session_history.py` and end to end in `test_tui_display.py`.
+
+`TUI.liked_tracks` was an in-memory set, populated only by pressing `[L]` during the current run. Every
 like is already recorded in `feedback_history.json` with a track path, so the set could be rehydrated
 at startup in three lines. `tui.py:144–145`, `feedback_handler.py:160–171`
 
 **Status.** The new session-history panel (H1) needs per-track feedback marks anyway, so rehydration
-from `feedback_history.json` becomes part of building it rather than a separate fix.
+from `feedback_history.json` became part of building it rather than a separate fix.
 
 ---
 
@@ -1977,8 +2254,15 @@ the space is centred — the centroid *is* the zero vector, which has no directi
 
 > **Status.** All of the below deleted except `previous_track` and `save_embeddings`, which the plan
 > says to keep for now. `ExplorationController.reset()` went too — it was not on the list only because
-> `Persistence.reset_all()` called it, and that is gone. Un-like (`[L]` as a toggle) is Stage 3;
-> taste-model inspection landed early as the `[I]` overlay (§0b, item 2).
+> `Persistence.reset_all()` called it, and that is gone. Taste-model inspection landed early as the
+> `[I]` overlay (§0b, item 2) and was extended with the descriptor rows in Stage 3.
+>
+> **Un-like (`[L]` as a toggle) moved to Stage 4.** This line used to say Stage 3. It is not a row in
+> §8's Stage 3 table and it is not a display change: un-liking means subtracting a like from the taste
+> model, which is the player, and Stage 3's whole constraint was that the player is closed. The
+> display half is already there — `SessionHistory.liked` is one set, rehydrated from disk (L4) — so
+> what remains is deciding what `UserTaste` does with a retraction, which is a modelling question, not
+> a keybinding.
 
 Never called anywhere in the running system: `MPDController.toggle` / `previous_track` / `seek` /
 `get_all_tracks` / `get_track_metadata`, `TrackLibrary.has_track` / `save_embeddings`,
@@ -2021,14 +2305,21 @@ taste model from the UI.
   `OPEN`, and it shares a root cause with H3: `_shutdown` is unreachable on SIGTERM. Fix both together.
 - **Keybinding docs disagree.** README lists volume as `,` / `.`; the footer reads `Vol - [<,>]`. In
   the non-urwid fallback mode, `↑↓` are bound to volume rather than queue navigation, contradicting
-  both. — `OPEN`, folded into the H1 footer/README update.
+  both. — `DONE` (Stage 3): one list of bindings, in the footer, the README table and the fallback
+  mode. `↑↓` is history everywhere and volume nowhere; volume is `,`/`.` everywhere (`<`/`>` still
+  accepted, since they are the same physical keys shifted).
+  `tests/test_tui_display.py::test_the_footer_advertises_exactly_the_keys_that_are_bound` drives every
+  advertised key through the real `_handle_input` and requires a distinct action, so a footer entry
+  cannot outlive its binding. The fallback mode's bindings were reconciled by reading only — there is
+  no harness that drives a non-urwid terminal (§0b).
 
 ---
 
 ## 6 · Findings status
 
-*As of Stage 2 complete, 23 July 2026. `Done` means the code is in the tree and a test guards it —
-which now includes the MPD path, via the `FakeMPD` built to verified semantics (M1b).*
+*As of Stage 3 complete, 23 July 2026. `Done` means the code is in the tree and a test guards it —
+which now includes the MPD path, via the `FakeMPD` built to verified semantics (M1b), **and the
+display**, via tests that construct and render the real widget tree (Stage 3).*
 
 | ID | Finding | Status | Stage |
 |---|---|---|---|
@@ -2037,17 +2328,18 @@ which now includes the MPD path, via the `FakeMPD` built to verified semantics (
 | **C3** | Non-deterministic 10 s crop embeddings | **Done** — full coverage, bit-reproducible, window matrix persisted, failures listed. One stated cause corrected (§0b) | ~~1~~ |
 | **C4** | `[V]` double-advance | **Dissolved** by D8 — code path deleted. Constraint retained and asserted on the call log of the real skip method. Its paused-case reasoning was corrected against the live MPD | ~~2~~ |
 | **C5** | Compressed similarity scale (anisotropy) | **Done** — centroid stored and applied on load; random pairs 0.670 → 0.011 | ~~1~~ |
-| **H1** | Mood word pinned to "eclectic" | **Partially done** — heuristic deleted (Stage 0), 49-descriptor bank built and gated (Stage 1); display outstanding | ~~0~~ / ~~1~~ / 3 |
-| **H2** | Queue panel shows history as future | **Done** — panel, bindings and `get_upcoming_tracks()` removed in Stage 2; replaced by a one-line `↓ next:`. Session-history panel is Stage 3 | ~~2~~ / 3 |
+| **H1** | Mood word pinned to "eclectic" | **Done** — heuristic deleted (Stage 0), 49-descriptor bank built and gated (Stage 1), readout / Session panel / `[I]` shipped (Stage 3). The consistency figure shipped as a word count, not the specified cosine — the cosine was measured and found compressed (§10d) | ~~0~~ / ~~1~~ / ~~3~~ |
+| **H2** | Queue panel shows history as future | **Done** — panel, bindings and `get_upcoming_tracks()` removed in Stage 2; Session panel shows the same tracks *as history* in Stage 3, on indices derived from this session's plays | ~~2~~ / ~~3~~ |
 | **H3** | Ctrl-C/SIGTERM neither exit nor save | **Done** — self-pipe unblocks urwid, `atexit` covers the mode restore, state checkpointed every N tracks | ~~2~~ |
 | **H4** | Skipping doesn't change what plays next | **Dissolved** by D1 — one lookahead track, dropped and re-picked. `consecutive_skips` became load-bearing rather than unused | ~~2~~ |
 | **H5** | Day-of-week modifier is dead code | **Done** — deleted (D6) | ~~0~~ |
 | **H6** | Strictly greedy selection | **Done** — rank-Boltzmann; the shipped τ map reproduces the published p(rank 0) table, and 40k draws are checked against `exp(−i/τ)`. τ_max = 15 still uncalibrated by listening | ~~2~~ |
 | **H7** | Eight duplicate methods; `add_track` swallows failures | **Done** — duplicates removed, return code checked, `ast` test guards it | ~~0~~ |
-| **H8** | Album-art geometry hardcoded | **Open** — elevated from L3; blocks the TUI rework | 3 |
+| **H8** | Album-art geometry hardcoded | **Done** — derived from the widget tree; two of the four constants were already wrong (`x`, and the height Stage 3 changes). Asserted against a real render at seven terminal sizes | ~~3~~ |
+| **N1** | `WidgetError` on any terminal under 33 rows | **Done** — `('pack', …)` instead of `('weight', 3, …)`. Predates the audit; found while doing H8, reproduced live at 80×24 against the pre-Stage-3 tree | ~~3~~ |
 | **H9** | Neither `[V]` nor `[N]` changes direction; `[V]` aims off-manifold | **Done** — `[V]` deleted, `[N]` escalates on a solved λ. The design needed one correction found only by running it: the snap must be *inside* the solve (§0b) | ~~2~~ |
 | **M1a** | Tests untracked; phase files are theatre | **Done** — `.gitignore` fixed, phase files deleted, `tests/` tracked (67 green) | ~~0~~ |
-| **M1b/c** | No behavioural suite, no `FakeMPD` | **M1b done** — `FakeMPD` built to re-verified semantics and itself under test; +131 behavioural tests (179 → 310). **M1c** still Stage 4 | ~~2~~ / 4 |
+| **M1b/c** | No behavioural suite, no `FakeMPD` | **M1b done** — `FakeMPD` built to re-verified semantics and itself under test. **M1c partly done**: Stage 3 added the display's own coverage (+105, 311 → 416) including the widget tree, which is where N1 had been hiding. The rest — persistence round-trips, the fallback mode — is Stage 4 | ~~2~~ / ~~3~~ / 4 |
 | **M2** | Two divergent orchestrators | **Done** — both deleted, plus the dummy-embedding paths | ~~0~~ |
 | **M3** | `mpd_music_directory` unvalidated | **Done** — read from MPD's config, source reported, probes resolved; fatal for generation, a warning at startup | ~~1~~ |
 | **M4** | Two sources of truth for track keys | **Done** — `mpc listall` only; coverage logged and enforced on load | ~~1~~ |
@@ -2058,13 +2350,13 @@ which now includes the MPD path, via the `FakeMPD` built to verified semantics (
 | **M8** | `--batch-size` ignored | **Done** — batching plus a decode/mel worker pool, which is where the cost actually was (§0b) | ~~1~~ |
 | **L1** | SIGWINCH handler never invoked | Open | 4 |
 | **L2** | Kitty/sixel art fights urwid | Open | 4 |
-| **L3** | Album-art geometry hardcoded | **Elevated → H8** | 3 |
-| **L4** | Hearts vanish on restart | Open — folded into H1's history panel | 3 |
+| **L3** | Album-art geometry hardcoded | **Elevated → H8**, done | ~~3~~ |
+| **L4** | Hearts vanish on restart | **Done** — `SessionHistory.liked` rehydrates from `feedback_history.json`; `TUI.liked_tracks` deleted | ~~3~~ |
 | **L5** | No log file; stderr swallowed | **Done** — teed to `data/dj.log`, 5 tests | ~~0~~ |
 | **L6** | Polling instead of `mpc idle` | Open — still low priority at depth 1 | 4 (optional) |
 | **L7** | Random cold-start taste vector at β=0.3 | **Done** — β ramps over 20 updates; session vector starts at zero and seeds from the first real track. One guard deliberately *kept* against the plan (§0b) | ~~0~~ / ~~2~~ |
-| **L8** | Dead API surface | **Done** — deleted except the two the plan defers | ~~0~~ |
-| **L9** | Assorted small traps | **Mixed** — `validate()` off `assert`, the weight invariant, the dead `[I]` and `select_track`'s set mutation are done; `.gitkeep` scaffolding, the ueberzugpp child and the keybinding docs remain | ~~0~~ / ~~2~~ / 3 / 4 |
+| **L8** | Dead API surface | **Done** — deleted except the two the plan defers. Un-like moved from Stage 3 to Stage 4: it is a taste-model change, not a display one | ~~0~~ / 4 |
+| **L9** | Assorted small traps | **Mixed** — `validate()` off `assert`, the weight invariant, the dead `[I]`, `select_track`'s set mutation and the keybinding docs are done; `.gitkeep` scaffolding and the ueberzugpp child remain | ~~0~~ / ~~2~~ / ~~3~~ / 4 |
 
 ---
 
@@ -2322,12 +2614,16 @@ audibly change the *kind* of music, and the reported turnover exceeds 80%. `mpc 
 
 ---
 
-### Stage 3 — Make it legible *(half a day)*
+### Stage 3 — Make it legible *(half a day)* · ✅ **COMPLETE 23 July 2026**
+
+*Every row landed. Full account, including three things this table did not anticipate — one of them a
+crash that predates the audit — in §0b.*
 
 The stage where the queue's original purpose finally gets served. All display; the data it reads was
-built in Stage 1 and has been sitting unused since.
+built in Stage 1 and had been sitting unused since.
 
-> **Read this before writing anything.**
+> **Read this before writing anything.** *(Kept as written. Every warning below was live at the time
+> and four of the five were load-bearing; the annotations record how each turned out.)*
 >
 > **Settled — do not re-derive.** The player works and is not in scope. The embeddings, the centring
 > and the 49-word descriptor bank are final; the bank already loads as `self.descriptor_bank` on the
@@ -2375,31 +2671,119 @@ built in Stage 1 and has been sitting unused since.
 > widget tree — the suite covers everything *behind* the display. That is not an argument for leaving
 > it that way: H8's geometry is arithmetic and testable, and the readout's gating condition above is
 > exactly the kind of thing that ships broken under a green suite (H1, C1 and C4 all did).
+>
+> *This one was the most valuable warning in the section, and it understated the situation. The first
+> test that rendered the tree found a `WidgetError` on every terminal under 33 rows — not a Stage 3
+> risk but a defect that had already shipped through three stages (**N1**). Trap 4 was also right
+> that the consistency word was the item at risk, though not in the way it expected: the specified
+> cosine turned out to be the compressed quantity (§10d). Traps 1, 2 and 3 all landed as described.*
 
-| ID | Change | Notes |
-|---|---|---|
-| **H8 / L3** | Derive album-art geometry from the widget tree rather than hand-counted constants | **First** — the layout changes below, and the art is pinned to `RIGHT_COL_ROWS = 10`. |
-| **H1b** | Vibe readout = top-3 descriptors by z-score; consistency word = cosine between the session's descriptor z-vector now and five tracks ago | Replaces the deleted heuristics with something measured against a real distribution. |
-| **H1c** | Replace the queue panel with a **Session** panel: `↓ next:` line, divider, history newest-first with `♥` / `⏭` / `✓` marks | The actual answer to "what is being played". |
-| **L4** | Rehydrate `liked_tracks` from `feedback_history.json` at startup | Falls out of building the history panel. |
-| **H1d** | Rebind `↑↓` to scroll history and `ENTER` to requeue a history entry as `next`; **extend** `[I]` | `[I]` already exists as a model inspector (Stage 0, §0b item 2) showing library size, taste/exploration/selector counters and the live weights. Add: session **and** taste top descriptors, and the effective τ ("choosing from ~top 7"). |
-| **L9** | Reconcile the footer, the README keybinding table, and the fallback-mode bindings | They already disagree three ways; do it while the bindings are open. |
+| ID | Change | Notes | Landed |
+|---|---|---|---|
+| **H8 / L3** | Derive album-art geometry from the widget tree rather than hand-counted constants | **First** — the layout changes below, and the art is pinned to `RIGHT_COL_ROWS = 10`. | ✅ `_art_geometry()`; two of the four constants were already wrong |
+| **H1b** | Vibe readout = top-3 descriptors by z-score; consistency word = cosine between the session's descriptor z-vector now and five tracks ago | Replaces the deleted heuristics with something measured against a real distribution. | ✅ `vibe_readout.py`; the consistency figure ships as a **word count**, the cosine having measured p10 = 0.95 |
+| **H1c** | Replace the queue panel with a **Session** panel: `↓ next:` line, divider, history newest-first with `♥` / `⏭` / `✓` marks | The actual answer to "what is being played". | ✅ `session_history.py`, plus `♪` for the track playing now |
+| **L4** | Rehydrate `liked_tracks` from `feedback_history.json` at startup | Falls out of building the history panel. | ✅ `SessionHistory.liked`; `TUI.liked_tracks` deleted |
+| **H1d** | Rebind `↑↓` to scroll history and `ENTER` to requeue a history entry as `next`; **extend** `[I]` | `[I]` already exists as a model inspector (Stage 0, §0b item 2) showing library size, taste/exploration/selector counters and the live weights. Add: session **and** taste top descriptors, and the effective τ ("choosing from ~top 7"). | ✅ plus `QueueManager.requeue_next()` and a scrolling `[I]`; τ was already there from Stage 2 |
+| **L9** | Reconcile the footer, the README keybinding table, and the fallback-mode bindings | They already disagree three ways; do it while the bindings are open. | ✅ one list, with a test that drives every advertised key |
+| **N1** | *(not planned)* `('pack', …)` for the Now Playing box | Found by the first test that rendered the tree. | ✅ renders down to 80×6 |
 
 **Done when:** the vibe line names three descriptors that a listener would recognise as accurate, and
 `[I]` explains what the machine currently believes without any invented vocabulary.
+
+> **Met.** Live at 120×45 and 80×24: Fleshgod Apocalypse's *King* read
+> `piano-led · halftime · triumphant`, and §10b's seven spot-checks reproduce exactly under the
+> shipped readout. `[I]` reports the bank size, both vectors' descriptors (each gated on its own
+> seeding), the drift count *and* the drift cosine with its measured distribution beside it, on top of
+> Stage 2's τ, rank, β and turnover rows — every one a number the system computed. 416 tests green.
 
 ---
 
 ### Stage 4 — Make it durable *(half a day)*
 
+> **Read this before writing anything.**
+>
+> **Settled — do not re-derive.** The player closed in Stage 2 and the display in Stage 3. The
+> embeddings, the centring, the 49-word bank, selection, the queue, the skip path, MPD mode handling,
+> the descriptor readout, the Session panel and the album-art geometry are all done and tested. Stage 4
+> is durability and documentation: **it should change observable behaviour as little as possible.**
+> Exactly one item below (L8) adds a feature, and it is the one that needs a decision rather than an
+> edit.
+>
+> **What Stage 3 left you.** 416 tests, green, ~17 s. The display is under test for the first time —
+> `test_art_geometry.py`, `test_vibe_readout.py`, `test_session_history.py`, `test_tui_display.py` —
+> and the fixtures for it are `fake_art`, `stub_bank`, `dj_stub` and `tui` in `conftest.py`. Use `tui`
+> rather than constructing `AdaptiveDJTUI` directly: it injects the art renderer, so building the tree
+> does not detect image protocols and leave a `ueberzugpp` child behind, and it restores the SIGWINCH
+> handler afterwards.
+>
+> **One structural fact Stage 3 introduced.** The display owns state that only the display's own tick
+> maintains — `SessionHistory` (what played, the marks, the cursor) and `VibeReadout`'s z-vector
+> store. That is the right place for both (§9), but it means **any code path that blocks the urwid
+> loop stops observing the session.** `[I]` is currently the only one, and it handles this with
+> `screen.set_input_timeouts(max_wait=0.5)` plus a call to `_sync_session_state()` on every timeout
+> wake — without which a track that starts *and* finishes while the overlay is open never reaches the
+> history panel (§0b, item 2b). If Stage 4 adds a modal — a confirm prompt, a help overlay — it must
+> do the same thing.
+>
+> **Five traps.**
+>
+> 1. **L8 is the only item in this stage that risks inventing a constant.** "Un-like" is not a
+>    keybinding problem — the display half is already done, `SessionHistory.liked` is one set
+>    rehydrated from disk. It is a *modelling* question: what does `UserTaste` do with a retraction?
+>    `taste_update_like` is +0.1, so the obvious answer is to apply −0.1 — but the update is a
+>    normalised EMA, not an accumulator, so subtracting the same magnitude does **not** return the
+>    vector to where it was, and the error depends on how many updates have happened since. Do not
+>    pick a number and call it symmetry. Either derive the retraction from the recorded like (the
+>    embedding is in `feedback_history.json`), or make `[L]` a display-only toggle that removes the
+>    heart and the history entry without touching the taste vector, and **say in the README which one
+>    it is**. D4's rule applies: a constant may stay if it shapes behaviour without asserting a fact.
+> 2. **M1c's "persistence round-trips" is narrower than it sounds, and one gap matters more than the
+>    others.** `play_history.json` has eight tests including corruption and a missing file.
+>    `user_taste.npz` has exactly one, and only of an **unseeded** model. `exploration_state.json` and
+>    `feedback_history.json` have **no round-trip test at all** — `save_feedback_history()` and
+>    `load_feedback_history()` are never called directly by the suite. That last one is now
+>    load-bearing: Stage 3 made the `♥` marks depend on that file surviving a restart (L4), so it is
+>    the round-trip to write first.
+> 3. **L1 is now measured, and its impact is narrower than the finding reads.** Confirmed by driving
+>    it: after `Screen.start()`, `signal.getsignal(SIGWINCH)` is urwid's `Screen._sigwinch_handler`,
+>    not `AdaptiveDJTUI._on_sigwinch`. But a **resize** already self-heals within 0.5 s, because
+>    `_art_geometry()` is re-derived from `get_cols_rows()` on every tick and the renderer's key
+>    changes with it. What does *not* self-heal is a **window move at unchanged size** — same key, so
+>    the send is skipped — which is precisely what `force_redraw()` exists for. Fix the handler, but
+>    do not describe it as fixing resize; it fixes monitor moves.
+> 4. **The fallback text mode cannot be tested the way the urwid mode was.** `_run_simple_mode()`
+>    reads real stdin through `termios` / `tty` / `select`, so a harness needs a pty. Its bindings were
+>    reconciled with the footer and the README by *reading* in Stage 3, not by testing, and they are
+>    the only interface claim in the project with nothing behind it. Note also that `[I]` has no
+>    binding there while `_show_model_info()` returns its lines for a non-urwid caller — a loose end
+>    Stage 3 left rather than an intended asymmetry.
+> 5. **Do not re-run the generation to satisfy M7.** A full regeneration is ~5.5 minutes and rewrites
+>    the artifact every downstream number depends on. M7's outstanding items are the three
+>    contradictory download sizes, the runtime estimate and the untested macOS claim — all
+>    documentation. `--stats`, `--describe` and `--compare-templates` answer questions without
+>    rewriting anything. §10b already holds the generation figures.
+>
+> **`data/state/` currently holds real data** from Stage 3's live verification runs — a taste model
+> with updates, exploration state, feedback and play history. None of it is committed and none of it
+> is worth preserving (D3). Delete it before measuring anything about a cold start.
+
+> **What Stage 3 changed about this stage.** M1c is partly done — the display now has its own
+> coverage, which is where N1 was hiding — so what is left of it is narrower and named above. Two new
+> items arrived: un-liking moved here from Stage 3 (it is a taste-model change, not a display one),
+> and the fallback text mode's bindings were reconciled by reading rather than by testing. L9's
+> keybinding row is closed.
+
 | ID | Change | Why |
 |---|---|---|
-| **M1c** | Broaden the suite: scoring, persistence round-trips, embedding determinism, descriptor-gate regression, skip-escalation turnover | C1 and C4 both survived under a green suite. Until the tests are behavioural, green means nothing. |
-| **M7** | Rewrite the README against actual behaviour; re-measure model cache size, generation time and disk requirement | Three described features no longer exist as described; the numbers contradict each other three ways today. |
-| **L1** | Re-install the SIGWINCH handler after `loop.run()` | urwid replaces it at startup. |
+| **M1c** | Finish the suite: persistence round-trips, and a harness for the non-urwid fallback mode | Stage 3 covered the widget tree and immediately found a three-stage-old crash (N1). The fallback mode is now the only interface with no coverage at all, and Stage 3 changed its bindings. |
+| **M7** | Rewrite the README against actual behaviour; re-measure model cache size, generation time and disk requirement | The three contradictory download sizes, the runtime estimate and the untested macOS claim. Stage 3 rewrote the controls table, the screenshot and the "Describing the session" section. |
+| **L1** | Re-install the SIGWINCH handler after `loop.run()` | urwid replaces it at startup. Now more visible than before: with the art geometry derived per render, a missed resize is the one path that still leaves the image stale. |
 | **L2** | Remove or explicitly mark the kitty/sixel art paths as non-functional | They fight urwid for the terminal and lose every 0.5 s. |
-| **L9** | Fix the `.gitignore` `.gitkeep` scaffolding; terminate the ueberzugpp child in `_shutdown`; stop `select_track` mutating its caller's set | The ueberzugpp leak shares a root cause with H3 — fix them together. |
+| **L8** | Bind `[L]` on an already-liked track as un-like | Moved from Stage 3. The display half is done (`SessionHistory.liked`); what remains is deciding what `UserTaste` does with a retraction. |
+| **L9** | Fix the `.gitignore` `.gitkeep` scaffolding; terminate the ueberzugpp child in `_shutdown` | The ueberzugpp leak shares a root cause with H3 — fix them together. |
 | **L6** | *(optional)* Move to `mpc idle` | Only worth it against a remote `MPD_HOST`. At depth 1 the 2 s poll has minutes of runway. |
+| — | *(optional)* Size the `[I]` overlay's ListBox from the widget tree | It computes its inner size from the 70% relative width it declares — a hand-derived number of exactly the kind H8 removed, in a place where being wrong costs a slightly-off scroll page (§0b). |
 
 **Done when:** a fresh clone runs the suite green, and green means something.
 
@@ -2422,6 +2806,10 @@ for later.
 | **The snap is solved *through*, not applied after (Stage 2)** | λ chosen against the un-snapped vector and snapped afterwards let a second consecutive skip land back where the run started — measured live at 1% turnover against a 20% target. Solving against the post-snap vector is the same principle the schedule already rests on: state the target on the thing that actually selects. | Trivial — one keyword argument — but it reintroduces a defect that offline medians do not show. |
 | **Turnover is reported against the skip run's start, not the previous press (Stage 2)** | "How much has changed since I started skipping" is the question a listener is actually asking; per-press deltas understate an escalation by construction. | Trivial — one stored anchor vector. |
 | **`ENTER` on history requeues (H1d)** | Replaces the removed queue navigation with something useful, reusing existing plumbing. | Trivial. If unwanted, `↑↓` becomes pure scrolling and `ENTER` unbinds. |
+| **The drift figure is a word count, not the specified cosine (Stage 3)** | Measured: the cosine's p10 over 40 real sessions is 0.948 and its median 0.989, so it prints "0.99" for nine readings in ten. The count of held words spans 0–3 with a median of 2. Reporting the compressed one would repeat the defect H1 exists to fix. | Trivial — `drift()` returns both. But re-read §10d first: the reason is the distribution, not the presentation. |
+| **The drift and history stores live in the display layer (Stage 3)** | Neither is read by selection, and `SessionState` is closed and tested. Putting a display concern behind the display would be the shape of C4 — state split across a component that cannot see the thing it is about. | Low, but there is no reason to: the only cost is that both reset when the TUI does, which is correct for a session-scoped readout. |
+| **`QueueManager.requeue_next()` adds before it deletes (Stage 3)** | It already knows its track, so it has nothing to exclude and no reason to delete first. Appending first means the queue is momentarily three deep rather than one deep, so a refusal from MPD leaves the session untouched. | Trivial, but it would reintroduce a window where a failed add leaves the queue one deep. `replace_next()` cannot use this order — it has to exclude the entry it is dropping. |
+| **The Now Playing box is packed, not weighted (Stage 3)** | It is the fix for N1, and it makes the panel's height — and therefore the art's position — independent of the terminal's. | Do not reverse. Weighting it raises `WidgetError` below 33 rows and reintroduces a terminal-height dependency into H8's geometry. |
 | **Zero taste vector is inert in *retrieval*, not just scoring (Stage 0)** | An all-zero query to `find_similar` returns an arbitrary slice of the library, so half the candidate pool would be noise presented as preference. Skipping the taste half is what L7's own reasoning implies. | Trivial — one `if np.any(...)`. Do **not** reverse it when β ramps in; β gates the score, not the pool. |
 | **A skip cannot seed the taste model (Stage 0, reaffirmed Stage 2)** | From zero, one negative update normalises to `−track` at unit length: a full-strength claim from a single rejection, stronger than the random seed it replaced. **It did *not* become redundant when the β ramp landed** — β gates the score, never retrieval, and the candidate pool opens its taste half on `np.any(taste_vector)`. Retiring it would hand half the pool to "the tracks least like the one song you rejected". | Trivial to reverse, but do not: the reason is about the magnitude of a claim from one event, which no weight can damp. |
 | **`[I]` became a model inspector in Stage 0 rather than Stage 3** | D6 emptied the overlay while the key, the footer, the README and `start.sh` all still advertised it. A key that silently does nothing is the same dishonesty Stage 0 exists to remove. | None — Stage 3 extends the same overlay rather than building one. |
@@ -2469,6 +2857,15 @@ for later.
 
 6. **`previous_track`.** Impossible via MPD under `consume on`; would need re-adding from the app's own
    history. No binding exists today, so nothing regresses.
+
+7. **The Session panel starts empty on every launch, and that is deliberate.** It is a *session*
+   history: the plays come from watching MPD's current track, and the cursor into them is
+   session-scoped. `feedback_history.json` holds enough to reconstruct a previous evening, so this
+   will read like an unfixed bug to someone who finds it — it is not. What *does* survive a restart is
+   `♥`, because "you like this track" is a persistent fact about the track, while `⏭` and `✓` are facts
+   about tonight (L4). If a cross-session history is ever wanted, it is a different panel with a
+   different claim, not a wider version of this one — and note that `[N]`'s escalation, the drift
+   window and the replay cursor all read "this session" as their unit.
 
 ---
 
@@ -3005,6 +3402,109 @@ the behaviour that ships. A test recomputes these from the code rather than rest
 
 ---
 
+## 10d · Stage 3 measurements
+
+*Taken 23 July 2026 by driving the **shipped** `VibeReadout`, `SessionState` and `AdaptiveDJTUI` over
+the built 674-track centred library and the 49-word bank, plus two end-to-end sessions against the
+live MPD in a pty. This is the live record for anything about the display.*
+
+### The zero-vector hazard, on the real bank
+
+```
+  bank.top(zeros)            shimmering · orchestral · serene
+  VibeReadout, unseeded      ♪ —  nothing has played yet
+```
+
+Every similarity to a zero vector is exactly 0, so every z-score is `−mean_d / std_d` — finite,
+deterministic and determined entirely by the bank's own baselines. The bank does not refuse and
+should not: the arithmetic is valid, and the same code path is correct for a real vector. The gate
+belongs in the readout, and there is one at every entry point (H1).
+
+### Descriptor drift over a real session
+
+40 sessions of 30 tracks each on the 674-track library, each starting from a random real track,
+selecting by argmax under the session vector and applying the shipped EMA. 1,040 readings taken at a
+full five-track window.
+
+```
+  words held (of 3)     0: 1%    1: 12%    2: 42%    3: 45%      mean 2.31
+  cos(z_now, z_5ago)    min 0.721   p10 0.948   p50 0.989   p90 0.997   max 0.999
+```
+
+**This is why H1's specified cosine did not ship as the readout.** Ninety per cent of ordinary
+listening sits above 0.947 — the top 5% of the quantity's nominal range — so a line reporting it
+prints "0.99" essentially forever, and any word derived from it would be pinned to one branch. That
+is the same failure as the entropy heuristic H1 exists to remove (always ≈ 55, one reachable branch)
+and the same failure as C5 (a similarity scale compressed into its top third). It is the third
+distinct place this project has put a number in front of a user without checking which part of its
+range the data occupies.
+
+The word count occupies its range, needs no threshold, and is a statement about something the
+listener actually read. The cosine is still computed, and shown in `[I]` with these percentiles
+printed beside it.
+
+### What a skip run does to the readout
+
+Four settled sessions (12 tracks), then three consecutive `[N]` presses through the shipped
+`repel_from_skip_run`:
+
+```
+  gritty · aggressive · intense   →  menacing · cold · cinematic      0 of 3 held, cos −0.29
+  aggressive · gritty · intense   →  driving · tense · cold           0 of 3 held, cos −0.65
+  joyful · halftime · motorik     →  shimmering · warm · vocal-led    1 of 3 held, cos +0.30
+  groovy · energetic · lo-fi      →  guitar-driven · gritty · driving  0 of 3 held, cos +0.17
+```
+
+The readout moves when the session moves, which is the property that makes it worth showing. Note the
+cosine's behaviour here against its behaviour above: it discriminates fine at the extremes and not at
+all in the middle, which is exactly what a compressed scale looks like.
+
+### The pre-Stage-3 layout, by terminal height (N1)
+
+Rendering the shipped widget tree at `HEAD 3558b88`:
+
+```
+  80x20 … 80x32   WidgetError: <Columns …> rendered (80 x 12) canvas when passed size (80, 6)!
+  80x33 … 80x45   OK
+
+  after ('pack', …):  every height from 80x6 to 80x100 renders; widths 40–90 render at 24 rows
+```
+
+Driven live in a pty at 80×24 against `HEAD`, the traceback prints over the interface. The same
+driver against the Stage 3 tree renders, plays, skips, scrolls the history and opens `[I]`.
+
+### Album-art geometry, derived versus hand-counted
+
+```
+                       hand-counted        derived (80x40)     derived (80x24)
+  x                         2                    1                   1
+  y                         3                    3                   3
+  width                    33                   33                  33
+  height       RIGHT_COL_ROWS = 10              11                  11
+```
+
+`x` was wrong by one column: the comment counted a "terminal left edge" column before the LineBox
+border, but the border *is* column 0. The height was right for the pile as it stood and is wrong the
+moment Stage 3's two-row vibe readout lands — which is what the finding predicted. `y` and `width`
+were right and the derivation reproduces them.
+
+The derived geometry is now **independent of the terminal's height**, because the Now Playing box is
+packed rather than weighted (N1). Under the old layout the position varied with the terminal, which
+is how one hardcoded `y` could be correct at 80×40 and wrong at 80×30.
+
+### Suite growth
+
+```
+  Stage 0 →  67      Stage 1 → 179      Stage 2 → 311      Stage 3 → 416
+```
+
+Stage 3's 105 are the first to construct the widget tree: `test_art_geometry.py` (15, rendering at
+seven terminal sizes), `test_vibe_readout.py` (17), `test_session_history.py` (27),
+`test_tui_display.py` (32, driving the real TUI against `FakeMPD`), plus 6 for `requeue_next` and 8
+deletion guards.
+
+---
+
 *All line references in §2–§5 are against `HEAD 8dc4275` plus the then-uncommitted `tui.py` change
 (footer key-hint rewording, +10/−10, cosmetic). They predate Stage 0 and are stale for every file it
 touched — see §0b. Measurements were taken on the machine described in the header; the
@@ -3022,3 +3522,10 @@ figures did not reproduce — most consequentially `[N]`×1's pool turnover, whi
 all but a function of how settled the session vector is. For anything concerning skips, selection or
 the manifold, §10c is the live record. This is the third stage in a row where re-measuring rather
 than inheriting a number changed something material, which is the argument for the habit.*
+
+*§10d is the fourth. Stage 3 measured the consistency statistic H1 had specified in prose and found
+it compressed into the top 5% of its range for 90% of ordinary listening — so the readout ships a
+word count instead. It also rendered the widget tree for the first time in the project's history and
+found a crash on every terminal shorter than 33 rows (**N1**), which had survived three stages and
+311 behavioural tests. The habit that keeps paying is not re-measuring specifically; it is refusing
+to inherit a claim — a number, or a green suite — without checking what it actually covers.*

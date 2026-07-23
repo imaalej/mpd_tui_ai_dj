@@ -4,16 +4,34 @@ Full-featured TUI with real-time updates and responsive controls.
 
 Layout (rows, top to bottom):
   [1]  Header bar
-  [N]  Now Playing  ── two columns:
-         left:  album art box  (fixed ART_COLS wide, fills available height)
-         right: status · track info · seek bar · vibe
-  [5]  Console      ── live state updates (exploration, vibe shifts, etc.)
-  [M]  Queue        ── upcoming tracks (takes remaining space)
+  [N]  Now Playing  ── two columns, height packed to its own contents:
+         left:  album art area (fixed ART_COLS wide)
+         right: status · track info · seek bar · descriptors · drift
+  [7]  Console      ── live state updates, fixed height
+  [M]  Session      ── `↓ next:` plus session history, takes what is left
   [1]  Footer bar
 
-Album art is rendered as a terminal overlay (ueberzug/kitty/sixel).
-Its position is computed from the live screen size so it never overlaps
-the seek bar or vibe line regardless of terminal dimensions.
+Two things about this file are the point of Stage 3 rather than incidental to it.
+
+**The album art position is derived, not counted.**  It used to be pinned to
+`x=2, y=3, height=RIGHT_COL_ROWS=10`, where `RIGHT_COL_ROWS` was a hand-counted
+comment listing the widgets in the right-hand Pile.  Every item in this stage
+changes that Pile, and the constant carried no way to notice.  `_art_geometry()`
+now asks the widget tree — `Pile.get_item_rows`, `Columns.column_widths`,
+`Widget.rows` — so adding a row to the right column moves the art by exactly one
+row with no edit here at all (audit H8/L3).  The hand count was also *wrong*:
+the art column starts at column 1, not 2, and its true height at 80×40 was 10
+rows against the 10 the constant claimed only because the two errors were in
+different directions.
+
+**The Now Playing box is packed, which is what makes it render at all.**  It used
+to take `('weight', 3, …)` of the body.  Its content is a flow Pile containing a
+Columns whose left cell is a box Filler, so urwid resolved it as a box widget and
+then handed it a height that did not match the one it rendered — a `WidgetError`
+on **every terminal shorter than 33 rows**, including the classic 80×24.  Nothing
+caught it because nothing in the suite had ever constructed the widget tree.
+`('pack', …)` gives it exactly `rows()`, which is both correct and the reason the
+art geometry is now independent of the terminal's height.
 """
 
 import os
@@ -37,6 +55,8 @@ except ImportError:
 
 from config import config
 from album_art import get_album_art_renderer
+from session_history import SessionHistory
+from vibe_readout import VibeReadout, format_descriptors
 
 
 # ─── Console log interceptor ────────────────────────────────────────────────
@@ -155,44 +175,63 @@ _install_console_capture()
 # ─── TUI class ──────────────────────────────────────────────────────────────
 
 # Width (in terminal columns) reserved for the album-art column inside the
-# Now Playing box.  Includes the inner LineBox borders (2 cols each side = 2).
-ART_COLS = 33  # terminal columns wide for the album art area (no inner box)
+# Now Playing box.  This one is a *declaration* — the Columns cell is built to
+# it — rather than a count of something else, which is why it survives H8.
+ART_COLS = 33
 
-# Header height in rows (urwid Frame header is exactly 1 row tall when the
-# header widget is a simple Filler(Text(…))).
-HEADER_ROWS = 1
-FOOTER_ROWS = 1
-
-# Rows used by the Now Playing LineBox itself (top border + bottom border)
-NP_BORDER_ROWS = 2
-
-# Fixed row count for the console panel
+# Fixed row count for the console panel's ListBox (its LineBox adds 2 more).
 CONSOLE_ROWS = 5
 
-# Exact row count of the right column Pile in Now Playing.
-# Count: status(1) + Divider(1) + artist(1) + album(1) + track(1) +
-#        Divider(1) + seek_bar(1) + seek_time(1) + Divider(1) + vibe(1) = 10
-# The art height is pinned to this so a wide cover can never overflow into
-# the seek bar or vibe line regardless of the image aspect ratio.
-RIGHT_COL_ROWS = 10
+# Below this the art area is too small to be an image rather than a smear, so
+# the renderer is cleared instead.  Nothing downstream depends on the numbers;
+# they shape behaviour without asserting anything.
+MIN_ART_ROWS = 3
+MIN_ART_COLS = 8
+
+# How many history rows the Session panel will build widgets for.  The panel is
+# a few dozen rows at most; this only stops an all-night session from rendering
+# hundreds of Text widgets that are scrolled off screen anyway.
+HISTORY_RENDER_LIMIT = 200
+
+# NOTE: `RIGHT_COL_ROWS` is deliberately gone.  It was the hand-counted height of
+# the Now Playing right-hand Pile, and the album art was pinned to it — so every
+# change to that Pile silently misplaced the image and nothing could notice.
+# `_art_geometry()` asks the widget tree instead (audit H8).
 
 
 class AdaptiveDJTUI:
     """Terminal User Interface for Adaptive Session AI DJ."""
 
-    def __init__(self, dj):
+    def __init__(self, dj, art_renderer=None):
         self.dj = dj
         self.running = False
 
         # UI state
         self.current_status: dict = {}
-        self.liked_tracks: set = set()
         # Written to by the signal handler to unblock urwid's MainLoop; see
         # `request_exit`.
         self._exit_pipe: Optional[int] = None
 
-        # Album art
-        self.album_art_renderer = get_album_art_renderer()
+        # What played and what became of it (audit H1c).  The model is here
+        # rather than behind the display because nothing behind the display has
+        # this shape — see session_history.py.
+        self.history = SessionHistory()
+        # Where this session's feedback events begin in the handler's history,
+        # which spans every previous session once it is loaded from disk.
+        self._feedback_cursor = len(getattr(
+            getattr(dj, 'feedback_handler', None), 'feedback_history', []) or [])
+        # Hearts survive a restart now: the likes were always on disk, only the
+        # set that drew them was in memory (audit L4).
+        self.history.rehydrate_likes(getattr(
+            getattr(dj, 'feedback_handler', None), 'feedback_history', []) or [])
+
+        # The descriptor readout, finally reading the bank Stage 1 built.
+        self.vibe = VibeReadout(getattr(dj, 'descriptor_bank', None))
+
+        # Album art.  Injectable so the widget tests can construct the tree
+        # without detecting protocols and spawning a ueberzugpp child.
+        self.album_art_renderer = (art_renderer if art_renderer is not None
+                                   else get_album_art_renderer())
         self.show_album_art = self.album_art_renderer.is_available()
 
         if self.show_album_art:
@@ -219,39 +258,50 @@ class AdaptiveDJTUI:
             ("paused", "yellow,bold", "default"),
             ("track_info", "white", "default"),
             ("vibe", "light cyan", "default"),
-            ("queue_item", "light gray", "default"),
-            ("queue_current", "black,bold", "light green"),
             ("liked", "light red,bold", "default"),
             ("seek_bar", "white", "dark gray"),
             ("seek_progress", "black", "light green"),
             ("console_text", "dark cyan", "default"),
             ("console_warn", "yellow", "default"),
             ("console_err", "light red", "default"),
-            ("queue_focused", "black,bold", "dark cyan"),
+            ("history_item", "light gray", "default"),
+            ("history_focus", "black,bold", "dark cyan"),
+            ("history_playing", "light green,bold", "default"),
+            ("next_up", "light cyan", "default"),
+            ("divider", "dark gray", "default"),
         ]
 
         # ── Header ──
+        # A flow widget, not a Filler: `Frame` wants flow widgets for its header
+        # and footer, and a real flow widget can report its own `rows()` — which
+        # is what `_art_geometry()` reads instead of assuming 1 (H8).
         self.header_text = urwid.Text("🎵 Adaptive Session AI DJ", align="center")
-        self.header = urwid.AttrMap(urwid.Filler(self.header_text), "header")
+        self.header = urwid.AttrMap(self.header_text, "header")
 
         # ── Now Playing: right column widgets ──
         self.status_text = urwid.Text(("paused", "⏸ Paused"))
         self.artist_text = urwid.Text("Artist: ---")
         self.album_text = urwid.Text("Album: ---")
         self.track_text = urwid.Text("Track: ---")
-        # The vibe line carries the track count and nothing else until the CLAP
-        # descriptor bank lands (audit H1/D5, Stage 1 data + Stage 3 display).
-        # The mood/momentum/stage words that used to live here were invented
-        # against thresholds the data never occupied — a blank line is honest,
-        # a counter is a fact, and the old string was neither.
-        self.vibe_text = urwid.Text(("vibe", "Session: —"))
+
+        # The vibe readout, in two rows (audit H1b).  The first names the top
+        # three descriptors by z-score against this library's own distribution;
+        # the second says how many of those three were also on screen a few
+        # tracks ago, and how many tracks have played.  Both are gated on the
+        # session vector being seeded — `bank.top(zeros)` returns a confident
+        # ranking of the bank's own baselines rather than refusing, which is H1's
+        # original defect in a new costume.  See vibe_readout.py.
+        self.descriptor_text = urwid.Text("")
+        self.drift_text = urwid.Text("")
 
         self.seek_bar_progress = urwid.ProgressBar(
             "seek_bar", "seek_progress", current=0, done=100
         )
         self.seek_time_text = urwid.Text("0:00 / 0:00", align="center")
 
-        right_col = urwid.Pile(
+        # The album art's height is this Pile's height.  Adding a row here moves
+        # the art by exactly one row, with no constant to update (H8).
+        self.right_col = urwid.Pile(
             [
                 urwid.AttrMap(self.status_text, "track_info"),
                 urwid.Divider(),
@@ -262,101 +312,113 @@ class AdaptiveDJTUI:
                 urwid.AttrMap(self.seek_bar_progress, "seek_bar"),
                 self.seek_time_text,
                 urwid.Divider(),
-                urwid.AttrMap(self.vibe_text, "vibe"),
+                urwid.AttrMap(self.descriptor_text, "vibe"),
+                urwid.AttrMap(self.drift_text, "vibe"),
             ]
         )
+        right_col = self.right_col
 
         # ── Now Playing: left column (album art area) ──
         # No LineBox here — a border widget renders visible box characters in
         # the terminal that show through behind the ueberzug overlay.
         # The art area is a plain Filler; ueberzug draws the image on top.
         self.album_art_placeholder = urwid.Text(" ", align="center")
-        art_inner = urwid.Filler(self.album_art_placeholder, valign="middle")
+        self.art_inner = urwid.Filler(self.album_art_placeholder, valign="middle")
 
-        # Two-column row: art (fixed width) | track info (rest)
-        np_columns = urwid.Columns(
+        # Two-column row: art (fixed width) | track info (rest).  The art cell is
+        # index 0, which is what makes its x-offset inside the Columns zero; the
+        # geometry derivation reads the index rather than assuming it.
+        self.art_column_index = 0
+        self.np_columns = urwid.Columns(
             [
-                ("fixed", ART_COLS, art_inner),
+                ("fixed", ART_COLS, self.art_inner),
                 ("weight", 1, urwid.Padding(right_col, left=1)),
             ]
         )
 
-        now_playing_content = urwid.Pile(
+        self.now_playing_content = urwid.Pile(
             [
                 urwid.Divider(),
-                np_columns,
+                self.np_columns,
                 urwid.Divider(),
             ]
         )
 
-        self.now_playing_box = urwid.LineBox(now_playing_content, title="♪ Now Playing")
+        self.now_playing_box = urwid.LineBox(self.now_playing_content,
+                                             title="♪ Now Playing")
 
         # ── Console panel ──
         self.console_walker = urwid.SimpleFocusListWalker(
             [urwid.Text(("console_text", "── console ready ──"))]
         )
         console_lb = urwid.ListBox(self.console_walker)
-        # BoxAdapter gives the ListBox a fixed height inside a Pile
+        # BoxAdapter gives the ListBox a fixed height inside a Pile.
+        # WidgetDisable makes it non-selectable, so ↑↓ and ENTER reach
+        # `unhandled_input` instead of being swallowed by this ListBox's own
+        # scrolling — the Pile would otherwise focus it, being the first
+        # selectable thing in the body.
         self.console_box = urwid.LineBox(
             urwid.BoxAdapter(console_lb, CONSOLE_ROWS), title="System Console"
         )
 
-        # ── Up Next panel ──
+        # ── Session panel ──
         #
-        # This was the "Upcoming Queue", listing ten tracks — which it drew from
-        # `mpc playlist`, so with consume off it was actually showing the tracks
-        # already *played*, numbered as if they were the future (audit H2).  At
-        # depth 1 there is exactly one upcoming track and nothing to navigate, so
-        # the list, the ↑↓ bindings and the ENTER-to-play action are all gone.
+        # This was the "Upcoming Queue", listing ten tracks drawn from
+        # `mpc playlist` — which with consume off is the session's *history*,
+        # numbered as if it were the future (audit H2).  Stage 2 cut it to a
+        # one-line `↓ next:`; this is what it becomes (H1c): the lookahead, a
+        # divider, then what actually played, newest first, with ♥ / ⏭ / ✓.
         #
-        # Stage 3 (H1c) replaces this panel with the session history — what
-        # actually happened, with ♥ / ⏭ / ✓ marks — which is the visibility the
-        # queue panel was really standing in for.  The geometry is deliberately
-        # left exactly as it was: the album art is still pinned to hand-counted
-        # row constants (H8), and moving the layout before that is fixed would
-        # misplace the image.
-        self.queue_walker = urwid.SimpleFocusListWalker([])
-        self.queue_listbox = urwid.ListBox(self.queue_walker)
-        self.queue_box = urwid.LineBox(self.queue_listbox, title="Up Next")
+        # It is truthful because it happened, which is the whole argument for
+        # replacing a queue view with a history view at depth 1.
+        self.next_up_text = urwid.Text("  ↓ next:  —")
+        self.history_walker = urwid.SimpleFocusListWalker([])
+        self.history_listbox = urwid.ListBox(self.history_walker)
+        self.session_box = urwid.LineBox(
+            urwid.Pile([
+                ("pack", urwid.AttrMap(self.next_up_text, "next_up")),
+                ("pack", urwid.AttrMap(urwid.Divider("─"), "divider")),
+                ("weight", 1, self.history_listbox),
+            ]),
+            title="Session",
+        )
 
         # ── Main layout ──
-        # now_playing_box: weight 0 means it takes only its natural (pack) height.
-        # We use ('given', N) via BoxAdapter trick — but the cleanest urwid way
-        # is to give now_playing a fixed row count computed at render time.
-        # Instead we use weight proportions and let urwid divide the space.
-        # Proportions: now_playing=3, queue=2 gives now_playing ~60% of body.
-        main_pile = urwid.Pile(
+        #
+        # `('pack', …)` for Now Playing, not `('weight', 3, …)`.  Its content is
+        # a flow Pile wrapping a Columns whose art cell is a box Filler, so urwid
+        # resolves the Columns as a box widget and then renders it at its natural
+        # height — which raised `WidgetError` whenever the weighted allocation
+        # disagreed, i.e. on every terminal shorter than 33 rows.  Packing gives
+        # it exactly `rows()`, so the mismatch cannot arise, the panel is the
+        # same height on an 80×24 as on an 80×50, and the album art's position
+        # stops depending on the terminal's height at all.
+        self.main_pile = urwid.Pile(
             [
-                ("weight", 3, self.now_playing_box),
-                (
-                    CONSOLE_ROWS + 2,
-                    self.console_box,
-                ),  # fixed: CONSOLE_ROWS + 2 border rows
-                ("weight", 2, self.queue_box),
+                ("pack", self.now_playing_box),
+                (CONSOLE_ROWS + 2, urwid.WidgetDisable(self.console_box)),
+                ("weight", 1, urwid.WidgetDisable(self.session_box)),
             ]
         )
 
         # ── Footer ──
-        # [V] is gone (audit D8/H9) and so are the queue-navigation keys, which
-        # had nothing left to navigate.  A footer that advertises a key doing
-        # nothing is the same dishonesty the rest of this rewrite removes.
+        # Reconciled with the README table and the fallback-mode bindings, which
+        # disagreed three ways (audit L9): the README listed volume on `,`/`.`,
+        # the footer on `<`/`>`, and simple mode bound ↑↓ to volume while the
+        # urwid mode had them unbound.  One set of bindings now, everywhere.
         footer_text = urwid.Text(
-            [
-                "Toggle Pause - [SPACE]  ",
-                "Skip Song - [N]  ",
-                "Like Song - [L]  ",
-                "Vol - [<,>]  ",
-                "Seek - [←,→]  ",
-                "Model Info - [I]  ",
-                "Quit - [Q]",
-            ],
+            "[SPACE] Pause   [N] Skip   [L] Like   [↑↓] History   "
+            "[ENTER] Replay   [,.] Vol   [←→] Seek   [I] Info   [Q] Quit",
             align="center",
         )
-        self.footer = urwid.AttrMap(urwid.Filler(footer_text), "footer")
+        # A flow widget, so a narrow terminal wraps the hints onto a second row
+        # rather than silently truncating them — and so `rows()` reports the
+        # truth to `_art_geometry()`.
+        self.footer = urwid.AttrMap(footer_text, "footer")
 
         # ── Frame ──
         self.frame = urwid.Frame(
-            body=main_pile,
+            body=self.main_pile,
             header=self.header,
             footer=self.footer,
         )
@@ -420,6 +482,12 @@ class AdaptiveDJTUI:
             self._seek_forward()
         elif key == "left":
             self._seek_backward()
+        elif key == "up":
+            self._history_scroll(-1)
+        elif key == "down":
+            self._history_scroll(+1)
+        elif key == "enter":
+            self._replay_focused()
         elif key_lower in (",", "<"):
             self._volume_down()
         elif key_lower in (".", ">"):
@@ -447,7 +515,38 @@ class AdaptiveDJTUI:
         t = self.current_status.get("track_file")
         if t:
             self.dj.feedback_handler.process_like(t)
-            self.liked_tracks.add(t)
+            self.history.like(t)
+
+    def _history_scroll(self, delta: int):
+        """
+        [↑] / [↓].  Move the cursor through the session history, newest at top.
+
+        The indices are the history model's own, derived from what this session
+        played.  They deliberately share no numbering with MPD: the bindings this
+        replaces indexed into `mpc playlist`, which under the old modes held the
+        session's history above the current track, so ENTER on the first row
+        replayed the first track of the evening (audit H2).
+        """
+        if self.history.move_focus(delta) and self.use_urwid:
+            self._update_session_panel()
+
+    def _replay_focused(self):
+        """
+        [ENTER].  Put the track under the cursor in the lookahead slot.
+
+        The queue operation itself is `QueueManager.requeue_next()` — the
+        ordering of an add against a delete is the thing C4 and M1 are about, and
+        a display layer that reimplemented it would be a second place for it to
+        drift.
+        """
+        track = self.history.focused_track()
+        if not track:
+            return
+        if self.dj.queue_manager.requeue_next(track):
+            label = self._label_for(track)
+            print(f"Replay: {label} queued next", file=sys.stderr)
+            if self.use_urwid:
+                self._update_session_panel()
 
     def _volume_up(self):
         self.dj.mpd_controller.volume_up(5)
@@ -474,16 +573,16 @@ class AdaptiveDJTUI:
         if self.use_urwid:
             raise urwid.ExitMainLoop()
 
-    def _show_model_info(self):
+    def _model_info_lines(self) -> List[str]:
         """
-        Model inspector: what the machine currently believes, in measured
-        quantities only.
+        What the machine currently believes, in measured quantities only.
 
-        This replaces the time-context overlay, which had no content left after
-        that subsystem was removed (audit D6/L9).  Stage 3 (H1d) extends it with
-        the top descriptors for the session and taste vectors and the effective
-        sampling temperature; everything shown here is already a real number, so
-        nothing needs to be invented in the meantime.
+        This replaced the time-context overlay, which had no content left after
+        that subsystem was removed (audit D6/L9).  Stage 3 (H1d) adds the
+        descriptor rows: the top words for the session vector *and* the taste
+        vector, and the drift figure the vibe line summarises.  Everything here
+        is derived — there is no vocabulary in this overlay that the system
+        cannot back with a number it computed.
         """
         session = self.dj.session_state.get_stats()
         taste = self.dj.user_taste.get_stats()
@@ -502,15 +601,60 @@ class AdaptiveDJTUI:
         run = exploration['consecutive_skips']
         next_target = schedule[min(run + 1, len(schedule)) - 1]
 
+        # Descriptor rows (audit H1d).  Both are gated on their vector carrying
+        # evidence: z-scoring a zero vector yields a confident-looking ranking of
+        # the bank's own baselines rather than an error, so an ungated readout
+        # would state a vibe about nothing (H1, and the module note in
+        # vibe_readout.py).
+        seeded = session['is_seeded']
+        session_vector = self.dj.session_state.get_session_vector()
+        taste_vector = self.dj.user_taste.get_taste_vector()
+        drift = self.vibe.drift(session_vector, seeded)
+
+        if self.vibe.bank is None:
+            descriptor_lines = ["  (no descriptor bank loaded — see the startup log)"]
+        else:
+            session_words = (format_descriptors(
+                self.vibe.descriptors(session_vector, seeded))
+                if seeded else "— nothing has played yet")
+            taste_words = (format_descriptors(
+                self.vibe.bank.top(taste_vector, self.vibe.top_n))
+                if taste['is_seeded'] else "— no positive signal yet")
+            descriptor_lines = [
+                f"  bank             {len(self.vibe.bank)} descriptors, "
+                f"z-scored against this library",
+                f"  session          {session_words}",
+                f"  taste            {taste_words}",
+            ]
+            if drift is None:
+                descriptor_lines.append(
+                    "  drift            — (fewer than two tracks recorded)")
+            else:
+                descriptor_lines.append(
+                    f"  drift            {drift['held']} of {drift['of']} words held "
+                    f"over {drift['distance']} tracks")
+                # The cosine H1 originally specified.  It is kept here rather
+                # than on the vibe line because it is a compressed scale: over 40
+                # real sessions its median is 0.988 and its p10 is 0.947, so it
+                # reads as "0.99" almost always (§10d).  The word count above is
+                # what occupies its range; this is the underlying measurement.
+                descriptor_lines.append(
+                    f"  drift cosine     {drift['cosine']:+.3f}   "
+                    f"(ordinary listening: median 0.99, p10 0.95)")
+
         lines = [
             "MODEL STATE",
             "",
             f"Library             {self.dj.track_library.get_track_count()} tracks",
             f"Session started     {'yes' if session['session_started'] else 'no'}",
             f"Session vector      "
-            + ("seeded" if session['is_seeded'] else "unseeded (nothing has played yet)"),
+            + ("seeded" if seeded else "unseeded (nothing has played yet)"),
             f"Tracks this session {session['tracks_played']}",
             f"Unique tracks seen  {selector['unique_tracks_played']}",
+            "",
+            "─" * 50,
+            "DESCRIPTORS",
+            *descriptor_lines,
             "",
             "─" * 50,
             "SELECTION",
@@ -545,36 +689,81 @@ class AdaptiveDJTUI:
             f"  novelty          {weights['novelty_weight']:.3f}",
             f"  anti-repetition  {weights['anti_repetition_weight']:.3f}",
             "",
-            "Press any key to close…",
+            "[↑↓] scroll   any other key closes",
         ]
+        return lines
 
-        if self.use_urwid:
-            overlay_text = urwid.Text("\n".join(lines))
-            overlay_fill = urwid.Filler(overlay_text, valign="top")
-            overlay_box = urwid.LineBox(overlay_fill, title="Model Info")
+    # Keys that dismiss the inspector rather than scrolling it.
+    _INFO_SCROLL_KEYS = ("up", "down", "page up", "page down", "home", "end")
 
-            # Size the box to its contents rather than to a fixed 70% of the
-            # screen.  At the old fixed height the last third of this overlay was
-            # silently cut off once Stage 2 added the sampling and skip rows —
-            # an inspector that hides what it is inspecting is worse than none.
-            # Stage 3 adds the descriptor rows (H1d) and will need this to scroll
-            # rather than merely fit.
-            _, screen_rows = self.loop.screen.get_cols_rows()
-            box_rows = min(len(lines) + 2, max(6, screen_rows - 2))
+    def _show_model_info(self):
+        """
+        [I].  Draw the inspector and block on it until a key dismisses it.
 
-            overlay = urwid.Overlay(
-                overlay_box,
-                self.frame,
-                align="center",
-                width=("relative", 70),
-                valign="middle",
-                height=box_rows,
-            )
-            orig = self.loop.widget
-            self.loop.widget = overlay
-            self.loop.draw_screen()
-            self.loop.screen.get_input()
+        Stage 2 sized this box to its contents after the sampling and skip rows
+        overflowed a fixed 70% height and the last third was silently cut off.
+        The descriptor rows push it past a 40-row terminal, so content-sizing is
+        no longer enough: it is a ListBox now, and ↑↓ scroll it.  An inspector
+        that hides part of what it is inspecting is worse than no inspector.
+        """
+        lines = self._model_info_lines()
+        if not self.use_urwid:
+            return lines
+
+        walker = urwid.SimpleListWalker([urwid.Text(line) for line in lines])
+        listbox = urwid.ListBox(walker)
+        overlay_box = urwid.LineBox(listbox, title="Model Info")
+
+        cols, screen_rows = self.loop.screen.get_cols_rows()
+        box_rows = min(len(lines) + 2, max(6, screen_rows - 2))
+
+        overlay = urwid.Overlay(
+            overlay_box,
+            self.frame,
+            align="center",
+            width=("relative", 70),
+            valign="middle",
+            height=box_rows,
+        )
+        orig = self.loop.widget
+        self.loop.widget = overlay
+        # Wake even with no keypress.  This loop owns the thread that runs the
+        # session bookkeeping, and the overlay can stay open indefinitely now
+        # that ↑↓ no longer dismiss it — without a timeout, a track that starts
+        # *and* finishes while `[I]` is up never reaches the history panel and
+        # its ✓ is dropped on the floor.  Stage 2's version closed on any key,
+        # so it could not be held open long enough for this to bite.
+        try:
+            self.loop.screen.set_input_timeouts(max_wait=0.5)
+        except Exception:
+            pass
+        try:
+            while True:
+                self.loop.draw_screen()
+                keys = self.loop.screen.get_input()
+                if not keys:
+                    self._sync_session_state()
+                    continue
+                dismissed = False
+                for key in keys:
+                    if key in self._INFO_SCROLL_KEYS:
+                        # The ListBox's own size: the Overlay's width is 70% of
+                        # the screen and the LineBox takes one column each side.
+                        inner = (max(1, int(cols * 0.7) - 2), max(1, box_rows - 2))
+                        listbox.keypress(inner, key)
+                    elif isinstance(key, tuple):
+                        continue        # a mouse event; not a dismissal
+                    else:
+                        dismissed = True
+                if dismissed:
+                    break
+        finally:
+            try:
+                self.loop.screen.set_input_timeouts(max_wait=None)
+            except Exception:
+                pass
             self.loop.widget = orig
+        return lines
 
     # ── Periodic update ───────────────────────────────────────────────────────
 
@@ -595,9 +784,32 @@ class AdaptiveDJTUI:
 
     # ── Display update ────────────────────────────────────────────────────────
 
-    def _update_display(self):
+    def _sync_session_state(self) -> dict:
+        """
+        Observe what the player has done since the last look, and return MPD's
+        status so the caller does not poll it twice.
+
+        Separate from drawing because it must keep running while the `[I]`
+        overlay has the loop blocked.  It is the only place the history learns
+        that a track started, so a gap here is a track missing from the panel —
+        and the panel's whole claim is that it lists what actually played.
+
+        Order matters: a track must be in the history before an event can mark
+        it, and the vibe snapshot must come from the vector as it stands now.
+        """
         status = self.dj.mpd_controller.get_status()
         self.current_status = status
+
+        self.history.note_playing(status.get("track_file"))
+        self._drain_feedback_events()
+        stats = self.dj.session_state.get_stats()
+        self.vibe.observe(self.dj.session_state.get_session_vector(),
+                          stats['tracks_played'], stats['is_seeded'])
+        return status
+
+    def _update_display(self):
+        status = self._sync_session_state()
+        session_stats = self.dj.session_state.get_stats()
 
         if not self.use_urwid:
             self._update_simple_display(status)
@@ -622,7 +834,7 @@ class AdaptiveDJTUI:
         self.artist_text.set_text(f"Artist:  {artist}")
         self.album_text.set_text(f"Album:   {album}")
 
-        if track_file and track_file in self.liked_tracks:
+        if self.history.is_liked(track_file):
             self.track_text.set_text(["Track:   ", ("liked", "❤ "), title])
         else:
             self.track_text.set_text(f"Track:   {title}")
@@ -639,14 +851,20 @@ class AdaptiveDJTUI:
             self.seek_bar_progress.set_completion(0)
             self.seek_time_text.set_text("0:00 / 0:00")
 
-        # Session line (see the widget's construction for why this is a counter)
-        self.vibe_text.set_text(("vibe", f"Session: {self._session_line()}"))
+        # Vibe readout: the descriptors, then the drift and the counter.
+        descriptor_line, drift_line = self.vibe.lines(
+            self.dj.session_state.get_session_vector(),
+            session_stats['is_seeded'],
+            session_stats['tracks_played'],
+        )
+        self.descriptor_text.set_text(descriptor_line)
+        self.drift_text.set_text(drift_line)
 
         # Console
         self._update_console()
 
-        # Queue
-        self._update_queue_display()
+        # Session panel
+        self._update_session_panel()
 
         # Album art
         if self.show_album_art and track_file:
@@ -663,43 +881,104 @@ class AdaptiveDJTUI:
 
     # ── Album art positioning ─────────────────────────────────────────────────
 
+    def _art_geometry(self, cols: int, rows: int):
+        """
+        Where the album art goes, asked of the widget tree (audit H8/L3).
+
+        Returns `(x, y, width, height)` in 0-indexed terminal cells, or None when
+        there is no usable art area.
+
+        This replaces four hand-counted constants — `x=2`, `y=3`, `width=33`,
+        `height=RIGHT_COL_ROWS=10` — whose comment block documented the
+        arithmetic carefully while nothing enforced it.  Two of them were already
+        wrong: the art column starts at column **1** (the LineBox's left border
+        is column 0, not column 1), and the art area's true height is whatever
+        the right-hand Pile happens to be, which Stage 3 changes from 10 rows to
+        11.  Every number below is read from the widgets that produce it, so a
+        row added to the Now Playing panel moves the image without an edit here.
+
+        The walk, outside in:
+
+            frame        → header.rows() gives the body's first row
+            main_pile    → get_item_rows() gives the Now Playing box's height
+                           and, by summing the items above it, its first row
+            LineBox      → one border row and one border column
+            content Pile → the rows of every widget above np_columns
+            np_columns   → column_widths() gives the art cell's width, and the
+                           widths of the cells before it give its x-offset
+        """
+        if cols <= 0 or rows <= 0:
+            return None
+
+        header_rows = self.frame.header.rows((cols,)) if self.frame.header else 0
+        footer_rows = self.frame.footer.rows((cols,)) if self.frame.footer else 0
+        body_rows = rows - header_rows - footer_rows
+        if body_rows <= 0:
+            return None
+
+        # Row and column of the Now Playing box's top-left corner.
+        item_rows = self.main_pile.get_item_rows((cols, body_rows), False)
+        y = header_rows
+        for (widget, _options), height in zip(self.main_pile.contents, item_rows):
+            if widget is self.now_playing_box:
+                np_rows = height
+                break
+            y += height
+        else:
+            return None
+        x = 0
+
+        # Inside the LineBox: one border row, one border column.
+        y += 1
+        x += 1
+        inner_cols = cols - 2
+        if inner_cols <= 0:
+            return None
+
+        # Inside the content Pile: everything stacked above np_columns.
+        for widget, _options in self.now_playing_content.contents:
+            if widget is self.np_columns:
+                break
+            y += widget.rows((inner_cols,))
+        else:
+            return None
+
+        # Inside the Columns: the cells to the left of the art cell.
+        widths = self.np_columns.column_widths((inner_cols,))
+        if self.art_column_index >= len(widths):
+            return None
+        x += sum(widths[:self.art_column_index])
+        width = widths[self.art_column_index]
+
+        # The art cell's height is the Columns' height, which is the tallest of
+        # its cells — in practice the right-hand Pile.  Clip it to what is
+        # actually on screen: the Now Playing box is packed, so it can still be
+        # cut off from below by a very short terminal.
+        height = self.np_columns.rows((inner_cols,))
+        visible = min(height, np_rows - 2, rows - footer_rows - y - 1)
+
+        if width < MIN_ART_COLS or visible < MIN_ART_ROWS:
+            return None
+        return x, y, width, visible
+
     def _render_art(self, art_path):
         """
-        Calculate the art position from live screen dimensions and re-render.
+        Position the art from the live screen size and re-render.
 
-        Position accounting (0-indexed terminal rows/cols):
-          col 0      = terminal left edge
-          col 1      = now_playing_box LineBox left │ border
-          col 2      = art column inner start            ← x_art
-
-          row 0      = header (1 row)
-          row 1      = now_playing_box LineBox top ─ border
-          row 2      = top Divider() inside now_playing_content
-          row 3      = np_columns area starts               ← y_art
-
-        We always re-send the render command (no skip-if-same guard here)
-        so the image reappears after window moves/monitor changes.
-        The AlbumArtRenderer.render() itself is the skip guard for the
-        same-image/same-position case to avoid redundant sends.
+        We always re-send the render command (no skip-if-same guard here) so the
+        image reappears after window moves and monitor changes.
+        `AlbumArtRenderer.render()` is itself the skip guard for the
+        same-image/same-position case, to avoid redundant sends.
         """
         cols, rows = self.loop.screen.get_cols_rows()
+        geometry = self._art_geometry(cols, rows)
+        if geometry is None:
+            # Too short or too narrow to draw into — an image squeezed into two
+            # rows is a smear over the seek bar, not album art.
+            self.album_art_renderer.clear()
+            return
 
-        # X: NP LineBox left border (1) = col 1, art inner starts at col 2
-        x_art = 2
-
-        # Y: header(1) + NP top border(1) + top Divider(1) = row 3
-        y_art = 3
-
-        # Width: ART_COLS columns wide (no inner LineBox to subtract)
-        art_w = ART_COLS
-
-        # Height: pin to the exact row count of the right column Pile.
-        # This ensures that even a very wide (landscape) album cover — which
-        # ueberzug would scale to fill the full width — cannot overflow
-        # downward past the seek bar or vibe line, at any terminal size.
-        # RIGHT_COL_ROWS = 10 matches the fixed Pile height exactly.
-        art_h = RIGHT_COL_ROWS
-
+        x_art, y_art, art_w, art_h = geometry
         self.album_art_renderer.render(
             art_path, x=x_art, y=y_art, width=art_w, height=art_h
         )
@@ -732,41 +1011,91 @@ class AdaptiveDJTUI:
         except Exception:
             pass
 
-    # ── Queue update ──────────────────────────────────────────────────────────
+    # ── Session panel ─────────────────────────────────────────────────────────
 
-    def _update_queue_display(self):
+    def _drain_feedback_events(self):
         """
-        One line: the single track queued ahead of the current one.
+        Pull whatever `FeedbackHandler` has recorded since the last refresh and
+        mark the history with it.
 
-        There is nothing else truthful to show here.  The queue is one deep by
-        design (audit D1) so that a skip, a like or a full listen changes what
-        plays *next* rather than in ten songs' time; the panel's old job — giving
-        the listener a picture of where the session is going — passes to the
-        descriptor readout and the session history in Stage 3.
+        This is how a skip becomes `⏭` and a completed track becomes `✓` without
+        the display having to observe either event directly — full listens fire
+        on the background thread, and there is no callback into the UI.  The
+        cursor is what keeps a file spanning every previous session from
+        back-filling tonight's panel.
         """
-        self.queue_walker.clear()
+        events = getattr(self.dj.feedback_handler, 'feedback_history', None)
+        if events is None:
+            return
+        if self._feedback_cursor > len(events):
+            # The handler truncated its history (it caps at 1000 events).
+            self._feedback_cursor = 0
+        self._feedback_cursor = self.history.drain_events(
+            events, self._feedback_cursor)
 
+    def _update_session_panel(self):
+        """
+        The lookahead on top, then what actually played, newest first.
+
+        This is what the queue panel was standing in for.  At depth 1 there is
+        exactly one upcoming track and nothing to navigate, so the panel's real
+        subject is the past — which has the advantage of being true (audit H1c).
+        """
         next_track = self._next_track_label()
-        if next_track is None:
-            self.queue_walker.append(
-                urwid.AttrMap(urwid.Text("  — nothing queued yet —"), "queue_item"))
-        else:
-            self.queue_walker.append(
-                urwid.AttrMap(urwid.Text(f"  ↓ next:  {next_track}"), "queue_item"))
+        self.next_up_text.set_text(
+            f"  ↓ next:  {next_track}" if next_track else "  ↓ next:  —")
+
+        current = self.current_status.get("track_file")
+        rows = self.history.rows(current_track=current,
+                                 labeller=self._label_for,
+                                 limit=HISTORY_RENDER_LIMIT)
+
+        self.history_walker.clear()
+        if not rows:
+            self.history_walker.append(
+                urwid.AttrMap(urwid.Text("  — nothing has played yet —"),
+                              "history_item"))
+            return
+
+        for row in rows:
+            text = urwid.Text(f" {row['marks']} {row['label']}")
+            if row['focused']:
+                attr = "history_focus"
+            elif row['playing']:
+                attr = "history_playing"
+            else:
+                attr = "history_item"
+            self.history_walker.append(urwid.AttrMap(text, attr))
+
+        # Keep the cursor on screen as the list grows past the panel's height.
+        try:
+            self.history_walker.set_focus(
+                min(self.history.focus, len(self.history_walker) - 1))
+        except Exception:
+            pass
+
+    def _label_for(self, track: str) -> str:
+        """
+        `Artist – Title` for one track key.
+
+        `fetch_track_tags` rather than the deleted `get_playlist_metadata`: with
+        `consume on` a played track is gone from `mpc playlist`, so the map that
+        method built covered exactly the tracks this panel does not show (audit
+        §8, Stage 3 trap 2).
+        """
+        meta = self.dj.mpd_controller.fetch_track_tags(track)
+        artist = meta.get("artist") or "Unknown Artist"
+        title = meta.get("title") or Path(track).stem
+        return f"{artist} – {title}"
 
     def _next_track_label(self) -> Optional[str]:
-        """`artist – album – title` for the lookahead, or None if there is none."""
+        """`artist – title` for the lookahead, or None if there is none."""
         current = self.current_status.get("track_file")
         track = self.dj.queue_manager.get_next_track(current_track=current)
         if not track:
             return None
-
-        meta = self.dj.mpd_controller.get_playlist_metadata().get(track, {})
-        artist = meta.get("artist", "Unknown Artist")
-        album = meta.get("album", "Unknown Album")
-        title = meta.get("title", Path(track).stem)
-        label = f"{artist} – {album} – {title}"
-        return f"❤ {label}" if track in self.liked_tracks else label
+        label = self._label_for(track)
+        return f"❤ {label}" if self.history.is_liked(track) else label
 
     # ── Simple (non-urwid) display ────────────────────────────────────────────
 
@@ -783,7 +1112,7 @@ class AdaptiveDJTUI:
 
         tf = status.get("track_file")
         t = status.get("title", "Unknown")
-        if tf and tf in self.liked_tracks:
+        if self.history.is_liked(tf):
             t = f"❤ {t}"
         print(f"Track:  {t}")
 
@@ -794,14 +1123,28 @@ class AdaptiveDJTUI:
             print(f"\n[{bar}]")
             print(f"{self._fmt(pos)} / {self._fmt(dur)}")
 
-        print(f"\nSession: {self._session_line()}")
+        stats = self.dj.session_state.get_stats()
+        vector = self.dj.session_state.get_session_vector()
+        for line in self.vibe.lines(vector, stats['is_seeded'],
+                                    stats['tracks_played']):
+            print(line)
 
         print("\n" + "─" * 60)
         next_track = self._next_track_label()
         print(f"↓ next:  {next_track}" if next_track else "↓ next:  —")
 
+        current = status.get("track_file")
+        for row in self.history.rows(current_track=current,
+                                     labeller=self._label_for, limit=8):
+            cursor = "▸" if row['focused'] else " "
+            print(f"{cursor} {row['marks']} {row['label']}")
+
         print("\n" + "=" * 60)
-        print("SPACE=Play/Pause  N=Next  L=Like  ↑↓=Vol  ←→=Seek  Q=Quit")
+        # The same bindings as the urwid mode.  These used to disagree — ↑↓ were
+        # volume here and queue navigation there, while the README said something
+        # third (audit L9).
+        print("SPACE=Play/Pause  N=Next  L=Like  ↑↓=History  ENTER=Replay")
+        print(",.=Vol  ←→=Seek  Q=Quit")
         print("=" * 60)
         sys.stdout.flush()
 
@@ -812,21 +1155,23 @@ class AdaptiveDJTUI:
         s = seconds % 60
         return f"{m}:{s:02d}"
 
-    def _session_line(self) -> str:
-        """
-        The one honest thing the session vector can say about itself right now:
-        how many tracks it has been fed.  Stage 3 replaces this with the top-3
-        CLAP descriptors by z-score plus a measured drift word (audit H1).
-        """
-        n = self.dj.session_state.tracks_played
-        if not self.dj.session_state.session_started:
-            return "—"
-        return f"{n} track{'' if n == 1 else 's'} played"
+    # NOTE: `_session_line()` is gone.  It reported the track count because that
+    # was the only honest thing the session vector could say about itself with
+    # the descriptor bank unwired — the mood, momentum and stage words it
+    # replaced were all invented against thresholds the data never occupied
+    # (audit D4).  The bank is wired now; see `vibe_readout.py`.
 
     # ── Run ───────────────────────────────────────────────────────────────────
 
     def run(self):
         self.running = True
+        # This session's feedback events start here.  Taken at run() rather than
+        # at construction because `persistence.load_all()` and `start_session()`
+        # both happen in between, and the file it loads spans every previous
+        # session.
+        events = getattr(self.dj.feedback_handler, 'feedback_history', None)
+        if events is not None:
+            self._feedback_cursor = len(events)
         if not self.use_urwid:
             self._run_simple_mode()
         else:
@@ -870,10 +1215,16 @@ class AdaptiveDJTUI:
                         self._skip_track()
                     elif key.lower() == "l":
                         self._like_track()
-                    elif key == "\x1b[A":
-                        self._volume_up()
-                    elif key == "\x1b[B":
+                    elif key in (",", "<"):
                         self._volume_down()
+                    elif key in (".", ">"):
+                        self._volume_up()
+                    elif key in ("\r", "\n"):
+                        self._replay_focused()
+                    elif key == "\x1b[A":
+                        self._history_scroll(-1)
+                    elif key == "\x1b[B":
+                        self._history_scroll(+1)
                     elif key == "\x1b[C":
                         self._seek_forward()
                     elif key == "\x1b[D":

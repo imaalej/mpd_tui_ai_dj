@@ -21,7 +21,11 @@ class MPDController:
         self.connected = False
         self._current_track = None
         self._last_status = {}
-        
+        # Tags resolved per track, keyed by the `mpc listall` path.  The session
+        # history panel asks for the same handful of tracks on every 0.5 s
+        # refresh, and the first resolution reads the file with mutagen.
+        self._tag_cache: Dict[str, dict] = {}
+
     def connect(self) -> bool:
         """Verify connection to MPD."""
         try:
@@ -208,59 +212,34 @@ class MPDController:
         except Exception as e:
             print(f"Volume down command failed: {e}", file=sys.stderr)
     
-    def get_playlist_metadata(self) -> dict:
+    # NOTE: `get_playlist_metadata()` is gone (audit §8, Stage 3 trap 2).  It
+    # built its map from `mpc playlist`, and with `consume on` a played track is
+    # *removed* from the playlist — so the one existing metadata path covered
+    # exactly the tracks the session-history panel does not show, and shelled out
+    # an extra `mpc playlist` on every 0.5 s refresh to do it.  Its only caller
+    # wanted tags for one track at a time, which is what `fetch_track_tags` is.
+
+    def fetch_track_tags(self, track_file: str) -> dict:
         """
-        Get metadata for all tracks in current playlist.
-        Returns dict keyed by file path.
-
-        NOTE: `mpc playlist -f FORMAT` does NOT support the -f flag — it is
-        silently ignored, producing no tag data.  Instead we fetch the plain
-        file list and then resolve each track's tags via `mpc search file`.
-        Results are cached so repeated calls are fast.
-        """
-        # --- Step 1: get file list from playlist ---
-        try:
-            list_result = subprocess.run(
-                ['mpc', '-h', self.host, '-p', str(self.port), 'playlist', '-f', '%file%'],
-                capture_output=True,
-                text=True,
-                timeout=5
-            )
-            if list_result.returncode != 0 or not list_result.stdout.strip():
-                return {}
-            track_files = [
-                line.strip()
-                for line in list_result.stdout.strip().split('\n')
-                if line.strip()
-            ]
-        except Exception:
-            return {}
-
-        # --- Step 2: for each file resolve tags, using cache ---
-        if not hasattr(self, '_metadata_cache'):
-            self._metadata_cache: Dict[str, dict] = {}
-
-        metadata_map: Dict[str, dict] = {}
-        for track_file in track_files:
-            if track_file in self._metadata_cache:
-                metadata_map[track_file] = self._metadata_cache[track_file]
-                continue
-
-            meta = self._fetch_track_tags(track_file)
-            self._metadata_cache[track_file] = meta
-            metadata_map[track_file] = meta
-
-        return metadata_map
-
-    def _fetch_track_tags(self, track_file: str) -> dict:
-        """
-        Fetch artist/album/title for a single track file.
+        Fetch artist/album/title for a single track file, cached.
 
         Strategy (in order of preference):
           1. mutagen  – reads ID3/FLAC/etc. tags directly from the file.
           2. mpc search file – asks MPD for the track info by file path.
           3. Filename stem fallback.
+
+        The cache is what makes this usable from the display loop: the history
+        panel asks about the same tracks twice a second, and step 1 is file I/O.
         """
+        cached = self._tag_cache.get(track_file)
+        if cached is not None:
+            return cached
+        tags = self._resolve_track_tags(track_file)
+        self._tag_cache[track_file] = tags
+        return tags
+
+    def _resolve_track_tags(self, track_file: str) -> dict:
+        """Uncached resolution — see `fetch_track_tags`."""
         # --- Try mutagen first (most reliable, zero extra processes) ---
         try:
             import mutagen

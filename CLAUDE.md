@@ -14,6 +14,9 @@ for an in-progress rewrite. Before changing anything:
 - **§7** — the `.npz` schemas. Both artifacts now exist and are validated on load; build to these.
 - **§10c** — the Stage 2 measurements, taken by driving the shipped code. Supersedes §10b's two
   "Re-measured for Stage 2" tables, which were simulations written before the code existed.
+- **§10d** — the Stage 3 measurements: the descriptor drift distribution (which changed what the
+  readout ships), the derived-versus-hand-counted art geometry, and the terminal sizes at which the
+  pre-Stage-3 layout crashed.
 
 Findings are tagged `OPEN` / `NEW` / `ELEVATED` (work required), `DONE` / `PARTIALLY DONE` (shipped),
 or `DISSOLVED` / `SUPERSEDED` (no work — the design change removed them). Don't fix a dissolved
@@ -21,49 +24,45 @@ finding. §6 is the current status table.
 
 ## Project state
 
-**Stages 0, 1 and 2 are complete. Stage 3 is next.** Line references in the audit's §2–§5 predate
-Stage 0 and are stale for every file those stages touched.
+**Stages 0–3 are complete. Stage 4 is next.** Line references in the audit's §2–§5 predate Stage 0
+and are stale for every file those stages touched.
 
-**The application plays.** It runs continuously one track ahead, adapts on the very next song,
-forces and restores MPD's playback modes on every exit path, and escalates `[N]` by a magnitude
-solved for a measured pool-turnover target. Verified live: 36 tracks, no stall, no repeat inside the
-replay gap, modes restored byte-identically after `kill -TERM`. Every critical finding is closed.
+**The application plays, and now says what it is playing.** It runs continuously one track ahead,
+adapts on the very next song, forces and restores MPD's playback modes on every exit path, and
+escalates `[N]` by a magnitude solved for a measured pool-turnover target. The vibe line names three
+CLAP descriptors z-scored against this library, the Session panel lists what actually played with
+`♥` / `⏭` / `✓` marks, `↑↓` and `ENTER` scroll and replay it, and the album art's position is derived
+from the widget tree. Verified live at 120×45 and 80×24, with the user's MPD queue, modes and volume
+restored byte-identically.
 
-**Stage 3 is display only.** Read §8's Stage 3 section first — it opens with what is settled, what
-Stage 2 left in place for it, and the one item in the stage that risks inventing a threshold. The
-short version:
+**Stage 4 is durability.** Read §8's Stage 4 section, which Stage 3 rewrote. The remaining work is
+M1c (persistence round-trips, and the non-urwid fallback mode — now the only interface with no
+coverage), M7's README contradictions, L1's SIGWINCH handler, L2's non-functional kitty/sixel art
+paths, L8's un-like binding (moved out of Stage 3: it is a taste-model change, not a display one),
+and L9's `.gitkeep` scaffolding and leaked ueberzugpp child.
 
-- **Do H8 first.** The album art is pinned to hand-counted row constants (`RIGHT_COL_ROWS = 10`,
-  `x=2`, `y=3`). Stage 2 deliberately left the panel geometry untouched so those constants are still
-  correct — and every other Stage 3 item moves the layout out from under them.
-- The files in scope are `tui.py` and `album_art.py`, plus `descriptor_bank.py` as a *reader*. If a
-  display change seems to need `queue_manager.py`, `track_selector.py`, `session_state.py` or
-  `manifold.py`, stop and work out why — the player is closed and tested.
-- `DescriptorBank` already loads as `self.descriptor_bank` on the orchestrator; `z_scores(vector)`
-  and `top(vector, n)` are the whole API H1b and H1d need. It has been sitting unused since Stage 1.
-- **Gate the vibe readout on `session_state.is_seeded()`.** Stage 2 made the session vector start at
-  zero, and `bank.top(zeros)` does not refuse — every similarity is 0, so it returns
-  `−mean_d / std_d`, which reads as `shimmering · orchestral · serene` about nothing at all. This is
-  H1's original defect in a new costume and the bank cannot defend against it. A test pins the
-  hazard.
-- **The history panel needs a different metadata path.** `get_playlist_metadata()` reads
-  `mpc playlist`, and under `consume on` played tracks are gone from it — so it covers exactly the
-  tracks the history panel does not show. `MPDController._fetch_track_tags()` is the per-track,
-  cached one (mutagen → `mpc search` → filename).
-- **Nothing stores what H1's consistency word compares against.** `recent_tracks` holds the last five
-  *track embeddings*, not past session-vector z-vectors.
-- `↑↓` and `ENTER` are unbound and absent from the footer, so H1d rebinds free keys. **Re-derive the
-  history indices from scratch** — the old ones counted from the top of the MPD playlist, which is
-  why `ENTER` used to replay the session's first track.
-- `[I]` already reports τ, the drawn rank, β earned and the next skip's turnover target. H1d adds the
-  descriptor rows; the overlay is sized to its content and will need to **scroll** once they land.
-- **Nothing in the suite constructs the widget tree.** 311 tests cover everything *behind* the
-  display, so Stage 3 starts with no coverage in its own area — which is how H1, C1 and C4 all shipped
-  under a green suite. H8's geometry is arithmetic and testable.
+Two things Stage 3 established that are easy to undo:
+
+- **The Now Playing box is `('pack', …)`, not `('weight', 3, …)`.** Weighting it raises `WidgetError`
+  on every terminal shorter than 33 rows — a defect that shipped through three stages and 311 tests
+  because nothing had ever called `render()` (audit **N1**). Packing also makes the panel's height
+  independent of the terminal, which is what H8's derived geometry rests on.
+- **The drift figure is a count of held words, not a cosine.** H1 specified the cosine; measured over
+  40 real sessions it has p10 = 0.948 and median = 0.989, so it reads as "0.99" forever. That is the
+  same compressed-scale defect H1 and C5 are both about. The cosine is still computed and shown in
+  `[I]` with its distribution beside it. See §10d before changing this back.
+
+**The display layer owns its own state, deliberately.** `vibe_readout.py` (the z-vector drift store)
+and `session_history.py` (what played, the marks, the `↑↓` cursor) are pure modules that nothing
+behind the display reads. Putting either behind the display would split a display concern across a
+component that cannot see it, which is the shape of C4. `SessionState`, `TrackSelector`,
+`QueueManager` and `manifold.py` are closed and tested — `QueueManager.requeue_next()` was the one
+Stage 3 addition, and §0b records why it belongs there rather than in `tui.py`.
 
 The vector space is settled: 674 tracks, full-coverage deterministic windows, centred on load, plus a
-49-word CLAP descriptor bank. So is the player. Use §10c's numbers for anything about skips,
-selection or the manifold; §10b for the embeddings and the descriptor bank.
+49-word CLAP descriptor bank. So are the player and the display. Use §10c's numbers for anything
+about skips, selection or the manifold; §10b for the embeddings and the descriptor bank; **§10d for
+the readout, the drift distribution and the widget-tree geometry**.
 
 Where the code and the audit disagree, the audit wins. Several of the audit's own empirical claims
 turned out to be wrong when the work was done; those findings have been **rewritten to carry the
@@ -166,7 +165,7 @@ the app itself only restores the modes.
 
 ## Testing
 
-`python3 -m pytest tests` — 311 tests, green, about 17 seconds. The three `test_phase*.py` files were
+`python3 -m pytest tests` — 416 tests, green, about 17 seconds. The three `test_phase*.py` files were
 deleted rather than repaired (M1a); roughly thirty of their 66 "passing" checks were hardcoded `True`
 literals.
 
@@ -191,6 +190,14 @@ latter. What that means in practice, and what to preserve:
 - Stage 1's three acceptance properties stay asserted: bit-deterministic embedding (for a fixed batch
   size), self-similarity exactly 1.0, post-centring random pairs at +0.011.
 
+- **The display is under test now, and rendering is the point.** Stage 3 added the first tests that
+  construct the widget tree, and the first one to call `render()` found a crash on every terminal
+  under 33 rows. `test_art_geometry.py` renders the real frame at seven terminal sizes and *locates
+  the art placeholder in the canvas* rather than asserting `_art_geometry`'s arithmetic back at it —
+  a test that repeats the calculation it is checking proves only that it agrees with itself.
+
 Fixtures live in `tests/conftest.py`: `rng` (seeded), `library` (in-memory `TrackLibrary`),
 `make_artifact` (schema-correct `.npz` with any field overridable), `fake_mpd` (**consume on**, the
-state the DJ forces) and `dj_parts` (the real selection stack wired to `FakeMPD`).
+state the DJ forces), `dj_parts` (the real selection stack wired to `FakeMPD`), and for the display
+`fake_art` / `stub_bank` / `dj_stub` / `tui` (the real `AdaptiveDJTUI` with an injected art renderer,
+so building the tree does not spawn a ueberzugpp child).
