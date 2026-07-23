@@ -39,7 +39,7 @@ echo -e "${BOLD}╚════════════════════�
 echo ""
 
 # ── 1. Python check ───────────────────────────────────────────────────────────
-header "Step 1/4 · Checking Python"
+header "Step 1/5 · Checking Python"
 
 if ! command -v python3 &>/dev/null; then
   error "Python 3 is not installed."
@@ -58,7 +58,7 @@ fi
 success "Python $PY_VER found"
 
 # ── 2. pip dependencies ───────────────────────────────────────────────────────
-header "Step 2/4 · Installing dependencies"
+header "Step 2/5 · Installing dependencies"
 
 if ! python3 -c "import numpy, urwid, PIL, mutagen" &>/dev/null 2>&1; then
   info "Installing Python packages from requirements.txt …"
@@ -78,7 +78,7 @@ else
 fi
 
 # ── 3. MPD / MPC check ───────────────────────────────────────────────────────
-header "Step 3/4 · Checking MPD"
+header "Step 3/5 · Checking MPD"
 
 MPD_HOST="${MPD_HOST:-localhost}"
 MPD_PORT="${MPD_PORT:-6600}"
@@ -115,8 +115,34 @@ if [ "$TRACK_COUNT" -eq 0 ]; then
   exit 1
 fi
 
-# ── 4. Embeddings check ───────────────────────────────────────────────────────
-header "Step 4/4 · Checking audio embeddings"
+# ── 4. Music directory ────────────────────────────────────────────────────────
+# Audit M3: this used to default to /var/lib/mpd/music, unvalidated, and worked
+# on the developer's machine only because that path happened to be a symlink.
+# Detection reads MPD's own config; if that fails, ask rather than guess — a
+# wrong directory wastes an entire embedding-generation run.
+header "Step 4/5 · Locating MPD's music directory"
+
+if MUSIC_DIR=$(python3 music_directory.py 2>/dev/null); then
+  success "Music directory: $MUSIC_DIR"
+else
+  warn "Could not read MPD's music_directory from its config."
+  echo ""
+  echo "  This is the folder MPD plays from — the one its config calls"
+  echo "  music_directory. Album art and tag reading need it, and embedding"
+  echo "  generation cannot decode a single file without it."
+  echo ""
+  read -rp "  Path to your music folder: " MUSIC_DIR
+  MUSIC_DIR="${MUSIC_DIR/#\~/$HOME}"
+  if [ ! -d "$MUSIC_DIR" ]; then
+    error "Not a directory: $MUSIC_DIR"
+    exit 1
+  fi
+  export MPD_MUSIC_DIR="$MUSIC_DIR"
+  success "Using $MUSIC_DIR (set MPD_MUSIC_DIR to make this permanent)"
+fi
+
+# ── 5. Embeddings check ───────────────────────────────────────────────────────
+header "Step 5/5 · Checking audio embeddings"
 
 EMBED_FILE="$SCRIPT_DIR/data/embeddings/track_embeddings.npz"
 

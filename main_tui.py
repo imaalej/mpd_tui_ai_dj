@@ -6,10 +6,13 @@ The single entry point.  Launched by start.sh.
 import sys
 import time
 import signal
+from pathlib import Path
 
 from config import config
+from descriptor_bank import DescriptorBank
+from music_directory import validate_music_directory
 from mpd_controller import MPDController
-from track_library import TrackLibrary
+from track_library import LibraryError, TrackLibrary
 from user_taste import UserTaste
 from session_state import SessionState
 from exploration_controller import ExplorationController
@@ -48,23 +51,41 @@ class AdaptiveDJWithTUI:
             print(f"Make sure MPD is running on {config.mpd_host}:{config.mpd_port}", file=sys.stderr)
             sys.exit(1)
         print(f"✓ Connected to MPD at {config.mpd_host}:{config.mpd_port}", file=sys.stderr)
-        
+
+        # `mpc listall` is the single source of truth for track keys (M4): the
+        # embeddings are stored under these exact strings, and it is the only
+        # enumeration that answers "what will MPD actually play".
+        mpd_tracks = self.mpd_controller.list_all_tracks()
+
+        # The music directory is only used for tag reads and album art at
+        # runtime, but a wrong one is worth catching here rather than as silently
+        # missing artwork (M3).  Non-fatal: playback does not depend on it.
+        ok, message = validate_music_directory(Path(config.mpd_music_directory), mpd_tracks)
+        print(("✓ " if ok else "⚠️  ") + message.replace("\n", "\n   "), file=sys.stderr)
+
         # Track Library
         print("\n[2/10] Loading track library...", file=sys.stderr)
         self.track_library = TrackLibrary()
-        
+
         # Embeddings are a hard requirement.  There is deliberately no
         # "generate random ones for now" fallback (audit M2/M4): random vectors
         # make every downstream number meaningless while the UI keeps reporting
         # them as if they meant something.
-        if not config.embeddings_file.exists():
-            print(f"\nERROR: No embeddings file at {config.embeddings_file}", file=sys.stderr)
-            print("Generate them first:  python3 generate_embeddings.py", file=sys.stderr)
+        try:
+            self.track_library.load_embeddings(mpd_tracks=mpd_tracks)
+        except LibraryError as exc:
+            print(f"\nERROR: {exc}", file=sys.stderr)
             sys.exit(1)
+        print(f"✓ Loaded {self.track_library.get_track_count()} playable tracks",
+              file=sys.stderr)
 
-        self.track_library.load_embeddings()
-        print(f"✓ Loaded {self.track_library.get_track_count()} tracks", file=sys.stderr)
-        
+        # The descriptor bank is a display feature (Stage 3), so a missing one is
+        # reported and survived rather than fatal.
+        self.descriptor_bank = DescriptorBank.load()
+        if self.descriptor_bank:
+            print(f"✓ Descriptor bank: {len(self.descriptor_bank)} descriptors",
+                  file=sys.stderr)
+
         # User Taste
         print("\n[3/10] Initializing user taste model...", file=sys.stderr)
         self.user_taste = UserTaste()

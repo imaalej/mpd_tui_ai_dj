@@ -1,10 +1,12 @@
 """
-Stage 0 was mostly deletion.  These guard the removals so nothing drifts back in
-during Stages 1–4, and so a fresh clone can prove the tree matches the plan.
+Stage 0 was mostly deletion, and Stage 1 removed a few more things.  These guard
+the removals so nothing drifts back in during Stages 2–4, and so a fresh clone
+can prove the tree matches the plan.
 
-Reference: PROJECT_AUDIT.md §8, Stage 0.
+Reference: PROJECT_AUDIT.md §8, Stages 0 and 1.
 """
 
+import re
 import subprocess
 from pathlib import Path
 
@@ -36,6 +38,13 @@ DELETED_SYMBOLS = [
     "weekend_exploration_modifier",
     "get_vibe_description",
     "generate_dummy_embeddings",
+    # Stage 1.  The quality "score" graded a library Excellent/Poor against
+    # invented thresholds nothing had measured — D4's rule applied to a number
+    # rather than a word.  `save_embeddings` wrote a file the Stage 1 loader must
+    # refuse (no schema version, no centroid, already-centred vectors).
+    "_assess_embedding_quality",
+    "_quality_interpretation",
+    "save_embeddings",
 ]
 
 SEARCHED_SUFFIXES = {".py", ".sh"}
@@ -61,15 +70,22 @@ def test_file_is_deleted(name):
 
 @pytest.mark.parametrize("symbol", DELETED_SYMBOLS)
 def test_symbol_appears_nowhere_but_in_explanatory_comments(symbol):
+    # Whole words only, so a live private helper is not condemned by sharing a
+    # suffix with a deleted public one (`_save_embeddings` is the generator's
+    # writer; `save_embeddings` was TrackLibrary's).
+    pattern = re.compile(rf"\b{re.escape(symbol)}\b")
+    quoted = re.compile(rf"`[^`]*\b{re.escape(symbol)}\b[^`]*`")
+
     offenders = []
     for path in _source_files():
         for lineno, line in enumerate(path.read_text().splitlines(), 1):
-            if symbol not in line:
+            if not pattern.search(line):
                 continue
             stripped = line.strip()
-            # A comment explaining why something was removed is the point of
-            # the removal being legible; live code referencing it is not.
-            if stripped.startswith("#"):
+            # Prose explaining why something was removed is the point of the
+            # removal being legible; live code referencing it is not.  A comment,
+            # or a backtick-quoted mention inside a docstring, is prose.
+            if stripped.startswith("#") or quoted.search(line):
                 continue
             offenders.append(f"{path.relative_to(REPO_ROOT)}:{lineno}: {stripped}")
     assert offenders == []
@@ -87,6 +103,21 @@ def test_tests_directory_is_tracked_by_git():
     assert any(name.endswith(".py") for name in listed), (
         "tests/ is not tracked — run `git add tests`"
     )
+
+
+def test_track_keys_are_never_enumerated_from_the_filesystem():
+    """
+    M4: `mpc listall` is the single source of truth for track keys.  The
+    generator used to walk the music directory with `rglob`, producing keys MPD
+    might never accept — a mismatch that presents as "the DJ picks nothing"
+    rather than as an error.
+    """
+    offenders = []
+    for path in _source_files():
+        for lineno, line in enumerate(path.read_text().splitlines(), 1):
+            if 'rglob' in line and not line.strip().startswith('#'):
+                offenders.append(f"{path.relative_to(REPO_ROOT)}:{lineno}: {line.strip()}")
+    assert offenders == []
 
 
 def test_no_learned_state_or_embeddings_are_committed():

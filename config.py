@@ -6,16 +6,29 @@ Provides all configurable parameters for the system.
 import os
 from pathlib import Path
 
+from music_directory import LEGACY_DEFAULT, detect_music_directory
+
 
 class Config:
     """Central configuration for the adaptive DJ system."""
-    
+
     def __init__(self):
         # MPD Connection Settings
         self.mpd_host = os.getenv('MPD_HOST', 'localhost')
         self.mpd_port = int(os.getenv('MPD_PORT', '6600'))
-        self.mpd_music_directory = os.getenv('MPD_MUSIC_DIR', '/var/lib/mpd/music')
-        
+
+        # Where MPD's music lives.  Read from MPD's own config rather than
+        # assumed (audit M3) — the old hardcoded /var/lib/mpd/music default was
+        # wrong on this machine and only worked because of a symlink.  The
+        # legacy path survives as a last resort so there is always something to
+        # show the user; `mpd_music_directory_source` records which it was, and
+        # startup refuses to launch if real track paths do not resolve under it.
+        detected, source = detect_music_directory()
+        if detected is None:
+            detected, source = Path(LEGACY_DEFAULT), 'legacy default (unverified)'
+        self.mpd_music_directory = str(detected)
+        self.mpd_music_directory_source = source
+
         # Track Selection Scoring Weights (α, β, γ, δ)
         # These control the multi-factor scoring function
         self.weight_session_similarity = 0.4  # α - How much session state influences selection
@@ -55,6 +68,8 @@ class Config:
         # Persistence Paths
         self.data_dir = Path(__file__).parent / 'data'
         self.embeddings_file = self.data_dir / 'embeddings' / 'track_embeddings.npz'
+        self.descriptors_file = self.data_dir / 'embeddings' / 'descriptors.npz'
+        self.failed_tracks_file = self.data_dir / 'embeddings' / 'failed.txt'
         self.taste_file = self.data_dir / 'state' / 'user_taste.npz'
         self.exploration_file = self.data_dir / 'state' / 'exploration_state.json'
         self.feedback_history_file = self.data_dir / 'state' / 'feedback_history.json'
@@ -62,7 +77,24 @@ class Config:
 
         # System Parameters
         self.mpd_poll_interval = 0.5           # Seconds between MPD status polls
-        self.embedding_dimension = 512         # Expected embedding vector size (CLAP)
+
+        # Expected embedding vector size (CLAP).  This is the size the session
+        # and taste vectors are built at; the *embeddings file* is the authority
+        # (M5), and TrackLibrary overwrites this on load if they disagree.
+        self.embedding_dimension = 512
+
+        # The embeddings artifact.  Schema 2 adds the library centroid (C5) and
+        # the per-window matrix (C3); a schema-1 file has no centroid and would
+        # be scored on an uncentred space, so loading it is refused rather than
+        # silently downgraded.
+        self.embedding_schema_version = 2
+        self.clap_model_name = 'laion/clap-htsat-unfused'
+
+        # Embedding keys come from `mpc listall` (M4), but a library can drift
+        # between generation and use — files deleted, MPD re-scanned.  Below
+        # this fraction of the embeddings still being present in MPD, the file
+        # is stale enough that starting would be misleading rather than useful.
+        self.minimum_mpd_coverage = 0.5
 
         # Ensure data directories exist
         self.data_dir.mkdir(parents=True, exist_ok=True)
@@ -103,6 +135,8 @@ class Config:
         _require(self.queue_buffer_size >= self.queue_low_threshold,
                  f"queue_buffer_size ({self.queue_buffer_size}) must be >= "
                  f"queue_low_threshold ({self.queue_low_threshold})")
+        _require(0 <= self.minimum_mpd_coverage <= 1,
+                 f"minimum_mpd_coverage must be in [0, 1], got {self.minimum_mpd_coverage}")
 
         return True
 

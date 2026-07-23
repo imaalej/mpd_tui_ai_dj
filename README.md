@@ -49,9 +49,13 @@ cd mpd_tui_ai_dj
 bash start.sh
 ```
 
-`start.sh` will check your Python version, install pip dependencies, verify MPD is reachable, and walk you through generating embeddings if this is your first run. After that it launches the TUI automatically.
+`start.sh` will check your Python version, install pip dependencies, verify MPD is reachable, locate MPD's music directory, and walk you through generating embeddings if this is your first run. After that it launches the TUI automatically.
 
-**First run only — embeddings:** The DJ needs audio fingerprints of your library to find musically similar tracks. These come from [CLAP](https://github.com/LAION-AI/CLAP) and take a while to generate on first run (a model download plus one pass over your library).
+The music directory is read from MPD's own config (`~/.config/mpd/mpd.conf`, `/etc/mpd.conf`, …). If that cannot be found you will be asked for it; set `MPD_MUSIC_DIR` to skip the question permanently.
+
+**First run only — embeddings:** The DJ needs audio fingerprints of your library to find musically similar tracks. These come from [CLAP](https://github.com/LAION-AI/CLAP), and generating them is the one slow step: a model download, then a decode-and-encode pass over every track. Measured on this machine — 674 tracks, RTX 3070 — that pass took **5 minutes 23 seconds** and produced a 45 MB file. On CPU expect substantially longer.
+
+Tracks are enumerated from `mpc listall`, so the embedding keys are exactly the paths MPD will be asked to play. Files MPD cannot decode are skipped and listed in `data/embeddings/failed.txt` with the reason, rather than disappearing silently.
 
 There is no "demo mode" with random vectors. Random embeddings make every similarity, every novelty score and every learned preference meaningless while the interface keeps presenting them as insight — it looks like it works, and none of it does.
 
@@ -94,6 +98,10 @@ mpc status   # should show your track count
 
 Every track in your library is encoded into a 512-dimensional embedding vector that represents its sonic character — timbre, texture, energy, harmonic content. These come from [CLAP](https://github.com/LAION-AI/CLAP), a model trained to understand audio similarity. Two songs that *feel* similar will have embeddings that point in roughly the same direction in that space. All selection logic operates on these vectors; no genre tags or metadata are used.
 
+CLAP's audio encoder takes exactly ten seconds of audio, so a track is covered by consecutive ten-second windows — the last one aligned to the end so nothing is dropped or padded with silence — and the window vectors are averaged into one. The whole track is represented, not a sample of it, and embedding the same file twice gives the identical vector. Near-silent windows are dropped; the per-window vectors are kept in the file so the pooling decision can be revisited without regenerating.
+
+One more step matters more than it looks. CLAP's vectors occupy a narrow cone rather than the whole space: on this library, two *completely unrelated* tracks sat at a cosine similarity of 0.67. "Similar" and "unrelated" were nearly the same number, which is why the scoring weights never seemed to do much. Subtracting the library's own centroid at load time moves unrelated pairs to ≈ 0 and gives the rest of the system the range it always assumed it had.
+
 ### Two Layers of Preference
 
 The system keeps two separate models of what you like, operating on different timescales:
@@ -125,7 +133,13 @@ The session line currently shows a track count and nothing else.
 
 It used to show a mood phrase — *"focused cohesive vibe, deep in the zone"* — assembled from three heuristics. All three were invented against scales nobody measured: the mood word came from an entropy-like quantity that is always ≈ 55 for a 512-dimensional unit vector, so it returned *eclectic* every time and its other two branches were unreachable; the *warming up → building → deep in the zone* stage word was a track counter in a costume. A blank line is honest and a counter is a fact; the phrase was neither.
 
-The replacement is real and specified: a bank of descriptor prompts embedded with CLAP's *text* encoder, scored against the session vector as a z-score relative to this library's own distribution, so *"hypnotic"* means "unusually hypnotic **for your collection**". See `PROJECT_AUDIT.md` §H1.
+The replacement is half built. The data exists: 49 descriptor prompts — energy, affect, texture, rhythm, setting, instrumentation — embedded with CLAP's *text* encoder and stored with each word's mean and standard deviation over this library, so a score reads as a z-score against your own collection and *"hypnotic"* means "unusually hypnotic **for your music**". You can already ask for it from the command line:
+
+```bash
+python3 generate_embeddings.py --describe "Arctic Monkeys"
+```
+
+Wiring it to the session line is the next piece of work. See `PROJECT_AUDIT.md` §H1.
 
 The queue is kept at 10 tracks and refilled dynamically so playback never stops. Each candidate is drawn from a pool of 100 nearest-neighbor tracks in embedding space, then re-ranked by the full scoring function. Recently played tracks are excluded for at least 20 songs to prevent repetition.
 

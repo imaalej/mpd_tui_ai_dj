@@ -8,10 +8,10 @@ decisions taken since the first audit, and where to pick the work back up.
 |---|---|
 | **Repository** | `/home/gumibo/misc/programming/projects/mpd_tui_ai_dj` · audited at `master` HEAD `8dc4275` |
 | **Scope** | 23 tracked files, ~6,200 lines Python + Bash. All source read in full; claims verified by execution where possible. |
-| **Environment tested** | Fedora (Linux 7.1.3), Python 3.14.6, numpy 1.26.4, urwid 3.0.5, MPD/MPC present, ueberzugpp present, 616 CLAP embeddings on disk. |
+| **Environment tested** | Fedora (Linux 7.1.3), Python 3.14.6, numpy 1.26.4, transformers 5.1.0, torch 2.10.0+cu128, urwid 3.0.5, MPD/MPC present, ueberzugpp present, RTX 3070. Library: 692 MPD entries, 674 embedded (was 616 at audit time). |
 | **Audit date** | 22 July 2026 |
 | **Revision date** | 22 July 2026 — design decisions folded in, see §0 |
-| **Progress** | **Stage 0 complete** (22 July 2026). Stages 1–4 outstanding. See §0b for what landed and where it deviated from the plan. |
+| **Progress** | **Stages 0 and 1 complete** (Stage 1: 23 July 2026). Stages 2–4 outstanding. See §0b for what landed and where it deviated from the plan. |
 
 ---
 
@@ -22,8 +22,9 @@ conversation in context.
 
 - **§0** is the decision record. Read it first — it changes the meaning of roughly half the findings
   below, and several findings' "fix direction" blocks were rewritten because of it.
-- **§0b** is the implementation log. It records what has actually shipped, and — more usefully — the
-  four places where doing the work turned up something the plan had not anticipated.
+- **§0b** is the implementation log, one entry per completed stage. It records what has actually
+  shipped and — more usefully — the places where doing the work turned up something the plan had not
+  anticipated, including two of the audit's own empirical claims that turned out to be wrong.
 - **§2–§5** are the findings, each tagged with a status: `OPEN`, `NEW`, `DISSOLVED`, `RESOLVED by
   deletion`, `SUPERSEDED`, `ELEVATED`, `DONE`. Only `OPEN`, `NEW` and `ELEVATED` require work.
 - **§6** is the status table — the fastest way to see what is still live.
@@ -54,9 +55,10 @@ pinned to a single constant value.
 
 Two more were found while planning the rewrite. The entire similarity scale the scoring constants were
 tuned against is compressed into the top third of its nominal range (**C5**), which is why the weights
-never seemed to do much. And `[V]` — the "give me something different" key — changes less of what
-you will actually hear than pressing `[N]` five times, while pointing the session vector somewhere that
-is not music (**H9**). It is deleted; `[N]` escalates on consecutive skips instead.
+never seemed to do much. And neither key that is supposed to change direction actually does: `[N]`
+turns over 0.3% of what you will hear per press, and `[V]` — the "give me something different" key —
+buys about ten skips' worth of movement while pointing the session vector a third of the way into
+noise (**H9**). `[V]` is deleted; `[N]` escalates on consecutive skips instead.
 
 There is a pattern connecting almost all of them: **numbers chosen against a scale that was never
 measured.** Entropy thresholds picked for a smaller dimension, a novelty formula assuming a range the
@@ -67,10 +69,14 @@ distribution, or delete them.
 None of this is architectural. The reason it survived is that the test suite reports 66 passing checks
 while roughly half of them are hardcoded `True` literals.
 
-**Where it stands now.** Stage 0 is done: the ground is cleared, the invented vocabulary is gone, the
-duplicate and dead code is gone, and there is a real (if narrow) tracked test suite plus a log file to
-debug the rest through. Every one of the four original critical defects is still open — they are
-Stages 1 and 2, and they are the work that makes the thing play.
+**Where it stands now.** Stages 0 and 1 are done. The ground is cleared, the invented vocabulary is
+gone, and the vector space underneath everything is now trustworthy: 674 tracks embedded from full
+coverage rather than a random ten-second crop, bit-reproducible, centred so that "similar" and
+"unrelated" are finally different numbers, and named by a 49-word CLAP descriptor bank measured
+against this library's own distribution. C3, C5, M3, M4, M5, M8 and the data half of H1 are closed.
+
+What remains is the part that makes it *play*: C1, C2, C4, H3, H6 and H9 are Stage 2, and until they
+land the queue is still ten deep, still never refills, and selection is still a strict argmax.
 
 ---
 
@@ -175,10 +181,11 @@ distribution, and a build-time variance gate that drops descriptors carrying no 
 
 ### D8 · `[V]` is deleted; `[N]` escalates instead
 
-Measured against the real library, `force_shift`'s "50% vibe shift" turns over **7.4%** of the
-candidate pool — *less* than pressing `[N]` five times (11.9%), and in a direction that is 0.105
-similar to real music where an ordinary session vector is 0.697. `[V]` is not a bigger gesture than
-the skip key; it is an equally small one pointed at noise.
+Measured against the real library, `force_shift`'s "50% vibe shift" turns over **9.3%** of the
+candidate pool — about what ten presses of `[N]` achieve — and lands the session vector at **0.450**
+similarity to the nearest real music, against 0.641 for an ordinary session vector and 0.085 for a
+random direction. `[V]` is not a bigger gesture than the skip key; it is a comparably small one
+pointed a third of the way at noise.
 
 Its real job was clearing the ten-track queue, which D1 removes. The intent behind it survives and is
 absorbed into `[N]`, which escalates on consecutive skips — repelling from the skip-run centroid by a
@@ -239,7 +246,7 @@ feedback history and taste model round-tripped, and the taste vector was seeded 
 moved away by the skip. The user's MPD queue, playback modes and volume were snapshotted before the
 run and restored after.
 
-### Four things the plan did not anticipate
+### Four things the Stage 0 plan did not anticipate
 
 **1 · Zero taste vector needs two guards, not one.** D4 says "delete the random taste seed" and L7
 defers the β ramp to Stage 2. Doing only that produces two new defects, both worse than what was
@@ -280,7 +287,7 @@ file was named `SMOKE-TEST-RANDOM-NOT-CLAP` and was greeted with `✓ Loading CL
 already calls for `schema_version` and dimension validation on load; add "model identity is checked
 by equality against the expected checkpoint, not by substring."
 
-### Deviations from the plan's letter
+### Stage 0 — deviations from the plan's letter
 
 - **The vibe line shows `Session: N tracks played`, not a blank.** D4's own text says the stage word
   "is a `tracks_played` counter wearing a costume — show the counter," so the counter is what it
@@ -300,6 +307,107 @@ by equality against the expected checkpoint, not by substring."
 `[V]` and `force_shift()` still exist, the queue is still ten deep and still never refills, selection
 is still strict argmax, MPD modes are still unasserted, and SIGTERM still neither exits nor saves.
 Those are Stages 1–2 and are unchanged by anything above.
+
+---
+
+### Stage 1 — complete, 23 July 2026
+
+Net effect: **three new modules** (`music_directory.py`, `embeddings_io.py`, `descriptor_bank.py`),
+`embedding_generator.py` and `generate_embeddings.py` substantially rewritten, and **+112 tests**
+(67 → 179, all green). Two data artifacts exist for the first time: 674 embeddings with their
+per-window matrix and centroid, and a 49-word descriptor bank.
+
+| Plan item | Landed as |
+|---|---|
+| **M3** | `music_directory.py`: detection reads `MPD_MUSIC_DIR`, then MPD's own config (`$XDG_CONFIG_HOME/mpd/mpd.conf`, `~/.config/mpd/mpd.conf`, `~/.mpdconf`, `~/.mpd/mpd.conf`, `/etc/mpd.conf`, `/etc/mpd/mpd.conf`), then the legacy default *marked as unverified*. `config.mpd_music_directory_source` records which, and it is printed at startup — a wrong directory is now diagnosable rather than mysterious. Validation resolves five probes spread across `mpc listall`, so a half-mounted library fails too. `start.sh` gained a step that prompts when detection fails. On this machine it now reads `/mnt/storage/music` from `~/.config/mpd/mpd.conf` instead of relying on the `/var/lib/mpd/music` symlink. |
+| **M4** | `generate_embeddings.py` enumerates from `mpc listall` and nothing else; the `rglob` walk is gone and a test fails if it returns anywhere. `TrackLibrary.reconcile_with_mpd()` logs coverage on load, drops embeddings MPD cannot play, and raises below `config.minimum_mpd_coverage`. Live result: `674 of 674 embeddings match MPD (100.0%); 0 stale, 16 MPD tracks have no embedding`. |
+| **C3** | Full-coverage non-overlapping 10 s windows with an end-aligned tail, RMS-gated, mean-pooled, per-window matrix persisted. `truncation` pinned to `rand_trunc` — see C3, which now records why that is not inheritable. 24,494 windows over 674 tracks. Embedding one file twice is now **bit-identical**, and re-embedding a track reproduces the vector already on disk. `failed.txt` records every failure with its exception. |
+| **M8** | Real batching (32 windows per forward pass, filled **per track** — item 1 below) plus a decode/mel worker pool, which is where the cost actually sat; M8 now carries the throughput table. Sustained 75.8 windows/s; the whole library took **5m 23s** on the RTX 3070. The resumed-count and divide-by-zero bugs noted alongside M8 are fixed too. |
+| **C5** | Centroid computed at generation, stored in the artifact, applied by `TrackLibrary.load_embeddings()` as `normalise(E − centroid)`. Everything downstream now lives in the centred space. Measured: random pairs move from **+0.670** to **+0.011**. |
+| **D5a** | `descriptor_bank.py`: 49 prompts across six axes, CLAP text-tower embeddings, per-descriptor mean/std over the **centred** library, stored in `descriptors.npz` (93 KB). |
+| **D5b** | Variance gate at build time, floor = 0.5 × the library's own median std. Both lists are printed. On this library it dropped **nothing** — the weakest descriptor (`frenetic`, std 0.096) still clears a floor of 0.093. That is a pass, not a no-op; see item 2 below for why it is nonetheless only proven by unit tests. |
+| **M5** | `embeddings_io.validate_embeddings()` checks required keys, schema version, track/embedding/window/offset agreement, centroid shape and normalisation. The loader adopts the *file's* dimension over the config's, and checks model identity **by equality**. `TrackLibrary` raises `LibraryError` instead of degrading to an empty library. |
+
+**Verification.** 179 pytest tests pass, including the three acceptance assertions the plan named:
+same file embedded twice is bit-identical, self-similarity is exactly 1.0, and the post-centring
+random-pair distribution sits at +0.011 rather than +0.670. The application was launched against the
+live MPD in a pty and exited 0, reporting a clean library load, 100% coverage and a 49-descriptor
+bank; the user's MPD queue, modes and volume were snapshotted before and restored after. Every
+measurement quoted in this section is reproduced in **§10b**, including the descriptor spot-check that
+is H1's own acceptance step.
+
+### Two things the Stage 1 plan did not anticipate
+
+*The rest of what the work turned up — the truncation mode, where the generation cost actually sits,
+the sharper anisotropy — has been folded into C3, C5 and M8 themselves, replacing the claims that
+turned out to be wrong. Nothing here needs cross-referencing to be read.*
+
+**1 · Bit-determinism is a property of the file *and the batch size*, not of the file alone.** GPU
+reductions depend on how many rows are in the batch, so the same track embedded at `--batch-size 32`
+and `--batch-size 1` agrees to ~2 × 10⁻⁸ but not bit for bit. Two consequences, both shipped: batches
+are filled from one track at a time (see M8 for why that beats window-level packing), and `batch_size`
+is recorded in the artifact. Both facts are tests — bit-identity at the recorded batch size, agreement
+to 1e-6 at a different one — so the limit of the guarantee is asserted rather than assumed.
+
+**2 · The variance gate did not fire, so it is only proven by unit tests.** All 49 descriptors clear
+the floor (weakest `frenetic` at std 0.096 against a floor of 0.093, median 0.185). That is the
+outcome you want, but it means the *real* evidence for the gate is synthetic: a fixture where one
+descriptor points along an axis the library has no variance on, which is dropped, and a degenerate
+library where every std is float noise, which is kept whole. Building the gate was still right — the
+cost of discovering the need for it in Stage 3, through a TUI, is exactly what D5's "build it early"
+argument is about.
+
+A related measurement worth recording, because it is the number that would have signalled H1's failure
+shape returning: the bank's **effective rank is 2.5 of 49** — the descriptors are heavily correlated on
+a metal-and-rock-heavy library. The readout is nonetheless not degenerate: every one of the 49 words
+appears in some track's top-3, with a perplexity of 34.8. Correlation between descriptors is not the
+same as a pinned readout, and the z-scoring is what separates them.
+
+### Stage 1 — deviations from the plan's letter
+
+- **A wrong music directory refuses *generation* but only warns at *startup*.** M3 says "refuse to
+  launch". At generation time the cost of a wrong directory is total and expensive — a five-minute run
+  that decodes nothing — so it is fatal there. At runtime, with M4 in place, playback does not touch
+  the music directory at all: MPD plays by its own relative paths. All that breaks is album art and
+  the in-process mutagen tag read, and the latter already falls back to `mpc search`. Refusing to
+  start a working player because artwork will not render is a worse trade than saying so on the
+  console.
+- **`embeddings_io.py` was split out of `embedding_generator.py`.** Reading, validating and centring
+  the artifact is pure numpy; generation needs torch. Without the split, `track_library` — imported by
+  the TUI — would drag torch into every launch for three helper functions.
+- **`TrackLibrary.save_embeddings()` was deleted**, having been explicitly retained in Stage 0. Stage 1
+  made it dangerous rather than merely dead: it wrote `track_files` and `embeddings` only, so a round
+  trip produced a file the new loader must refuse, and the vectors it held were already centred and
+  would have been centred a second time on the next load. M5 offers this as an option; D7 settles it.
+- **`_assess_embedding_quality()` / `_quality_interpretation()` were deleted.** They graded a library
+  "Excellent — Embeddings show good discrimination" down to "Very Poor" against thresholds (mean
+  0.3–0.5, std > 0.15) that nothing had ever measured, and which the *correct* raw distribution of a
+  centred-on-load library fails by construction. This is D4's rule applied to a number instead of a
+  word. `--stats` now prints the raw and centred distributions side by side and says nothing else.
+- **The prompt template was chosen by measurement, not preference**, as H1 asks. All four candidates
+  scored against the real library; `recording` won on spread and is what CLAP was trained on. Table in
+  §10b.
+- **README surgery, not the M7 rewrite.** Only what Stage 1 falsified: the "one pass over your
+  library" line (it is now ~36 passes per track), the missing generation-time figure (now measured),
+  the music-directory step, the windowing and centring paragraphs, and the descriptor bank going from
+  "specified" to "built, with a command to try it". The queue-depth-10 and `[V]` claims still describe
+  the current code and stay for Stage 2.
+
+### What Stage 1 did **not** do
+
+Nothing in the player changed. `[V]` and `force_shift()` still exist, the queue is still ten deep and
+still never refills, selection is still a strict argmax, MPD modes are still unasserted, and SIGTERM
+still neither exits nor saves. The descriptor bank is built and loads at startup but nothing displays
+it — that is Stage 3. `SessionState._initialize_session_vector()` still seeds from `randn` (L7,
+Stage 2), which is why the first queue of a fresh session is an arbitrary neighbourhood.
+
+**One thing Stage 1 did that was not asked for, because Stage 2 needs it.** Every quantity H6 and H9
+are specified against was measured on the crop-based embeddings in a space that no longer exists, and
+the changes are large enough to mislead — a `[N]` press that moved 3.9% of the pool then moves 0.3%
+now. Those two findings have been re-measured against the built library and carry the new numbers;
+the raw data is in §10b. **The designs both survived**, which is the point: they target observable
+quantities (pool turnover, rank) rather than vector-space magnitudes, so re-measurement adjusted the
+reference values without touching the specification.
 
 ---
 
@@ -365,13 +473,17 @@ State is checkpointed periodically, not only at exit (H3).
 
 ### Current state on disk
 
-**Nothing.** `data/` holds three `.gitkeep` files. The 616 CLAP embeddings, the 15-update taste
-model, the exploration state and the 16-event feedback history were deleted in Stage 0 per D3 — one
-38-minute session's worth of learning, in a vector space C3 and C5 are replacing. The 38-minute span
-was itself a symptom; see C1.
+*(Stage 1, 23 July 2026.)* `data/embeddings/` holds the two artifacts of §7:
 
-**Stage 1 regenerates the embeddings. Until it does, the application will not start** — it exits with
-a message pointing at `generate_embeddings.py` rather than offering the random vectors it used to.
+```
+track_embeddings.npz   674 tracks × 512 d, uncentred + centroid + 24,494 windows   45.5 MB
+descriptors.npz        49 descriptors × 512 d, with per-descriptor mean/std        93 KB
+failed.txt             16 files, all one corrupt album, each with its exception
+```
+
+`data/state/` is still empty of learned state — the 15-update taste model, exploration state and
+16-event feedback history were deleted in Stage 0 per D3, and nothing has replaced them because the
+player has not been run for a real session yet.
 
 ---
 
@@ -446,17 +558,26 @@ stuck rather than merely mis-ordered.
 
 ---
 
-### C3 · The audio fingerprints are non-deterministic ~10-second crops, not track representations. `OPEN — fix specified`
+### C3 · The audio fingerprints are non-deterministic ~10-second crops, not track representations. `DONE — Stage 1`
+
+> **Status.** Full-coverage 10 s windows with an end-aligned tail, RMS-gated, mean-pooled, per-window
+> matrix persisted: 24,494 windows over 674 tracks in 5m 23s. Embedding the same file twice is
+> bit-identical, and re-embedding reproduces the vector already on disk — both asserted in
+> `tests/test_clap_pipeline.py`. `failed.txt` names the 16 failures. Actual figures in §10b.
 
 **What.** `CLAPEmbeddingGenerator.generate_embedding()` loads the entire waveform and hands it to
-`ClapProcessor` with default arguments. Those defaults are `max_length_s=10` and
-`truncation="fusion"`, where fusion stacks randomly positioned mel-spectrogram crops. The result:
-each track's embedding describes roughly ten seconds sampled at random from it, and re-running
-generation produces a different vector for the same file.
+`ClapProcessor` with default arguments. The effective defaults for this checkpoint are
+`max_length_s=10` and `truncation="rand_trunc"` — the feature extractor takes a **uniformly random
+ten-second crop** of anything longer. The result: each track's embedding describes roughly ten
+seconds sampled at random from it, and re-running generation produces a different vector for the same
+file.
 
-Additionally, `truncation="fusion"` is the wrong mode for this checkpoint — feature fusion is the
-mechanism the `-fused` variant carries an adapter for. `laion/clap-htsat-unfused` is getting the
-fusion crop behaviour without the module meant to consume it.
+*(`truncation` deserves care. `ClapFeatureExtractor`'s class default is `"fusion"`, but
+`laion/clap-htsat-unfused` ships a `preprocessor_config.json` that sets `"rand_trunc"`, and the
+checkpoint's value is the one that applies. `"fusion"` is not merely the wrong mode for an unfused
+model — it stacks four mel crops into a 4-channel tensor that this model's single-channel patch
+embedding cannot consume at all, and raises. So the mode is not a free choice, and it is not
+inherited: see the `Determinism` bullet below.)*
 
 **Evidence.** A synthetic three-minute signal with three musically distinct sections, embedded 10×
 through the project's own code path, compared against the real 616-track library's similarity
@@ -495,9 +616,15 @@ the "how many" parameter rather than tune it:
   direction that then contaminates the pooled vector.
 - **Determinism.** `generate_embedding()` slices the already-loaded waveform tensor into exact
   480,000-sample chunks before calling the processor, instead of handing it the whole track. At
-  exactly `max_length_s`, neither the truncation nor the padding branch inside `ClapFeatureExtractor`
-  fires, so the `fusion` / `rand_trunc` question becomes irrelevant — both are random, and neither
-  runs.
+  exactly `max_length_s` the random-crop branch inside `ClapFeatureExtractor` cannot fire — there is
+  nothing left to crop — and neither can the padding branch.
+
+  **The truncation mode must still be pinned to `rand_trunc` explicitly.** At exactly `max_length_s`
+  the two modes do not converge: `rand_trunc` yields one channel from the slaney-normalised mel
+  filters, `fusion` stacks four copies computed from the htk filters, and this model's patch embedding
+  accepts one channel. Relying on the checkpoint's config to supply the right value works today and
+  would break silently if a future `transformers` stopped honouring that override, so
+  `CLAPEmbeddingGenerator.TRUNCATION` sets it and a test asserts both it and the checkpoint's value.
 
   > **This is a code change, not a manual one.** `load_audio()` already returns the full waveform as a
   > single tensor; the slicing is a few lines of `torch` indexing inside the generator, applied
@@ -510,10 +637,10 @@ the "how many" parameter rather than tune it:
   easier to reason about and to defend than a weighting curve.
 - **Pooling.** Mean-pool the surviving windows, then re-normalise.
 - **Persist the window matrix.** Store the per-window embeddings in the `.npz` alongside the pooled
-  vector. ~616 tracks × ~24 windows × 512 dims × float32 ≈ **30 MB**. This is the important part:
-  it turns pooling from a regeneration-cost decision into a load-time knob. If you later want to try
-  8 evenly-spaced windows, or medoid clustering, or max-over-windows similarity, you experiment in
-  seconds instead of re-running generation.
+  vector. Built: 674 tracks × 36.3 windows average × 512 dims × float32, **45.5 MB** for the whole
+  artifact. This is the important part: it turns pooling from a regeneration-cost decision into a
+  load-time knob. If you later want to try 8 evenly-spaced windows, or medoid clustering, or
+  max-over-windows similarity, you experiment in seconds instead of re-running generation.
 
 **Why mean-pool rather than max-over-windows.** Max similarity would let a seven-minute track with one
 matching ten-second passage score as high as a track that matches throughout — musical whiplash. Mean
@@ -521,12 +648,14 @@ answers "does this *whole track* fit where the session is," which is the questio
 tracks is actually asking. Persisting the windows keeps the alternative available without committing
 to it.
 
-**Cost.** ~15,000 forward passes for 616 tracks. Audio decode dominated the original 198-second run
-(632 tracks, one pass each); with batching (M8) the added GPU work is on the order of a minute, so the
-whole regeneration should land in the **low single-digit minutes** on the 3070. M8 stops being an
-optimisation and becomes a prerequisite: 24× the forward passes, one at a time, is not acceptable.
+**Cost — measured.** 24,494 forward passes for 674 tracks, **5m 23s** on the 3070 at 75.8 windows/s.
+The bottleneck is not the GPU and not audio decode: it is `ClapFeatureExtractor`'s single-threaded
+numpy mel extraction, which caps a batched pipeline at ~39 windows/s no matter how large the batch.
+M8 is a prerequisite, but the part of it that pays is running the *feature extraction* on a worker
+pool, not the batching. See M8 and §10b.
 
 **Also.** Persist the failed-track list to `data/embeddings/failed.txt` with the exception per file.
+Built: all 16 failures are one album of corrupt FLACs — the same 16 the original run lost silently.
 
 ---
 
@@ -589,21 +718,31 @@ count the abandoned track as a full listen.
 
 ---
 
-### C5 · The similarity scale is compressed; every scoring constant is calibrated against a range that does not exist. `NEW — added in revision`
+### C5 · The similarity scale is compressed; every scoring constant is calibrated against a range that does not exist. `DONE — Stage 1`
+
+> **Status.** The centroid is computed at generation, stored in the artifact and applied by
+> `TrackLibrary.load_embeddings()`; there is no path that scores on the raw space, and a file without
+> a centroid is refused rather than silently loaded (M5). On the rebuilt library, random pairs move
+> from **+0.670 to +0.011** (median 0.675 → −0.049, p05 +0.363 → −0.562).
 
 **What.** CLAP's embedding space is strongly anisotropic — embeddings occupy a narrow cone rather than
-spreading over the unit sphere. The audit measured this without naming it: two *unrelated* library
-tracks sit at a mean cosine similarity of **0.577** (median 0.582, std 0.208, 1st percentile 0.074).
+spreading over the unit sphere. Two *unrelated* tracks of this library sit at a mean cosine similarity
+of **0.670** (median 0.675, std 0.183, 5th percentile 0.363).
 
-Nothing in the codebase accounts for this, and several places assume the full `[−1, 1]` range is in
+That figure is *worse* than the 0.577 the first audit measured, and for an instructive reason: 0.577
+was measured on single random ten-second crops. Mean-pooling ~36 windows per track (C3) averages each
+vector toward the library mean, so full coverage buys a truer representation of the track at the cost
+of an even narrower cone. **Fixing C3 made C5 more necessary, not less.**
+
+Nothing in the codebase accounted for this, and several places assume the full `[−1, 1]` range is in
 play:
 
-| Site | Assumption | Reality |
+| Site | Assumption | Reality, uncentred |
 |---|---|---|
-| `track_selector.py:110,114` | `(sim + 1) / 2` maps similarity to `[0, 1]` | Real values land in ~`[0.54, 0.98]` — the bottom half of the scale is never used |
-| `track_selector.py:163` | `novelty = (1 − max_sim) / 2` spans `[0, 1]` | Clusters around 0.21 with very little spread; the novelty weight γ has almost nothing to act on |
-| `session_state.py:186–193` | momentum thresholds `0.85 / 0.7 / 0.5` discriminate | 0.5 is below the 25th percentile of *random* pairs — the "exploring" branch is nearly unreachable |
-| `config.py` weights α/β/γ/δ | terms are comparable in magnitude | session/taste terms vary over a ~0.44-wide band, novelty over ~0.1 — so γ is effectively smaller than its nominal value |
+| `track_selector.py` | `(sim + 1) / 2` maps similarity to `[0, 1]` | Real values land in ~`[0.68, 0.99]` — two thirds of the scale is never used |
+| `track_selector.py` | `novelty = (1 − max_sim) / 2` spans `[0, 1]` | Clusters near 0.16 with very little spread; the novelty weight γ has almost nothing to act on |
+| ~~`session_state.py` momentum thresholds~~ | ~~`0.85 / 0.7 / 0.5` discriminate~~ | Deleted in Stage 0 (D4) — they were unreachable branches for the same reason |
+| `config.py` weights α/β/γ/δ | terms are comparable in magnitude | session/taste terms vary over a ~0.3-wide band, novelty over ~0.1 — so γ is effectively smaller than its nominal value |
 
 This is why the weights never felt like they did much: three of the four scoring terms are nearly
 constant across candidates, so ranking is dominated by whichever term happens to retain variance.
@@ -616,8 +755,8 @@ E_centred = normalise(E − mean(E, axis=0))
 
 Store the centroid in the `.npz` so the same transform can be applied to anything computed later.
 This is standard practice for contrastive embedding spaces ("all-but-the-top" / mean-centring) and it
-costs one line. Post-centring, random pairs sit near 0 and the full range becomes usable, at which
-point:
+costs one line. Post-centring, random pairs sit at +0.011 (p05 −0.562, p75 +0.297) and the full range
+is usable, so:
 
 - `(sim + 1) / 2` means what it claims
 - novelty actually spans its range
@@ -625,6 +764,12 @@ point:
 - the descriptor bank in H1 becomes far more discriminative
 
 **Order matters:** do this before re-tuning any constant, or you will tune twice.
+
+**What Stage 2 inherits from this.** Every similarity in §10 was measured in the uncentred space, and
+the space the code now runs in is a different one — a skip nudge that moved 3.9% of the pool there
+moves 0.3% here, because the neighbourhood is tighter. The re-measurements are in **§10b**, and the
+findings that depend on them (H6, H9) carry the new numbers. Anything still quoting a raw-space
+figure is provenance, not a target.
 
 **Consequence for L7.** Post-centring, the library mean is the zero vector, so "seed the taste vector
 from the library centroid" — the original audit's suggestion — is degenerate. See L7 for the
@@ -636,13 +781,23 @@ replacement.
 
 ---
 
-### H1 · The mood word in every vibe description is mathematically pinned to "eclectic". `PARTIALLY DONE — heuristic deleted in Stage 0; replacement outstanding`
+### H1 · The mood word in every vibe description is mathematically pinned to "eclectic". `PARTIALLY DONE — heuristic deleted (Stage 0); bank built (Stage 1); display outstanding (Stage 3)`
 
-> **Status.** The defective code is gone (Stage 0, D4): `get_vibe_description()`,
-> `_update_vibe_trajectory()` and `vibe_trajectory` are deleted, and the UI shows
-> `Session: N tracks played`. Nothing false is displayed any more. **The replacement below — the CLAP
-> descriptor bank — is entirely outstanding**, and remains the largest single piece of Stage 1 (data,
-> D5a/D5b) plus Stage 3 (display, H1b–H1d).
+> **Status.** The defective code is gone (Stage 0, D4). The **data** is now built (Stage 1, D5a/D5b):
+> `descriptors.npz` carries 49 descriptors across the six axes below, their CLAP text-tower
+> embeddings, and each one's mean and std over the centred library. `descriptor_bank.DescriptorBank`
+> loads it, z-scores a vector against it and returns the top *n*; `main_tui` loads the bank at startup
+> and reports its size. The prompt template was chosen by measurement (§10), and the variance gate
+> ran and dropped nothing.
+>
+> **What remains is display**: the vibe readout (H1b), the Session panel (H1c) and the `[I]` extension
+> (H1d) are all Stage 3. Until then the words are reachable only from the command line —
+> `python3 generate_embeddings.py --describe "Arctic Monkeys"`. The spot-check the acceptance step
+> asks for is in §10, and it reads well: Bathory's orchestral intro comes back as
+> `cavernous · orchestral · dense`, the Arcane score as `cinematic · tense · menacing`.
+>
+> The consistency word in point 6 below — cosine between the session's descriptor z-vector now and
+> five tracks ago — is **not** built. It belongs with the display.
 
 **What.** `SessionState.get_vibe_description()` derives its mood word from the entropy-like quantity
 `−Σ|v|·log(|v|)` over the session vector, then branches on `> 5.0 → "eclectic"`, `> 4.0 → "diverse"`,
@@ -883,24 +1038,27 @@ fall back to uniform choice rather than letting τ dominate a 2-element list.
 
 #### What this actually buys — measured, so the claim is not oversold
 
-30-track sessions simulated from an identical starting state on the real 616-track library, centred
-space:
+30-track sessions simulated from one identical starting state on the rebuilt 674-track library,
+centred space, with the 20-track anti-repetition gap applied:
 
 | Selection rule | mean pairwise similarity within the session | distinct sessions from one start state (5 runs) | mean overlap with run #1 |
 |---|---|---|---|
-| argmax (current) | 0.603 | **1 / 5** | 100% |
-| rank-Boltzmann τ=1 | 0.596 | 5 / 5 | 42% |
-| rank-Boltzmann τ=7 | 0.599 | 5 / 5 | 53% |
-| rank-Boltzmann τ=15 | 0.570 | 5 / 5 | 31% |
-| *(library baseline: two random tracks)* | *0.014* | | |
+| argmax (current) | 0.539 | **1 / 5** | 100% |
+| rank-Boltzmann τ=1 | 0.618 | 5 / 5 | 43% |
+| rank-Boltzmann τ=7 | 0.811 | 5 / 5 | 31% |
+| rank-Boltzmann τ=15 | 0.759 | 5 / 5 | 16% |
+| *(library baseline: two random tracks)* | *0.009* | | |
 
 Two things worth reading carefully:
 
-- **Within-session coherence is unaffected** — 0.603 → 0.599 at τ=7, against a library baseline of
-  0.014. The session stays as musically tight as argmax makes it. Sampling does *not* buy diversity
-  inside a session, and it should not be sold as though it does.
+- **Within-session coherence is not the cost — it is a small gain.** Every sampled rule is *more*
+  internally coherent than argmax (0.54 → 0.62–0.81), against a library baseline of 0.009. The reason
+  is the anti-repetition gap: strict argmax, forbidden from repeating, keeps stepping to the next-best
+  unplayed track and walks steadily away from where it started, while sampling circles a
+  neighbourhood. Sampling still should not be *sold* as buying diversity inside a session — the effect
+  is small and the ordering among τ values is within noise at five runs.
 - **Run-to-run variety is the whole gain.** Argmax returns the byte-identical 30 tracks from the same
-  state, every time; sampling returns 31–53% overlap. For a system whose premise is an evolving
+  state, every time; sampling returns 16–43% overlap. For a system whose premise is an evolving
   session, reproducing the same evening from the same starting point is the failure mode — and it is
   the one argmax guarantees.
 
@@ -954,42 +1112,54 @@ rework, not after.
 
 ---
 
-### H9 · `[V]` is a smaller gesture than `[N]`×5, in a direction that is not music. `NEW — resolved by deletion`
+### H9 · Neither `[V]` nor `[N]` changes much of what you hear, and `[V]` aims off the manifold. `NEW — resolved by deletion`
 
 **What.** `SessionState.force_shift()` blends the session vector 50% toward a **random 512-dimensional
 direction** (`session_state.py:107–127`). The stated purpose of `[V]` is a decisive change of
 direction. It is measurably neither decisive nor a direction.
 
-**Problem 1 — the destination is not music.** In 512 dimensions a random unit vector is
-near-orthogonal to every real embedding (expected cosine 0, σ ≈ `1/√512` ≈ 0.044). Measured against
-this library: an ordinary session vector sits at **0.697** mean similarity to its 25 nearest tracks; a
-random direction sits at **0.105**. `[V]` blends half of the second thing into the first. The candidate
-pool is then drawn nearest to a point that is largely meaningless, so `[V]` does not mean "different
-vibe" — it means "weaker vibe, plus noise."
+**Problem 1 — the destination is not music, and this is what decides it.** In 512 dimensions a random
+unit vector is near-orthogonal to every real embedding (expected cosine 0, σ ≈ `1/√512` ≈ 0.044).
+Measured against the rebuilt library, as mean similarity to the 25 nearest real tracks:
+
+| | on-manifold quality |
+|---|---|
+| a real track | 0.729 |
+| an ordinary session vector | 0.641 |
+| **after `[V]`** (`force_shift` 0.5) | **0.450** |
+| a random direction | 0.085 |
+
+`[V]` blends half of the last row into the second. The candidate pool is then drawn nearest to a point
+that is halfway to meaningless, so `[V]` does not mean "different vibe" — it means "weaker vibe, plus
+noise." This is the argument that survives every re-measurement, because it is structural rather than
+numerical.
 
 **Problem 2 — it moves less than the constant implies.** With `r ⊥ v`, `|0.5v + 0.5r| = 0.5√2`, so
-`cos(v', v) = 0.707` — measured at 0.705–0.712 across 40 simulated sessions. Against this library,
-where two *unrelated* tracks average 0.577 and p75 is 0.738, the "hard reset" leaves the new direction
-closer to its own former self than ~70% of random track pairs are to each other.
+`cos(v', v) = 0.707` — measured at 0.703 across 40 simulated sessions. A "50% vibe shift" that leaves
+the new direction 70% aligned with the old one is not what the label promises.
 
-**Problem 3 — and this is the one that decides it.** Measured as **candidate-pool turnover**, the only
-thing that determines what you actually hear next:
+**Problem 3 — measured as candidate-pool turnover, the only thing that determines what you actually
+hear next, both keys are tiny:**
 
 | Action | cos(new, old) | pool turnover |
 |---|---|---|
-| `[N]` ×1 | 0.995 | 3.9% |
-| `[N]` ×3 | 0.977 | 7.2% |
-| `[N]` ×5 | 0.948 | **11.9%** |
-| **`[V]` ×1** (`force_shift` 0.5) | 0.710 | **7.4%** |
-| `[N]` ×10 | 0.818 | 23.1% |
-| `[N]` ×20 | 0.474 | 58.1% |
+| `[N]` ×1 | 0.999 | 0.3% |
+| `[N]` ×3 | 0.989 | 1.3% |
+| `[N]` ×5 | 0.958 | 2.4% |
+| **`[V]` ×1** (`force_shift` 0.5) | 0.703 | **9.3%** |
+| `[N]` ×10 | 0.665 | 10.7% |
+| `[N]` ×20 | 0.243 | 87.9% |
 
-*(centred space, 40 simulated sessions, top-100 pool; the raw-space figures are within a point or two)*
+*(674-track library, centred, 40 simulated sessions, top-100 pool, session-only argmax — method and
+caveats in §10b. §10 has the same table measured on the 616 crop-based embeddings, where `[V]`×1 sat
+*below* `[N]`×5. That ordering did not survive the embeddings changing — which is itself a reason not
+to rest a decision on it, and why the argument above rests on problem 1 instead.)*
 
-**`[V]` changes less of what you will hear than pressing `[N]` five times.** It is not a bigger
-gesture than the skip key — it is an equally small one pointed at noise. The large `cos` figure is what
-made it *look* decisive; turnover is what the listener experiences, and by that measure it barely
-registers.
+**A `[V]` press turns over 9.3% of what you will hear.** Pressing `[N]` ten times turns over 10.7%. So
+the honest statement is not that one key is weaker than the other — it is that **neither key changes
+direction at all**, and the one advertised as a hard reset buys about ten skips' worth of movement
+while pointing a third of the way into noise. The large `cos` figure is what made `[V]` *look*
+decisive; turnover is what the listener experiences.
 
 **Where.** `session_state.py:107–127`; `config.vibe_shift_magnitude`;
 `feedback_handler.process_vibe_skip()`; `exploration_controller.set_high_exploration()`; `tui.py:364`
@@ -999,11 +1169,12 @@ registers.
 `[V]` was introduced alongside the ten-track queue, where its real job was *clearing the queue*: with
 ten tracks committed in advance, rejecting a direction meant ten presses of `[N]`, so a queue-nuking
 key earned its place. D1 removes the queue, and with it the only thing `[V]` did that `[N]` could not.
-The vector mathematics it carried was never sound. It is a queue-era affordance and it goes.
+The vector mathematics it carried was never sound — problem 1 is not a tuning issue, it is a
+statement about where the vector lands. It is a queue-era affordance and it goes.
 
 But the *intent* behind it — "the problem is the direction, not this song" — is real, and the table
-above shows `[N]` does not currently serve it either: 3.9% turnover per press, and 20 presses to reach
-58%. Neither key delivers a change of direction today. So `[N]` is rebuilt to cover both.
+above shows `[N]` does not serve it either: 0.3% turnover per press, and twenty presses before
+anything moves. Neither key delivers a change of direction today. So `[N]` is rebuilt to cover both.
 
 **One key. Escalation driven by evidence, not by a second keypress.**
 
@@ -1020,29 +1191,37 @@ On every `[N]`:
 3. **Solve for the repulsion magnitude λ** rather than declaring it. Target a pool turnover that rises
    with *n*:
 
-   | consecutive skips | turnover target | measured λ | reads as |
+   | consecutive skips | turnover target | λ that reaches it | reads as |
    |---|---|---|---|
-   | 1 | 5% | ~0.23 | "not this song" |
-   | 2 | 20% | ~0.55 | "not this corner either" |
-   | 3 | 50% | ~0.80 | "this is the wrong direction" |
-   | ≥4 | 85% | ~1.05 | full reset |
+   | 1 | 5% | ~0.25 | "not this song" |
+   | 2 | 20% | ~0.60 | "not this corner either" |
+   | 3 | 50% | ~0.75 | "this is the wrong direction" |
+   | ≥4 | 85% | ~0.95 | full reset |
 
-   λ is found by increasing it until the target is met — a few dot-product passes over 616 vectors,
-   microseconds. The current code uses a fixed λ = 0.15 at every step, which is why twenty presses were
-   needed to get anywhere.
+   λ is found by increasing it until the target is met — a few dot-product passes over 674 vectors,
+   microseconds. **The λ column is a sanity check on the solver, not an input to it**; the schedule is
+   the turnover column, which is why this survived the space changing underneath it (the same solve
+   against the uncentred library returned 0.23 / 0.55 / 0.80 / 1.05). The current code uses a fixed
+   λ = 0.15 at every step, which is why twenty presses were needed to get anywhere.
 
-4. **Project back onto the manifold** for escalated skips (*n* ≥ 2, where λ is large enough to matter):
-   replace the vector with the normalised centroid of its 25 nearest real embeddings.
+4. **Project back onto the manifold** for escalated skips: replace the vector with the normalised
+   centroid of its 25 nearest real embeddings.
 
    ```
    snap(v) = normalise( mean( top-25 library embeddings by dot(E, v) ) )
    ```
 
-   Measured: at the 85% target this preserves the turnover almost exactly (87.2% → 86.9%) while holding
-   on-manifold quality at 0.656 — against 0.697 for an ordinary session vector and 0.105 for a random
-   direction. **This is a structural guarantee, not a tuning:** however large λ grows, the session
-   vector cannot leave the region your music occupies. It is the general fix for the entire class of
-   bug this finding describes, and it costs one 616×512 matrix-vector product.
+   Measured on the rebuilt library: at the 85% target it preserves the turnover (90.2% → 93.3%) while
+   holding on-manifold quality at 0.765 — against 0.641 for an ordinary session vector, 0.450 after a
+   `[V]`, and 0.085 for a random direction. **This is a structural guarantee, not a tuning:** however
+   large λ grows, the session vector cannot leave the region your music occupies. It costs one 674×512
+   matrix-vector product.
+
+   **Apply it only for *n* ≥ 2.** `snap()` is a move in its own right, not a projection that leaves
+   small displacements alone: at the 5% target it *raises* turnover from 5.7% to 17.8%, overshooting
+   the schedule by more than three times. At 50% and 85% it is close to neutral. The audit's original
+   "*n* ≥ 2, where λ is large enough to matter" now has a measurement behind it rather than an
+   intuition.
 
 5. Replace the lookahead, advance *(as C4)*.
 
@@ -1122,6 +1301,34 @@ clone has zero tests.
 > gives an identical vector, which is now a *testable property*).
 > Move to pytest so exit codes are meaningful.
 
+#### The MPD semantics `FakeMPD` must model — verified, not remembered
+
+C1 exists because nobody checked how the queue actually behaves. A `FakeMPD` built on the same
+assumptions would reproduce the bug and pass. So these were run against the live MPD (23 July 2026,
+mpc 0.35, consume on, random/repeat/single off) and are the specification:
+
+| Behaviour | Verified result |
+|---|---|
+| The **currently playing track stays in the queue** | With consume on, `mpc status` reads `#1/4` while playing the first of four. Consume removes a track when you *leave* it, not when you start it. |
+| Position is always `#1` | After each removal the new current track is `#1/N`. There is no position to parse — "how many ahead" is `len(playlist) − 1`. |
+| Natural end consumes | A track that plays to its end is removed: `playlist` 3 → 2, the next track begins at `#1/2`. |
+| `mpc next` consumes | Skipping also removes the abandoned track: 4 → 3. So a skip and a completion look identical to the queue. |
+| `mpc del 2` removes the **lookahead** | The current track keeps playing, uninterrupted, at the same position. This is exactly C4's "delete queue position 2, re-pick, add". |
+| **`mpc next` on the last remaining track empties the queue and stops** | `playlist` 1 → 0, state `stopped`. |
+| **Adding to a stopped queue does not start it** | `mpc add` on an empty stopped queue leaves the state `stopped`. Nothing recovers on its own. |
+
+The last two rows are one trap and they are worth stating as a rule, because they interact with C4's
+"no `play()` in a skip path" constraint:
+
+> **The skip path must add the replacement *before* it advances.** Advance-then-add empties the queue,
+> MPD stops, and the subsequent `add` will not restart it — so the session dies silently and the only
+> way back is a `play()` call that C4 forbids in that path. Add-then-advance never sees an empty
+> queue. At depth 1 this is not a nicety; it is the difference between a working skip and a dead
+> session.
+
+The refill condition follows directly: during playback `len(playlist)` is **2** (current + lookahead),
+so refill when it is `< 2`. That is D2's claim, and it holds.
+
 ---
 
 ### M2 · Two divergent orchestrators; the stale one is what the setup helper tells you to run. `DONE — Stage 0`
@@ -1153,7 +1360,17 @@ random test embeddings.
 
 ---
 
-### M3 · `mpd_music_directory` is an undocumented, unvalidated requirement that works here by accident. `OPEN`
+### M3 · `mpd_music_directory` is an undocumented, unvalidated requirement that works here by accident. `DONE — Stage 1`
+
+> **Status.** `music_directory.py` detects it from `MPD_MUSIC_DIR`, then MPD's own config files, then
+> the legacy default *labelled as unverified*; `config.mpd_music_directory_source` says which, and
+> startup prints it. Validation resolves five probes spread across `mpc listall`, so both a wrong
+> directory and a half-mounted library fail. `start.sh` prompts when detection fails. This machine now
+> reads `/mnt/storage/music` from `~/.config/mpd/mpd.conf` rather than depending on the symlink.
+>
+> **One deviation:** generation refuses on a bad directory, startup only warns — at runtime nothing
+> but album art and the mutagen tag read touches the path, and the latter already falls back to
+> `mpc search`. Reasoning in §0b, Stage 1, deviations.
 
 **What.** `config.mpd_music_directory` defaults to `/var/lib/mpd/music`. It is used for mutagen tag
 reads and album-art lookup, and it is never validated, never prompted for by `start.sh`, and never
@@ -1176,14 +1393,25 @@ nothing or produces a file whose keys match no MPD path, and the DJ silently has
 **Where.** `config.py:17`; `generate_embeddings.py:124–141`; `album_art.py:545–591`;
 `mpd_controller.py:375–400`
 
-> **Fix direction.** Read it from MPD instead of guessing — `mpc --verbose` or the MPD config — and
-> fall back to prompting in `start.sh`. Validate at startup by resolving one known track path and
-> refusing to launch (with a clear message) if it does not exist. Do this **before** the C3
-> regeneration run, not after — a wrong music dir wastes the whole run.
+> **Fix direction.** Read it from MPD's own configuration instead of guessing. (`mpc` has no way to
+> report it — it is a server-side path the protocol never exposes, and `mpc --verbose status` only adds
+> protocol chatter. Parse `music_directory` out of the config files instead:
+> `$XDG_CONFIG_HOME/mpd/mpd.conf`, `~/.config/mpd/mpd.conf`, `~/.mpdconf`, `~/.mpd/mpd.conf`,
+> `/etc/mpd.conf`, `/etc/mpd/mpd.conf`, user before system, as MPD itself resolves them.) Fall back to
+> prompting in `start.sh`. Validate by resolving real track paths from `mpc listall` — several, spread
+> across the list, so a half-mounted library fails too. Do this **before** the C3 regeneration run, not
+> after: a wrong music dir wastes the whole run.
 
 ---
 
-### M4 · Two different sources of truth for track keys, with no reconciliation. `OPEN`
+### M4 · Two different sources of truth for track keys, with no reconciliation. `DONE — Stage 1`
+
+> **Status.** `mpc listall` is the only enumeration left. `generate_embeddings.py` takes its track
+> list from `MPDController.list_all_tracks()`; the `rglob` walk is deleted and
+> `tests/test_deletions.py` fails if it reappears. `TrackLibrary.reconcile_with_mpd()` logs coverage
+> on every load, drops embeddings MPD cannot play, and raises below `config.minimum_mpd_coverage`
+> (0.5). Live: `674 of 674 embeddings match MPD (100.0%); 0 stale, 16 MPD tracks have no embedding` —
+> those 16 being the corrupt album in `failed.txt`.
 
 **What.** Embedding keys come from two incompatible enumerations depending on which path the user
 takes:
@@ -1210,7 +1438,15 @@ by H7, where failed `mpc add` calls are reported as successes.
 
 ---
 
-### M5 · No embedding-dimension validation on load. `OPEN — scope widened by C3`
+### M5 · No embedding-dimension validation on load. `DONE — Stage 1`
+
+> **Status.** `embeddings_io.validate_embeddings()` checks the required keys, the schema version, that
+> the track count matches the embedding count, that the window offsets end where the windows do, that
+> the windows share the embeddings' dimension, the centroid's shape, and normalisation. The loader
+> adopts the *file's* dimension over the config's, and checks the model **by equality** against
+> `config.clap_model_name` — the `SMOKE-TEST-RANDOM-NOT-CLAP` case from §0b is now a test.
+> `TrackLibrary` raises `LibraryError` rather than degrading to an empty library. `save_embeddings()`
+> was deleted rather than taught to carry metadata (§0b, deviations).
 
 **What.** `TrackLibrary.load_embeddings()` never checks `embeddings.shape[1]` against
 `config.embedding_dimension` (512). Meanwhile `UserTaste` and `SessionState` size their vectors from
@@ -1295,13 +1531,19 @@ X11/Wayland, and sixel needs `img2sixel`.
 
 > **Fix direction.** Measure the real cache size once and use that number everywhere. Re-measure
 > generation time after C3 (it will be several times longer per track, and the disk requirement grows
-> by the ~30 MB window matrix). Replace `${VAR,,}` with `tr '[:upper:]' '[:lower:]'`. Either test on
+> by the 45.5 MB artifact — measured, §10b). Replace `${VAR,,}` with `tr '[:upper:]' '[:lower:]'`. Either test on
 > macOS or drop the claim. **The README needs a rewrite regardless** — D1, D6 and H1 change the
 > described behaviour of the queue, the time-context feature, and the vibe display.
 
 ---
 
-### M8 · `--batch-size` is advertised, accepted, and completely ignored. `OPEN — ELEVATED to prerequisite`
+### M8 · `--batch-size` is advertised, accepted, and completely ignored. `DONE — Stage 1, with a correction`
+
+> **Status.** `--batch-size` now does what it says, and the adjacent bugs are fixed: the resumed count
+> is reported separately from what the run did, and the speed line cannot divide by zero.
+>
+> The adjacent bugs below are fixed too: the resumed count is reported separately from what the run
+> actually did, and the speed line cannot divide by zero.
 
 **What.** `CLAPEmbeddingGenerator.__init__` stores `batch_size` and `generate_embeddings.py` exposes
 `--batch-size` with a documented default of 16, printing it in the run banner.
@@ -1315,11 +1557,27 @@ resumed count so the final summary overstates this run's work.
 **Where.** `embedding_generator.py:46–68`, `embedding_generator.py:272–376`;
 `generate_embeddings.py:339–344`
 
-> **Fix direction.** C3's full-coverage windowing produces ~24 windows per track — roughly 15,000
-> forward passes for the library instead of 616. Running those one at a time is not viable, so
-> batching stops being an optimisation and becomes a prerequisite for C3. Batch at the *window* level,
-> not the track level: fill a batch from whichever tracks' windows are ready, so short and long tracks
-> pack evenly.
+#### Fix direction — and where the cost actually is
+
+C3's full-coverage windowing produces ~36 windows per track — 24,494 forward passes for the library
+instead of 674. Running those one at a time is not viable, so batching stops being an optimisation and
+becomes a prerequisite for C3.
+
+**But batching is not what makes it fast.** Measured on the 3070, throughput barely responds to batch
+size — 29.2 windows/s at batch 1, 38.2 at batch 32 — because the GPU was never the constraint.
+`ClapFeatureExtractor` computes its mel spectrograms in single-threaded numpy and caps the pipeline at
+~39 windows/s on its own. Running *that* on a worker pool is what pays: 37 → 59 → 75 → 83 windows/s at
+1 / 2 / 4 / 8 threads. The shipped generator overlaps a decode-and-mel thread pool with a batching GPU
+loop and sustains 75.8 windows/s.
+
+**Fill batches from one track at a time, not across tracks.** Cross-track packing is marginally more
+efficient and costs the property that matters more: GPU reductions depend on batch composition, so a
+track's embedding would depend on which tracks happened to sit beside it in the run — and a library
+could not be extended without every existing vector shifting under the taste model. Per-track chunking
+still batches 32 windows per forward pass; it forfeits one partial batch per track and buys
+bit-identical re-embedding, which C3's acceptance criterion asserts and the suite checks.
+
+Because batch composition is load-bearing, `batch_size` is recorded in the artifact's metadata.
 
 ---
 
@@ -1497,35 +1755,35 @@ taste model from the UI.
 
 ## 6 · Findings status
 
-*As of Stage 0 complete, 22 July 2026. `Done` means the code is in the tree and, where the
+*As of Stage 1 complete, 23 July 2026. `Done` means the code is in the tree and, where the
 behaviour is testable without MPD, a test guards it.*
 
 | ID | Finding | Status | Stage |
 |---|---|---|---|
 | **C1** | Queue never refills | **Open** — fix simplified by D1/D2 (consume mode, no position parsing) | 2 |
 | **C2** | MPD random mode discards ordering | **Open** — expanded to also force `consume on`; restore depends on H3 | 2 |
-| **C3** | Non-deterministic 10 s crop embeddings | **Open** — fix fully specified (full-coverage windows, persisted matrix) | 1 |
+| **C3** | Non-deterministic 10 s crop embeddings | **Done** — full coverage, bit-reproducible, window matrix persisted, failures listed. One stated cause corrected (§0b) | ~~1~~ |
 | **C4** | `[V]` double-advance | **Dissolved** by D8 — code path deleted in Stage 2. Its constraint (one advance per keypress, no `play()` in a skip path) is retained and tested | 2 |
-| **C5** | Compressed similarity scale (anisotropy) | **Open** — blocks meaningful tuning of everything else | 1 |
-| **H1** | Mood word pinned to "eclectic" | **Partially done** — heuristic deleted (Stage 0); descriptor-bank replacement outstanding | ~~0~~ / 1 + 3 |
+| **C5** | Compressed similarity scale (anisotropy) | **Done** — centroid stored and applied on load; random pairs 0.670 → 0.011 | ~~1~~ |
+| **H1** | Mood word pinned to "eclectic" | **Partially done** — heuristic deleted (Stage 0), 49-descriptor bank built and gated (Stage 1); display outstanding | ~~0~~ / ~~1~~ / 3 |
 | **H2** | Queue panel shows history as future | **Dissolved** by D1 — panel removed | 3 |
 | **H3** | Ctrl-C/SIGTERM neither exit nor save | **Open** — will also leave MPD in consume mode once C2 lands | 2 |
 | **H4** | Skipping doesn't change what plays next | **Dissolved** by D1 — one lookahead track, dropped and re-picked | 2 |
 | **H5** | Day-of-week modifier is dead code | **Done** — deleted (D6) | ~~0~~ |
-| **H6** | Strictly greedy selection | **Open — blocker.** D1 cannot ship without it. Rank-Boltzmann, not score-softmax | 2 |
+| **H6** | Strictly greedy selection | **Open — blocker,** more so after C5: the session vector now sits at cos 0.971 to its next pick, so argmax is near-deterministic. Rank-Boltzmann, not score-softmax | 2 |
 | **H7** | Eight duplicate methods; `add_track` swallows failures | **Done** — duplicates removed, return code checked, `ast` test guards it | ~~0~~ |
 | **H8** | Album-art geometry hardcoded | **Open** — elevated from L3; blocks the TUI rework | 3 |
-| **H9** | `[V]` turns over less pool than `[N]`×5, pointing off-manifold | **Open** — `[V]` still exists; deletion and `[N]` escalation are Stage 2 | 2 |
+| **H9** | Neither `[V]` nor `[N]` changes direction; `[V]` aims off-manifold | **Open** — `[V]` still exists; deletion and `[N]` escalation are Stage 2. Re-measured against the Stage 1 library (§10b) | 2 |
 | **M1a** | Tests untracked; phase files are theatre | **Done** — `.gitignore` fixed, phase files deleted, `tests/` tracked (67 green) | ~~0~~ |
-| **M1b/c** | No behavioural suite, no `FakeMPD` | **Open** — nothing yet exercises MPD | 2 / 4 |
+| **M1b/c** | No behavioural suite, no `FakeMPD` | **Open** — nothing yet exercises MPD. Stage 1 added 112 tests, all of them off the MPD path | 2 / 4 |
 | **M2** | Two divergent orchestrators | **Done** — both deleted, plus the dummy-embedding paths | ~~0~~ |
-| **M3** | `mpd_music_directory` unvalidated | **Open** — must land before the C3 regeneration run | 1 |
-| **M4** | Two sources of truth for track keys | **Open** — `mpc listall` becomes the single source | 1 |
-| **M5** | No embedding-dimension validation | **Open** — widened: schema is changing, and the CLAP check is a substring match (§0b) | 1 |
+| **M3** | `mpd_music_directory` unvalidated | **Done** — read from MPD's config, source reported, probes resolved; fatal for generation, a warning at startup | ~~1~~ |
+| **M4** | Two sources of truth for track keys | **Done** — `mpc listall` only; coverage logged and enforced on load | ~~1~~ |
+| **M5** | No embedding-dimension validation | **Done** — full schema validation, file dimension wins, model checked by equality | ~~1~~ |
 | **M6a** | `time_context.npz` is JSON | **Done** — deleted (D6) | ~~0~~ |
 | **M6b** | `play_history` never persisted | **Open** — `clear_history()` removed, persistence not built | 2 |
 | **M7** | Contradictory setup docs; macOS unsupported | **Open** — `${VAR,,}` fixed and falsified claims removed; the rewrite remains | 4 |
-| **M8** | `--batch-size` ignored | **Open — prerequisite** for C3 | 1 |
+| **M8** | `--batch-size` ignored | **Done** — batching plus a decode/mel worker pool, which is where the cost actually was (§0b) | ~~1~~ |
 | **L1** | SIGWINCH handler never invoked | Open | 4 |
 | **L2** | Kitty/sixel art fights urwid | Open | 4 |
 | **L3** | Album-art geometry hardcoded | **Elevated → H8** | 3 |
@@ -1543,6 +1801,10 @@ behaviour is testable without MPD, a test guards it.*
 Build to these. Both are produced by the generation run in Stage 1 and are the contract everything
 downstream reads.
 
+> **Built, 23 July 2026.** Both exist and match the tables below.
+> `embeddings_io.validate_embeddings()` enforces every row, `TrackLibrary` refuses to load a file that
+> fails it, and `tests/test_embeddings_io.py` breaks each field in turn to prove the check is real.
+
 ### `data/embeddings/track_embeddings.npz`
 
 | Key | Shape / type | Notes |
@@ -1552,20 +1814,21 @@ downstream reads.
 | `embeddings` | `(N, 512)` float32 | Pooled, **uncentred**, L2-normalised. Keep raw so the centroid can be recomputed if the library grows. |
 | `centroid` | `(512,)` float32 | `mean(embeddings, axis=0)`. Applied at load: `normalise(E − centroid)` (C5). |
 | `window_offsets` | `(N+1,)` int32 | CSR-style index into `windows` — track *i* owns `windows[offsets[i]:offsets[i+1]]`. Tracks have different window counts. |
-| `windows` | `(ΣW, 512)` float32 | Per-window embeddings, L2-normalised. ~30 MB. Lets pooling be re-decided without regenerating (C3). |
-| `metadata` | dict | Model name, transformers version, date, device, window scheme (`length_s`, `hop_s`, `rms_gate`), timing. Must survive round-trips (M5). |
+| `windows` | `(ΣW, 512)` float32 | Per-window embeddings, L2-normalised. 24,494 rows for 674 tracks; 45.5 MB for the whole artifact. Lets pooling be re-decided without regenerating (C3). |
+| `metadata` | JSON string | Model name, transformers/torch versions, date, device, window scheme (`length_s`, `hop_s`, `tail`, `rms_gate`, `truncation`, `pooling`, `batch_size`), timing, window-RMS percentiles. Must survive round-trips (M5). **JSON rather than a dict**: a dict in an `.npz` is a pickled object array and forces `allow_pickle=True` on every read. `truncation` is recorded because the mode is load-bearing (C3) and `batch_size` because bit-reproduction depends on it (M8). |
 
 Also written: `data/embeddings/failed.txt` — one line per file that failed, with the exception. The
-original run lost 16 tracks silently (C3).
+original run lost 16 tracks silently (C3); they turn out to be one album of corrupt FLACs.
 
 ### `data/embeddings/descriptors.npz`
 
-Generated after the embeddings, in the same run.
+Generated after the embeddings, in the same run — the z-score baselines are measured against the
+centred library, so building it separately invites the two to drift apart. 93 KB.
 
 | Key | Shape / type | Notes |
 |---|---|---|
 | `schema_version` | `int` | |
-| `labels` | `(D,)` unicode | The descriptor words, post-validation — near-zero-variance ones already dropped (H1). |
+| `labels` | `(D,)` unicode | The descriptor words, post-validation — near-zero-variance ones already dropped (H1). Built: 49 of 49 survived. |
 | `prompts` | `(D,)` unicode | The full rendered prompt (`"This is a recording of {} music."`), kept so the template is auditable. |
 | `text_embeddings` | `(D, 512)` float32 | CLAP text-tower output, L2-normalised. |
 | `mean` | `(D,)` float32 | Per-descriptor mean similarity over the centred library — the z-score baseline (H1). |
@@ -1602,6 +1865,8 @@ works. Stages 3–4 are polish and durability.
 > Stage 1, because D3 deletes the embeddings Stage 1 regenerates. That is the one gap in the sequence,
 > and it is intentional — the alternative is regenerating twice with a generator C3 is about to
 > replace. **Stage 1 is not optional homework; the app does not play until it lands.**
+>
+> *Closed 23 July 2026. The gap lasted one working session; the embeddings exist and the app starts.*
 
 ---
 
@@ -1636,21 +1901,24 @@ tests that assert the deletion.
 
 ---
 
-### Stage 1 — Rebuild the signal *(half a day plus a regeneration run)*
+### Stage 1 — Rebuild the signal *(half a day plus a regeneration run)* · ✅ **COMPLETE 23 July 2026**
 
 Nothing about selection quality can be judged until the vectors mean something. Build to the schemas
 in §7.
 
-| ID | Change | Notes |
-|---|---|---|
-| **M3** | Detect `mpd_music_directory` from MPD (`mpc --verbose` / MPD config); prompt in `start.sh` as fallback; refuse to launch if a known track path will not resolve | **Before** the regeneration run — a wrong music dir wastes the whole thing. |
-| **M4** | `mpc listall` as the single enumeration source; log embedding↔MPD coverage on load; refuse below a threshold | Verifies the regenerated file matches what MPD will actually play. |
-| **C3** | Full-coverage deterministic 10 s windows, end-aligned tail, RMS-gated, mean-pooled; persist the per-window matrix and the failed-track list | The change everything else sits on. |
-| **M8** | Batch at the **window** level, not the track level | Prerequisite, not an optimisation — ~24× the forward passes. Window-level packing keeps short and long tracks even. |
-| **C5** | Compute and store the library centroid; centre + re-normalise on load | Do it *with* C3 so the `.npz` carries the centroid from day one. |
-| **D5a** | Build the descriptor bank: ~50 prompts, text-tower embeddings, per-descriptor `mean`/`std` over the centred library | Data artifact, not UI. Both H1 and H9 consume it. |
-| **D5b** | **Validation gate** — drop any descriptor whose `std` over the library is below a floor; log what was dropped and what survived | **This is the anti-trap step.** See below. |
-| **M5** | Validate `schema_version`, dimension and required keys on load; adopt the file's dimension over the config's | Guards the new schema against silent mismatch. |
+*Every row landed. Full account, including five things this table did not anticipate and two
+corrections to the audit's own claims, in §0b.*
+
+| ID | Change | Notes | |
+|---|---|---|---|
+| **M3** | Detect `mpd_music_directory` from MPD's config files; prompt in `start.sh` as fallback; refuse to run generation if known track paths will not resolve | **Before** the regeneration run — a wrong music dir wastes the whole thing. | ✅ *(fatal for generation, a warning at startup — see §0b)* |
+| **M4** | `mpc listall` as the single enumeration source; log embedding↔MPD coverage on load; refuse below a threshold | Verifies the regenerated file matches what MPD will actually play. | ✅ *(100% coverage on the rebuilt library)* |
+| **C3** | Full-coverage deterministic 10 s windows, end-aligned tail, RMS-gated, mean-pooled; persist the per-window matrix and the failed-track list | The change everything else sits on. | ✅ *(24,494 windows; bit-identical re-embedding)* |
+| **M8** | Batch the windows, and thread the mel extraction | Prerequisite, not an optimisation — ~36× the forward passes, and the feature extractor is the real bottleneck. | ✅ *(batches filled per track, for reproducibility — see M8)* |
+| **C5** | Compute and store the library centroid; centre + re-normalise on load | Do it *with* C3 so the `.npz` carries the centroid from day one. | ✅ *(0.670 → 0.011)* |
+| **D5a** | Build the descriptor bank: ~50 prompts, text-tower embeddings, per-descriptor `mean`/`std` over the centred library | Data artifact, not UI. Both H1 and H9 consume it. | ✅ *(49 descriptors, template chosen by measurement)* |
+| **D5b** | **Validation gate** — drop any descriptor whose `std` over the library is below a floor; log what was dropped and what survived | **This is the anti-trap step.** See below. | ✅ *(floor = 0.5 × the library's median std; nothing dropped — §0b)* |
+| **M5** | Validate `schema_version`, dimension and required keys on load; adopt the file's dimension over the config's | Guards the new schema against silent mismatch. | ✅ |
 
 #### The descriptor-bank trap, and the gate that catches it
 
@@ -1676,25 +1944,76 @@ bad bank through the TUI is far harder than through a script.
 
 **Acceptance for the stage:** embed the same file twice, assert **bit-identical** vectors. Re-run the
 audit's measurement: same-track self-similarity must be exactly 1.0, and post-centring the random-pair
-distribution must sit near 0 rather than 0.577. All three are one-line assertions and all three belong
-in the test suite.
+distribution must sit near 0 rather than the 0.577 measured before the rebuild. All three are one-line
+assertions and all three belong in the test suite.
+
+> **Met, 23 July 2026.** All three are in `tests/test_clap_pipeline.py`, which skips rather than
+> downloads if the checkpoint is not already cached:
+>
+> | Criterion | Result |
+> |---|---|
+> | same file embedded twice | bit-identical (pooled *and* per-window) |
+> | same-track self-similarity | 1.0 to float precision |
+> | post-centring random pairs | **+0.011** (was +0.670 raw) |
+>
+> With one qualification the plan did not state: bit-identity holds for a fixed `--batch-size`. A
+> different batch size agrees to ~2 × 10⁻⁸, because GPU reductions depend on batch composition. Both
+> facts are asserted, and `batch_size` is recorded in the artifact (§0b, item 1).
+>
+> **Acceptance for the gate** — the descriptor spot check — is in §10 and passed: the words are
+> recognisable on tracks whose character is not in dispute. The gate itself dropped nothing, so it
+> rests on unit tests rather than on the library (§0b, item 2).
+>
+> **Stage-level criterion** ("launches and reports a clean library load"): verified in a pty against
+> the live MPD, exit 0, `674 embeddings … centred`, `100.0%` coverage, `49 descriptors`. The user's
+> MPD queue, modes and volume were snapshotted and restored.
 
 ---
 
 ### Stage 2 — Play continuously, one track ahead *(a few hours)*
+
+> **Read this before writing anything.** Stage 1 changed the ground these items stand on, and the
+> shortest path through Stage 2 is knowing what is now settled and what is now different.
+>
+> **Settled — do not re-derive, do not re-tune.** The embeddings are final for this library: 674
+> tracks, deterministic, `data/embeddings/track_embeddings.npz`, regenerated with
+> `python3 generate_embeddings.py --force` in ~5.5 minutes if you ever need to. `TrackLibrary` centres
+> them on load and validates the schema; every vector you touch is already in the centred space, and
+> nothing should centre anything a second time. `mpc listall` is the keyspace, reconciled at startup.
+> The descriptor bank loads as `self.descriptor_bank` on the orchestrator and is unused until Stage 3
+> — leave it alone.
+>
+> **Different — the numbers moved, and by a lot.** The centred space is far more concentrated than the
+> one the original measurements were taken in: the session vector now sits at cosine **0.971** to the
+> track it is about to play (was 0.790), so a `[N]` press turns over **0.3%** of the candidate pool
+> (was 3.9%). Two consequences for the work below. **H6 is more of a blocker than it looked** — argmax
+> over a pool this tight is effectively deterministic. And **the fixed λ = 0.15 nudge is now
+> negligible**, which strengthens H9's case for solving λ rather than declaring it. Reference figures
+> in §10b; §10 is the pre-Stage-1 record and its H6/H9 tables should not be used as targets.
+>
+> **Still true, and worth knowing you can rely on it.** Both designs survived re-measurement unchanged
+> because they target observable quantities — pool turnover, candidate rank — rather than vector-space
+> magnitudes. If you find yourself reaching for a constant expressed in cosines, that is the signal to
+> stop and express it as turnover or rank instead.
+>
+> **The one number you must not trust from anywhere:** τ_max ≈ 15. It is the only genuinely new
+> constant in the plan and it has never been calibrated by listening. Ship it, listen, adjust.
+>
+> **Tests.** 179 pass and none of them touch MPD. `tests/conftest.py` has the fixtures (`rng`,
+> `library`, `make_artifact`); M1b's `FakeMPD` belongs beside them and is the first item below.
 
 D1 and H6 are one change and must land together. Write the test harness **first** — this is the stage
 where the original audit's four critical defects lived, all under a green suite.
 
 | ID | Change | Notes |
 |---|---|---|
-| **M1b** | `FakeMPD` modelling real semantics **including consume mode**, on the pytest scaffold Stage 0 created | First, not last. Every item below gets a behavioural test as it lands. |
+| **M1b** | `FakeMPD` modelling real semantics **including consume mode**, on the pytest scaffold Stage 0 created | First, not last. Every item below gets a behavioural test as it lands. **The semantics are specified and verified against the live MPD in M1** — build to that table, not to intuition; a `FakeMPD` built on the assumptions that produced C1 would reproduce C1 and pass. |
 | **C2** | Force `random`/`repeat`/`single` off and `consume` **on**; log each change to the console panel; restore originals on exit | Enables the simplified C1. |
 | **H3** | Signal handling that exits, saves, and restores MPD modes; `atexit` hook for the mode restore; periodic state checkpoint | Must land **with** C2 — otherwise an abnormal exit strands the user's MPD in consume mode. |
 | **C1 / D1** | `lookahead = 1`; rewrite `QueueManager` to `ensure_one_ahead()` / `replace_next()` | Delete `planned_queue`, `currently_queued_in_mpd`, `_sync_to_mpd`, `get_upcoming_tracks`, `recalculate`, `initialize_queue`, the 5% trajectory blend, and `queue_low_threshold`. |
 | **H6** | Boltzmann sampling over **rank**: `p(i) ∝ exp(−i/τ)`, τ linear in the exploration scalar | **Blocker for D1.** Rank-based, not score-based — scale-invariant, so it survives C5 and every weight change without recalibration. |
-| **C4** | Delete `recalculate()`; one skip path: *adjust vector → replace lookahead → advance once* | No `play()` call anywhere in it, so the double-advance cannot recur by construction. |
-| **H9 / D8** | Delete `[V]`, `force_shift()`, `process_vibe_skip()`, `set_high_exploration()`, `vibe_shift_magnitude`. Rebuild `[N]`: repel from the skip-run centroid, λ **solved** for an escalating turnover target (5/20/50/85% by run length), then `snap()` to the 25-NN centroid for n≥2 | Measured: `[V]` turned over less pool than `[N]`×5. The `snap()` guard makes leaving the manifold structurally impossible. |
+| **C4** | Delete `recalculate()`; one skip path: *adjust vector → replace lookahead → advance once* | No `play()` call anywhere in it, so the double-advance cannot recur by construction. **Order is load-bearing: add the replacement before advancing.** Verified — `mpc next` off the last track empties the queue and stops, and a later `add` will not restart it (M1). |
+| **H9 / D8** | Delete `[V]`, `force_shift()`, `process_vibe_skip()`, `set_high_exploration()`, `vibe_shift_magnitude`. Rebuild `[N]`: repel from the skip-run centroid, λ **solved** for an escalating turnover target (5/20/50/85% by run length), then `snap()` to the 25-NN centroid for n≥2 | Measured: `[N]` turns over 0.3% of the pool per press and `[V]` lands a third of the way into noise. The `snap()` guard makes leaving the manifold structurally impossible — but it is a move in its own right, so **n≥2 is a requirement, not a nicety** (§10b). |
 | **H4-repl** | `[N]` drops and re-picks the lookahead under the new weights | Falls out of D1 — skips become audible on the very next song. |
 | **L7** | Ramp β from 0 over the first ~20 taste updates; make the random session seed the explicit "nothing playing yet" case | Same theme as C5: stop injecting noise as if it were signal. The taste seed itself was zeroed in Stage 0; when the ramp lands, retire the "negative updates are a no-op while unseeded" guard but **keep the candidate-pool guard** — β gates scoring, not retrieval (§0b). |
 | **M6b** | Persist `play_history` / `current_index`; checkpoint with the rest of the state | Anti-repetition finally survives a restart. |
@@ -1753,12 +2072,16 @@ for later.
 |---|---|---|
 | **Remove time context (D6)** | Unvalidated rather than provably wrong, but the sole source of four findings, and unevaluable until the rest works. | Low. The concept is sound; re-add against honest embeddings and real listening history. Do not restore the old code. |
 | **Force `consume on` (D2)** | Makes the refill condition `len(queue) < 2` with no position parsing. Guarded by log-on-change and restore-on-every-exit-path. | Moderate. The alternative is parsing `#N/M` from `mpc status` and leaving consume alone — more code, no side effects. |
-| **Delete `[V]` (D8)** | Measured: 7.4% pool turnover versus 11.9% for `[N]`×5, in a direction 0.105-similar to real music. Its queue-clearing job no longer exists. | Low, but do not restore `force_shift`. If a distinct "change subject" gesture is wanted later, build it as a named-descriptor jump, not a random rotation. |
+| **Delete `[V]` (D8)** | Measured: it lands the session vector at 0.450 on-manifold quality against 0.641 for an ordinary one — halfway to noise — for 9.3% pool turnover. Its queue-clearing job no longer exists. | Low, but do not restore `force_shift`. If a distinct "change subject" gesture is wanted later, build it as a named-descriptor jump, not a random rotation. |
 | **Rank-Boltzmann sampling (H6)** | Argmax reproduces the byte-identical session from a given state. Score-softmax needs recalibration every time the score scale moves. Rank is scale-invariant. | Trivial — one function. |
 | **`ENTER` on history requeues (H1d)** | Replaces the removed queue navigation with something useful, reusing existing plumbing. | Trivial. If unwanted, `↑↓` becomes pure scrolling and `ENTER` unbinds. |
 | **Zero taste vector is inert in *retrieval*, not just scoring (Stage 0)** | An all-zero query to `find_similar` returns an arbitrary slice of the library, so half the candidate pool would be noise presented as preference. Skipping the taste half is what L7's own reasoning implies. | Trivial — one `if np.any(...)`. Do **not** reverse it when β ramps in; β gates the score, not the pool. |
 | **A skip cannot seed the taste model (Stage 0)** | From zero, one negative update normalises to `−track` at unit length: a full-strength claim from a single rejection, stronger than the random seed it replaced. | Trivial, and expected to become redundant once the β ramp exists. Retire it then, not before. |
 | **`[I]` became a model inspector in Stage 0 rather than Stage 3** | D6 emptied the overlay while the key, the footer, the README and `start.sh` all still advertised it. A key that silently does nothing is the same dishonesty Stage 0 exists to remove. | None — Stage 3 extends the same overlay rather than building one. |
+| **Batches are filled per track, not per window (Stage 1)** | Cross-track packing makes a track's embedding depend on which tracks sat next to it in the run, so a library could not be extended without every existing vector shifting under the taste model. Costs one partial batch per track. | Trivial, but it forfeits the bit-reproduction guarantee and the test that asserts it. |
+| **`RMS_GATE = 0.01` (Stage 1)** | Not chosen: the window-RMS distribution over 40 tracks is bimodal, 1.8% at ~4 × 10⁻⁵ and real content from ~0.04. Every threshold in between drops the same windows to within half a percent. The gate sits in the empty band. | Trivial, and re-measurable — the distribution is printed by the run and stored in the artifact's metadata. |
+| **`STD_FLOOR_FRACTION = 0.5` for the descriptor gate (Stage 1)** | Relative to the library's own median std, so it needs no recalibration when the model, template or collection changes — the same move as rank-Boltzmann and z-scoring. | Trivial. If it ever drops something you wanted, the run prints every descriptor's std, so the decision is inspectable rather than mysterious. |
+| **`minimum_mpd_coverage = 0.5` (Stage 1)** | A control constant, not a truth claim: it decides when to refuse rather than what to tell the user. The actual coverage is always logged, so the number the user reads is measured. | Trivial — one config key. |
 
 ### Deferred, with the door left open
 
@@ -1774,9 +2097,11 @@ for later.
    judge it against.
 
 3. **Re-tuning the control constants.** Exploration step sizes and the taste update rates were chosen
-   against the compressed similarity scale and will behave differently once centred. The plan is to
-   leave them, listen, then tune once with real data rather than guess new numbers now. The constants
-   that made *claims* are already deleted (D4); these only shape behaviour.
+   against the compressed similarity scale and behave differently now that it is centred — measurably
+   so for one of them: `penalize_similar`'s fixed 0.15 nudge moves 0.3% of the candidate pool per
+   press, against 3.9% before (§10b). H9 replaces that one with a solved λ. The rest are left
+   deliberately: listen first, then tune once with real data rather than guess new numbers now. The
+   constants that made *claims* are already deleted (D4); these only shape behaviour.
 
 4. **τ_max ≈ 15.** The one genuinely new constant. Documented in H6 with the measurement that motivated
    it and an explicit note that it is a starting point requiring calibration in use, so it does not
@@ -1787,9 +2112,14 @@ for later.
 
 ---
 
-## 10 · Evidence appendix
+## 10 · Evidence appendix — the pre-Stage-1 library
 
-*Reproduction commands and raw measurements for the empirical claims.*
+*Raw measurements behind the original findings, taken on the 616 crop-based embeddings that Stage 0
+deleted and Stage 1 replaced. They are kept because they are what each fix was designed against.*
+
+> **For anything you are about to build on, use §10b instead.** Both the embeddings and the space
+> changed: full coverage replaced random crops, and the library is centred on load. Where the same
+> quantity appears in both sections, §10b is the live one and the finding above carries its number.
 
 ### C3 — embedding non-determinism
 
@@ -1803,7 +2133,8 @@ LIBRARY inter-track similarity: mean 0.577  median 0.582
 fraction of self-pairs BELOW library median: 36%
 
 # root cause — transformers 5.1.0
-ClapFeatureExtractor defaults: truncation = fusion, max_length_s = 10
+# max_length_s = 10, and this checkpoint's preprocessor_config.json sets
+# truncation = rand_trunc: anything longer is cropped at a uniformly random offset
 ```
 
 ### H1 — vibe entropy is constant
@@ -1836,18 +2167,24 @@ volume:100%   repeat: off   random: on   single: off   consume: off
 $ grep music_directory /etc/mpd.conf
 music_directory "/mnt/storage/music"
 
-$ ls -la /var/lib/mpd/music          # config.py default
-lrwxrwxrwx. root root -> /mnt/storage/music   # works only by symlink
+$ ls -la /var/lib/mpd/music          # the old hardcoded config.py default
+lrwxrwxrwx. root root -> /mnt/storage/music   # worked only by symlink
 
 $ echo $MPD_MUSIC_DIR                 # unset
 ```
 
+*(M3 is fixed: the path is now parsed from `~/.config/mpd/mpd.conf` and proved against `mpc listall`
+before anything expensive runs. `mpc` itself cannot report it — `music_directory` is a server-side
+path the protocol never exposes.)*
+
 ### C5 — the compressed similarity scale
 
-Derived from the library distribution below. Two unrelated tracks sit at median cosine **0.582**; the
-1st percentile is 0.074. The scoring code's `(sim + 1) / 2` normalisation therefore produces values in
-roughly `[0.54, 0.98]`, and `novelty = (1 − max_sim) / 2` clusters near 0.21. Centring the space is
-what restores the range these formulas assume.
+Derived from the library distribution below. Two unrelated crop-based embeddings sit at median cosine
+**0.582**; the 1st percentile is 0.074. The scoring code's `(sim + 1) / 2` normalisation therefore
+produces values in roughly `[0.54, 0.98]`, and `novelty = (1 − max_sim) / 2` clusters near 0.21.
+
+*(On the full-coverage embeddings this is worse — median 0.675 — because mean-pooling averages each
+track toward the library mean. §10b.)*
 
 ### H9 / D8 — `[V]` versus `[N]`, measured
 
@@ -1859,7 +2196,7 @@ session+taste scoring approximation. "Turnover" = fraction of the top-100 candid
   [N] x1   (penalize_similar 0.15)      0.995          3.9%
   [N] x3                                0.977          7.2%
   [N] x5                                0.948         11.9%
-  [V] x1   (force_shift 0.5 random)     0.710          7.4%     ← smaller than [N] x5
+  [V] x1   (force_shift 0.5 random)     0.710          7.4%
   [N] x10                               0.818         23.1%
   [N] x20                               0.474         58.1%
 
@@ -1877,16 +2214,16 @@ Repulsion magnitude required from the 3-skip centroid, solved per session:
 
   reference — mean similarity to the 25 nearest real tracks:
     ordinary session vector : 0.697
-    random direction        : 0.105     ← what force_shift blends 50% of
+    random direction        : 0.105
 ```
 
-`snap()` preserves the turnover at the target that matters (87.2% raw → 86.9% projected) while keeping
-on-manifold quality comparable to an ordinary session vector. Current code uses a fixed λ = 0.15, which
-is why twenty presses were needed to reach 58%.
+Re-measured on the Stage 1 library in §10b. The schedule survived — it targets turnover, not λ — and
+the solved λ values landed within 0.1 of these.
 
 ### H6 — argmax versus rank-Boltzmann sampling
 
-30-track sessions from an identical starting state, centred space:
+30-track sessions from an identical starting state, centred space, 616 crop-based embeddings.
+Re-measured on the Stage 1 library in §10b; the conclusion held, the numbers moved:
 
 ```
   selection rule        within-session sim   distinct sessions (5 runs)   overlap w/ run #1
@@ -1903,7 +2240,7 @@ is why twenty presses were needed to reach 58%.
 ### C5 — centring the space
 
 ```
-  library random-pair similarity
+  library random-pair similarity, 616 crop-based embeddings
     raw     : mean 0.569   p75 0.737     ← scoring constants were tuned against this
     centred : mean 0.014   p75 0.254     ← the range the formulas actually assume
 ```
@@ -1929,12 +2266,214 @@ library similarity     mean 0.577  std 0.208  median 0.582
 ### Test suite as it stands
 
 ```
+# at audit time
 $ python3 test_phase2.py             → exit 1   ("Passed: 66, Failed: 1")
 $ python3 test_phase3.py             → exit 0   (9 passed)
 $ python3 test_phase3_integration.py → exit 1   (4 passed, 1 failed)
-
 $ git ls-files | grep test           → (nothing — .gitignore excludes test_*.py)
+
+# after Stage 1
+$ python3 -m pytest tests -q         → 179 passed
 ```
+
+---
+
+## 10b · Stage 1 measurements
+
+*Taken 23 July 2026 on the machine in the header, against the rebuilt 674-track library. These
+supersede the pre-C3 figures above wherever they overlap; the originals are kept because they are what
+the fix was designed against.*
+
+### The generation run
+
+```
+690 tracks in MPD  ·  674 embedded  ·  16 failed  ·  24,494 windows kept, 213 gated as silence
+5m 23s wall clock   2.09 tracks/s   75.8 windows/s   45.5 MB
+laion/clap-htsat-unfused, transformers 5.1.0, torch 2.10.0+cu128, RTX 3070
+
+all 16 failures are one album — Jimi Hendrix, "Electric Ladyland" — every track:
+  RuntimeError: Failed to decode audio samples: Could not receive frame from
+  decoder: Invalid data found when processing input
+```
+
+The original run also lost 16 tracks (§10, inventory). Same files: the FLACs are corrupt, and the
+audit's complaint was never that they failed but that nothing recorded *which*. `failed.txt` now does.
+
+### Throughput — where the cost actually is (M8)
+
+```
+  batch  1: 29.2 windows/s        batch 16: 31.9 windows/s
+  batch  4: 32.0 windows/s        batch 32: 38.2 windows/s
+  batch  8: 32.3 windows/s        batch 48: 36.8 windows/s
+
+  ClapFeatureExtractor alone, no GPU:   39.0 windows/s   ← the bottleneck
+  same, threaded:  1 → 37.4    2 → 59.5    4 → 75.1    8 → 83.0 windows/s
+```
+
+Batching buys ~30%; threading the mel extraction buys 2×. The GPU is nearly idle either way.
+
+### Determinism (C3)
+
+```
+  same file, same batch size, twice     → bit-identical (pooled and per-window)
+  re-embedded vs the vector on disk     → bit-identical
+  batch 32 vs batch 1, three tracks     → max |Δ| 2.2e-8, cos 1.0000000
+  truncation="fusion" at exactly 10 s   → RuntimeError (4 channels into a 1-channel patch embed)
+```
+
+### The similarity scale, rebuilt (C5)
+
+```
+  random-pair similarity, 674 pooled full-coverage embeddings, n=400 sampled
+    raw     : mean +0.670  median +0.675  p05 +0.363  p75 +0.819   std 0.183
+    centred : mean +0.011  median −0.049  p05 −0.562  p75 +0.297   std 0.412
+  centroid norm: 0.821     ← how far off the origin the library sits
+
+  for comparison, the pre-C3 crop-based figures from §10:
+    raw     : mean 0.569   p75 0.737
+```
+
+Pooling ~36 windows per track pulls every vector toward the library mean, so full coverage makes the
+raw space *more* anisotropic (0.569 → 0.670), not less. The centred distribution is what the scoring
+formulas always assumed: the negative half of the range is now occupied.
+
+### The silence gate (C3)
+
+Window RMS over 1,475 windows from 40 randomly chosen tracks, peak-normalised per track:
+
+```
+  p0.5  0.00004     p5   0.04239     p50  0.18635
+  p1    0.00004     p10  0.07214     p75  0.27812
+  p2    0.00550     p25  0.12682     p100 0.48096
+
+  gate 0.001 → drops 1.76%     gate 0.010 → drops 2.24%     gate 0.030 → drops 3.53%
+  gate 0.003 → drops 1.90%     gate 0.020 → drops 2.78%     gate 0.050 → drops 6.58%
+```
+
+Bimodal with an empty band between ~5 × 10⁻⁵ and ~0.04. `RMS_GATE = 0.01` sits in it. On the full run
+213 of 24,707 windows (0.9%) were gated.
+
+### Prompt template selection (H1, step 2)
+
+Each template's 49 descriptors scored against all 674 centred embeddings. `mean std` is how far apart
+the bank spreads the library; `eff. rank` is the participation ratio of the descriptor correlation
+matrix — roughly how many independent things the bank measures; `top-3 perplexity` is the effective
+number of distinct words the readout actually produces across the library.
+
+```
+  template     mean std   min std   eff. rank   distinct in top-3   top-3 perplexity
+  recording      0.1798    0.0958         2.5          49 / 49              34.8
+  bare           0.1435    0.0806         4.0          49 / 49              38.2
+  sounds         0.1539    0.0773         2.5          48 / 48              33.9
+  genre          0.1489    0.0897         2.0          49 / 49              30.2
+```
+
+`recording` ("This is a recording of {} music.") wins on spread, is within noise of the best on
+readout diversity, and matches what CLAP was trained on — audio captions, not bare adjectives. The low
+effective rank is a property of a metal-and-rock-heavy library, not a degenerate readout: every
+descriptor still surfaces for some track.
+
+### The variance gate (D5b)
+
+```
+  49 descriptors, floor 0.0927 = 0.50 × median std 0.1853
+  strongest: mellow 0.2387  romantic 0.2356  melancholic 0.2327  dreamlike 0.2308
+  weakest:   frenetic 0.0958  motorik 0.1008  driving 0.1135  triumphant 0.1172
+  dropped:   none
+```
+
+### Descriptor spot check (H1, acceptance for the gate)
+
+Top-3 by z-score, session-vector-free — these are the tracks' own embeddings:
+
+```
+  Bathory — Odens Ride Over Nordland      cavernous (+1.8) · orchestral (+1.0) · dense (+0.7)
+  Arcane OST — Heavy Is the Crown         cinematic (+1.7) · tense (+1.5) · menacing (+1.5)
+  Gojira — Ocean Planet                   aggressive (+1.0) · gritty (+0.8) · intense (+0.7)
+  bye2 — onionfriends2004 (breakcore)     electronic (+0.8) · hypnotic (+0.7) · danceable (+0.6)
+  Tame Impala — Be Above It               motorik (+1.5) · halftime (+0.5) · groovy (+0.4)
+  The Smiths — The Queen Is Dead          aggressive (+1.2) · energetic (+1.2) · gritty (+1.1)
+  Sabah — Dakhlak La Tealeqny Feek        motorik (+1.0) · halftime (+0.9) · joyful (+0.6)
+```
+
+Six of the seven are recognisable descriptions — Bathory's track is a reverberant orchestral intro,
+"Be Above It" is built on a repeating motorik drum loop, and "The Queen Is Dead" is the loudest thing
+on the record. The Arabic pop entry is the weak one: `joyful` fits, the rhythm words do not obviously.
+The rhythm axis carries the four weakest descriptors in the bank, which is consistent.
+
+### Re-measured for Stage 2 — H9's skip mechanics
+
+*The numbers Stage 2's `[N]` rebuild is specified against. §10's versions were taken on the 616
+crop-based embeddings; these are the space the code now runs in.*
+
+**Method.** 40 sessions per row on the 674-track centred library. Each session starts from a random
+unit vector and plays 12 tracks by argmax under the session vector alone, applying the project's own
+EMA update (`decay = 0.85`). Turnover = fraction of the top-100 pool that changed. Session-only, so no
+taste, novelty or anti-repetition term is in play — the real scorer will move the pool *more* than
+this at every row, so treat these as the tight end of the range and the ordering as the finding.
+
+```
+  on-manifold quality — mean similarity to the 25 nearest real tracks
+    a real track            0.729
+    session vector          0.641
+    after [V] force_shift   0.450     ← half a random direction blended in
+    random direction        0.085
+
+  candidate-pool turnover
+                                     cos(new,old)   turnover
+    [N] x1   (penalize_similar 0.15)     0.999         0.3%
+    [N] x3                               0.989         1.3%
+    [N] x5                               0.958         2.4%
+    [V] x1   (force_shift 0.5)           0.703         9.3%
+    [N] x10                              0.665        10.7%
+    [N] x20                              0.243        87.9%
+
+  cos(session vector, the track it is about to play): mean 0.971
+```
+
+The session vector locks onto its neighbourhood far harder in the centred space (0.971 against 0.790
+before), which is why a fixed 0.15 nudge now moves almost nothing. It is also, independently, the
+clearest argument for H6: an argmax over a pool this concentrated is close to deterministic.
+
+**Solving λ from the 3-skip centroid, then `snap()`:**
+
+```
+  target    median lambda    turnover    after snap()   on-manifold after snap()
+    5%          0.25            5.7%         17.8%              0.826
+   20%          0.60           24.5%         20.8%              0.806
+   50%          0.75           58.9%         56.5%              0.709
+   85%          0.95           90.2%         93.3%              0.765
+```
+
+Two things to carry into the implementation:
+
+- **The schedule survived the space changing.** λ is solved against a turnover target, so it
+  re-derives itself; the values it lands on (0.25 / 0.60 / 0.75 / 0.95) are within 0.1 of the
+  pre-Stage-1 solve. This is the payoff of specifying the target in observable units.
+- **`snap()` is a move, not a projection.** At the 5% target it nearly *quadruples* turnover
+  (5.7% → 17.8%), because relocating to the 25-NN centroid displaces the vector by more than a small
+  λ did. At 50% and 85% it is roughly neutral. H9's "*n* ≥ 2 only" is therefore load-bearing, not a
+  nicety — applying it to a single skip would overshoot the schedule badly.
+
+### Re-measured for Stage 2 — H6's selection rule
+
+30-track sessions from one fixed start state on the 674-track centred library, with the 20-track
+anti-repetition gap applied:
+
+```
+  selection rule        within-session sim   distinct sessions (5 runs)   overlap w/ run #1
+  argmax (current)             0.539                   1 / 5                   100%
+  rank-Boltzmann tau=1         0.618                   5 / 5                    43%
+  rank-Boltzmann tau=7         0.811                   5 / 5                    31%
+  rank-Boltzmann tau=15        0.759                   5 / 5                    16%
+  (library baseline)           0.009
+```
+
+The conclusion held and one detail inverted: sampling is now slightly *more* coherent than argmax
+rather than slightly less. Strict argmax, forbidden from repeating within 20 tracks, is pushed to the
+next-best unplayed candidate every time and walks away from where it started; sampling circles a
+neighbourhood. The ordering among τ values remains within noise at five runs — **τ_max ≈ 15 is still a
+starting point requiring calibration in use, not a finding.**
 
 ### Subprocess overhead — measured, not assumed
 
@@ -1945,13 +2484,14 @@ steady state ≈ 12 mpc calls/sec → ~1% of one core
 # a real cost only against a remote MPD_HOST, where each call is a TCP round trip
 ```
 
-### Projected cost of the C3 rebuild
+### Projected cost of the C3 rebuild — and what it actually cost
 
 ```
-616 tracks × ~24 non-overlapping 10 s windows ≈ 14,800 forward passes
-storage: 616 × 24 × 512 × float32 ≈ 30 MB for the per-window matrix
-audio decode: 616 files, once each — dominated the original 198 s run
-expected wall clock, batched, RTX 3070: low single-digit minutes
+projected:  616 tracks × ~24 windows ≈ 14,800 forward passes, ~30 MB, "low single-digit minutes"
+actual:     674 tracks × 36.3 windows =  24,494 forward passes, 45.5 MB, 5m 23s
+
+# the projection was low on window count (tracks are longer than 4 minutes on average)
+# and wrong about the bottleneck: audio decode did not dominate, mel extraction did (M8)
 ```
 
 ---
@@ -1963,5 +2503,6 @@ embedding-determinism figures use the project's own code path against the cached
 `laion/clap-htsat-unfused` weights.*
 
 *The library inventory in §10 describes state that has since been deleted (D3). The similarity
-distributions it records were measured on those 616 embeddings and are the numbers Stage 1 must
-re-measure after C3 and C5 change how the vectors are built.*
+distributions it records were measured on those 616 embeddings; **§10b is the re-measurement** Stage 1
+owed, taken on the 674 embeddings C3 and C5 produced. Where the two disagree, §10b is the live
+library and §10 is the record of what the fix was designed against.*
