@@ -4,18 +4,37 @@ Full-featured TUI with real-time updates and responsive controls.
 
 Layout (rows, top to bottom):
   [1]  Header bar
-  [N]  Now Playing  ── two columns:
-         left:  album art box  (fixed ART_COLS wide, fills available height)
-         right: status · track info · seek bar · vibe
-  [5]  Console      ── live state updates (exploration, vibe shifts, etc.)
-  [M]  Queue        ── upcoming tracks (takes remaining space)
+  [N]  Now Playing  ── two columns, height packed to its own contents:
+         left:  album art area (fixed ART_COLS wide)
+         right: status · track info · seek bar · descriptors · drift
+  [7]  Console      ── live state updates, fixed height
+  [M]  Session      ── `↓ next:` plus session history, takes what is left
   [1]  Footer bar
 
-Album art is rendered as a terminal overlay (ueberzug/kitty/sixel).
-Its position is computed from the live screen size so it never overlaps
-the seek bar or vibe line regardless of terminal dimensions.
+Two things about this file are the point of Stage 3 rather than incidental to it.
+
+**The album art position is derived, not counted.**  It used to be pinned to
+`x=2, y=3, height=RIGHT_COL_ROWS=10`, where `RIGHT_COL_ROWS` was a hand-counted
+comment listing the widgets in the right-hand Pile.  Every item in this stage
+changes that Pile, and the constant carried no way to notice.  `_art_geometry()`
+now asks the widget tree — `Pile.get_item_rows`, `Columns.column_widths`,
+`Widget.rows` — so adding a row to the right column moves the art by exactly one
+row with no edit here at all (audit H8/L3).  The hand count was also *wrong*:
+the art column starts at column 1, not 2, and its true height at 80×40 was 10
+rows against the 10 the constant claimed only because the two errors were in
+different directions.
+
+**The Now Playing box is packed, which is what makes it render at all.**  It used
+to take `('weight', 3, …)` of the body.  Its content is a flow Pile containing a
+Columns whose left cell is a box Filler, so urwid resolved it as a box widget and
+then handed it a height that did not match the one it rendered — a `WidgetError`
+on **every terminal shorter than 33 rows**, including the classic 80×24.  Nothing
+caught it because nothing in the suite had ever constructed the widget tree.
+`('pack', …)` gives it exactly `rows()`, which is both correct and the reason the
+art geometry is now independent of the terminal's height.
 """
 
+import os
 import sys
 import io
 import time
@@ -36,6 +55,8 @@ except ImportError:
 
 from config import config
 from album_art import get_album_art_renderer
+from session_history import SessionHistory
+from vibe_readout import VibeReadout, format_descriptors
 
 
 # ─── Console log interceptor ────────────────────────────────────────────────
@@ -45,13 +66,20 @@ class _ConsoleCapture(io.TextIOBase):
     """
     Drop-in replacement for sys.stderr that:
       • Stores the last N lines in a ring-buffer for the TUI console widget.
+      • Tees every line to config.log_file, so nothing is lost when the TUI
+        scrolls it off the 5-line console panel or swallows it entirely.
       • Passes everything through to the real stderr ONLY when the TUI is not
         active, so messages never bleed through the urwid layout.
+
+    The log tee is the point of this class existing (audit L5).  Without it a
+    traceback from the background thread flashes through a five-line ring buffer
+    and is then unrecoverable, which is the single biggest obstacle to
+    diagnosing anything that happens during a real session.
     """
 
     MAX_LINES = 200
 
-    def __init__(self, real_stderr):
+    def __init__(self, real_stderr, log_path: Optional[Path] = None):
         super().__init__()
         self._real = real_stderr
         self._buf = deque(maxlen=self.MAX_LINES)
@@ -61,6 +89,25 @@ class _ConsoleCapture(io.TextIOBase):
         # When True, writes are captured only — never forwarded to the raw
         # terminal, which would bleed through the urwid layout.
         self.tui_active: bool = False
+        self._log = self._open_log(log_path)
+
+    def _open_log(self, log_path: Optional[Path]):
+        """
+        Open the session log in append mode.  Failure here must never take the
+        application down — a missing log is a degraded session, not a dead one.
+        """
+        if log_path is None:
+            return None
+        try:
+            log_path.parent.mkdir(parents=True, exist_ok=True)
+            handle = open(log_path, "a", encoding="utf-8", buffering=1)
+            stamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            handle.write(f"\n===== session started {stamp} =====\n")
+            return handle
+        except Exception as e:
+            self._real.write(f"Warning: could not open log file {log_path}: {e}\n")
+            self._real.flush()
+            return None
 
     def write(self, text: str) -> int:
         # Only forward to the real terminal when the TUI is NOT running.
@@ -75,13 +122,32 @@ class _ConsoleCapture(io.TextIOBase):
             line = line.rstrip()
             if line:
                 ts = datetime.now().strftime("%H:%M:%S")
+                stamped = f"[{ts}] {line}"
                 with self._lock:
-                    self._buf.append(f"[{ts}] {line}")
+                    self._buf.append(stamped)
+                    self._write_log(stamped)
         return len(text)
+
+    def _write_log(self, line: str):
+        """Append one already-stamped line to the log. Caller holds the lock."""
+        if self._log is None:
+            return
+        try:
+            self._log.write(line + "\n")
+        except Exception:
+            # A broken log must not turn into an infinite recursion through
+            # stderr.  Drop the handle and carry on silently.
+            self._log = None
 
     def flush(self):
         if not self.tui_active:
             self._real.flush()
+        with self._lock:
+            if self._log is not None:
+                try:
+                    self._log.flush()
+                except Exception:
+                    self._log = None
 
     def get_lines(self) -> List[str]:
         with self._lock:
@@ -99,7 +165,7 @@ _console_capture: Optional[_ConsoleCapture] = None
 def _install_console_capture():
     global _console_capture
     if _console_capture is None:
-        _console_capture = _ConsoleCapture(sys.__stderr__)
+        _console_capture = _ConsoleCapture(sys.__stderr__, config.log_file)
         sys.stderr = _console_capture
 
 
@@ -109,42 +175,145 @@ _install_console_capture()
 # ─── TUI class ──────────────────────────────────────────────────────────────
 
 # Width (in terminal columns) reserved for the album-art column inside the
-# Now Playing box.  Includes the inner LineBox borders (2 cols each side = 2).
-ART_COLS = 33  # terminal columns wide for the album art area (no inner box)
+# Now Playing box.  This one is a *declaration* — the Columns cell is built to
+# it — rather than a count of something else, which is why it survives H8.
+ART_COLS = 33
 
-# Header height in rows (urwid Frame header is exactly 1 row tall when the
-# header widget is a simple Filler(Text(…))).
-HEADER_ROWS = 1
-FOOTER_ROWS = 1
-
-# Rows used by the Now Playing LineBox itself (top border + bottom border)
-NP_BORDER_ROWS = 2
-
-# Fixed row count for the console panel
+# Fixed row count for the console panel's ListBox (its LineBox adds 2 more).
 CONSOLE_ROWS = 5
 
-# Exact row count of the right column Pile in Now Playing.
-# Count: status(1) + Divider(1) + artist(1) + album(1) + track(1) +
-#        Divider(1) + seek_bar(1) + seek_time(1) + Divider(1) + vibe(1) = 10
-# The art height is pinned to this so a wide cover can never overflow into
-# the seek bar or vibe line regardless of the image aspect ratio.
-RIGHT_COL_ROWS = 10
+# Below this the art area is too small to be an image rather than a smear, so
+# the renderer is cleared instead.  Nothing downstream depends on the numbers;
+# they shape behaviour without asserting anything.
+MIN_ART_ROWS = 3
+MIN_ART_COLS = 8
+
+# How many history rows the Session panel will build widgets for.  The panel is
+# a few dozen rows at most; this only stops an all-night session from rendering
+# hundreds of Text widgets that are scrolled off screen anyway.
+HISTORY_RENDER_LIMIT = 200
+
+# NOTE: `RIGHT_COL_ROWS` is deliberately gone.  It was the hand-counted height of
+# the Now Playing right-hand Pile, and the album art was pinned to it — so every
+# change to that Pile silently misplaced the image and nothing could notice.
+# `_art_geometry()` asks the widget tree instead (audit H8).
+
+
+# Terminal byte sequences → the key names urwid hands `_handle_input`.
+#
+# This exists so the fallback text mode can share the urwid mode's one dispatch
+# table instead of keeping a second one (audit L9/M1c).  Only the sequences the
+# bindings actually use are here; anything else decodes to None and is ignored,
+# which is what urwid does with an unhandled key too.
+_RAW_KEYS = {
+    "\x1b[A": "up",
+    "\x1b[B": "down",
+    "\x1b[C": "right",
+    "\x1b[D": "left",
+    "\x1bOA": "up",         # some terminals send SS3 rather than CSI in
+    "\x1bOB": "down",       # application-cursor mode
+    "\x1bOC": "right",
+    "\x1bOD": "left",
+    "\r": "enter",
+    "\n": "enter",
+}
+
+
+def decode_key(raw: str) -> Optional[str]:
+    """
+    Turn one terminal keypress into a key name `_handle_input` knows.
+
+    Pure and importable on purpose: the fallback mode needs a pty to run, so
+    this is the part of it that can be tested without one — and the part that
+    was actually wrong before, since the two interfaces disagreed about what
+    `↑` meant (L9).
+    """
+    if not raw:
+        return None
+    if raw in _RAW_KEYS:
+        return _RAW_KEYS[raw]
+    if len(raw) == 1 and (raw.isprintable() or raw == " "):
+        return raw
+    return None
+
+
+def decode_keys(buffer: str):
+    """
+    Split a chunk of terminal input into key names, plus any incomplete tail.
+
+    Returns `(keys, remainder)`.  `remainder` is a partial escape sequence that
+    might still be completed by the next read; anything else is consumed.
+
+    The mode used to read one character at a time and `select()` on `sys.stdin`
+    between reads.  Those two do not agree about what is pending: `read()` on a
+    buffered text stream pulls everything available into Python's buffer, and
+    `select()` then reports the file descriptor as empty — so a burst of input
+    (a held-down arrow key, a paste, anything faster than one key per tick) left
+    keys sitting in the buffer, unread, until the next keypress dislodged one of
+    them.  Reading the whole burst and splitting it here is what makes the two
+    agree.
+    """
+    keys, i = [], 0
+    while i < len(buffer):
+        if buffer[i] == "\x1b":
+            sequence = buffer[i:i + 3]
+            if sequence in _RAW_KEYS:
+                keys.append(_RAW_KEYS[sequence])
+                i += 3
+                continue
+            if len(buffer) - i < 3 and any(k.startswith(buffer[i:])
+                                           for k in _RAW_KEYS):
+                return keys, buffer[i:]     # truncated — wait for the rest
+            if buffer[i:i + 2] in ("\x1b[", "\x1bO"):
+                i += 3      # a CSI/SS3 sequence we have no binding for: drop it
+                continue    # whole, or its tail arrives as bare keypresses
+            i += 1          # a bare ESC
+            continue
+        key = decode_key(buffer[i])
+        if key is not None:
+            keys.append(key)
+        i += 1
+    return keys, ""
 
 
 class AdaptiveDJTUI:
     """Terminal User Interface for Adaptive Session AI DJ."""
 
-    def __init__(self, dj):
+    def __init__(self, dj, art_renderer=None):
         self.dj = dj
         self.running = False
 
         # UI state
         self.current_status: dict = {}
-        self.liked_tracks: set = set()
-        self.queue_focus_index: int = 0  # which queue item is highlighted
+        # Written to by the signal handler to unblock urwid's MainLoop; see
+        # `request_exit`.
+        self._exit_pipe: Optional[int] = None
+        # urwid's own SIGWINCH handler, if we ever displace it, so it can still
+        # be called and still be given back (audit L1).  On urwid 3.0.5 we never
+        # do: urwid chains to us rather than replacing us.
+        self._urwid_sigwinch = None
+        self._sigwinch_installed = False
 
-        # Album art
-        self.album_art_renderer = get_album_art_renderer()
+        # What played and what became of it (audit H1c).  The model is here
+        # rather than behind the display because nothing behind the display has
+        # this shape — see session_history.py.
+        self.history = SessionHistory()
+        # Where this session's feedback events begin in the handler's history,
+        # which spans every previous session once it is loaded from disk.
+        self._feedback_cursor = len(getattr(
+            getattr(dj, 'feedback_handler', None), 'feedback_history', []) or [])
+        # Hearts survive a restart now: the likes were always on disk, only the
+        # set that drew them was in memory (audit L4).
+        self.history.rehydrate_likes(getattr(
+            getattr(dj, 'feedback_handler', None), 'feedback_history', []) or [])
+
+        # The descriptor readout, finally reading the bank Stage 1 built.
+        self.vibe = VibeReadout(getattr(dj, 'descriptor_bank', None))
+
+        # Album art.  Injectable so the widget tests can construct the tree
+        # without detecting protocols and spawning a ueberzugpp child.
+        self.album_art_renderer = (art_renderer if art_renderer is not None
+                                   else get_album_art_renderer())
         self.show_album_art = self.album_art_renderer.is_available()
 
         if self.show_album_art:
@@ -171,34 +340,50 @@ class AdaptiveDJTUI:
             ("paused", "yellow,bold", "default"),
             ("track_info", "white", "default"),
             ("vibe", "light cyan", "default"),
-            ("queue_item", "light gray", "default"),
-            ("queue_current", "black,bold", "light green"),
             ("liked", "light red,bold", "default"),
             ("seek_bar", "white", "dark gray"),
             ("seek_progress", "black", "light green"),
             ("console_text", "dark cyan", "default"),
             ("console_warn", "yellow", "default"),
             ("console_err", "light red", "default"),
-            ("queue_focused", "black,bold", "dark cyan"),
+            ("history_item", "light gray", "default"),
+            ("history_focus", "black,bold", "dark cyan"),
+            ("history_playing", "light green,bold", "default"),
+            ("next_up", "light cyan", "default"),
+            ("divider", "dark gray", "default"),
         ]
 
         # ── Header ──
+        # A flow widget, not a Filler: `Frame` wants flow widgets for its header
+        # and footer, and a real flow widget can report its own `rows()` — which
+        # is what `_art_geometry()` reads instead of assuming 1 (H8).
         self.header_text = urwid.Text("🎵 Adaptive Session AI DJ", align="center")
-        self.header = urwid.AttrMap(urwid.Filler(self.header_text), "header")
+        self.header = urwid.AttrMap(self.header_text, "header")
 
         # ── Now Playing: right column widgets ──
         self.status_text = urwid.Text(("paused", "⏸ Paused"))
         self.artist_text = urwid.Text("Artist: ---")
         self.album_text = urwid.Text("Album: ---")
         self.track_text = urwid.Text("Track: ---")
-        self.vibe_text = urwid.Text(("vibe", "Vibe: Starting session…"))
+
+        # The vibe readout, in two rows (audit H1b).  The first names the top
+        # three descriptors by z-score against this library's own distribution;
+        # the second says how many of those three were also on screen a few
+        # tracks ago, and how many tracks have played.  Both are gated on the
+        # session vector being seeded — `bank.top(zeros)` returns a confident
+        # ranking of the bank's own baselines rather than refusing, which is H1's
+        # original defect in a new costume.  See vibe_readout.py.
+        self.descriptor_text = urwid.Text("")
+        self.drift_text = urwid.Text("")
 
         self.seek_bar_progress = urwid.ProgressBar(
             "seek_bar", "seek_progress", current=0, done=100
         )
         self.seek_time_text = urwid.Text("0:00 / 0:00", align="center")
 
-        right_col = urwid.Pile(
+        # The album art's height is this Pile's height.  Adding a row here moves
+        # the art by exactly one row, with no constant to update (H8).
+        self.right_col = urwid.Pile(
             [
                 urwid.AttrMap(self.status_text, "track_info"),
                 urwid.Divider(),
@@ -209,90 +394,113 @@ class AdaptiveDJTUI:
                 urwid.AttrMap(self.seek_bar_progress, "seek_bar"),
                 self.seek_time_text,
                 urwid.Divider(),
-                urwid.AttrMap(self.vibe_text, "vibe"),
+                urwid.AttrMap(self.descriptor_text, "vibe"),
+                urwid.AttrMap(self.drift_text, "vibe"),
             ]
         )
+        right_col = self.right_col
 
         # ── Now Playing: left column (album art area) ──
         # No LineBox here — a border widget renders visible box characters in
         # the terminal that show through behind the ueberzug overlay.
         # The art area is a plain Filler; ueberzug draws the image on top.
         self.album_art_placeholder = urwid.Text(" ", align="center")
-        art_inner = urwid.Filler(self.album_art_placeholder, valign="middle")
+        self.art_inner = urwid.Filler(self.album_art_placeholder, valign="middle")
 
-        # Two-column row: art (fixed width) | track info (rest)
-        np_columns = urwid.Columns(
+        # Two-column row: art (fixed width) | track info (rest).  The art cell is
+        # index 0, which is what makes its x-offset inside the Columns zero; the
+        # geometry derivation reads the index rather than assuming it.
+        self.art_column_index = 0
+        self.np_columns = urwid.Columns(
             [
-                ("fixed", ART_COLS, art_inner),
+                ("fixed", ART_COLS, self.art_inner),
                 ("weight", 1, urwid.Padding(right_col, left=1)),
             ]
         )
 
-        now_playing_content = urwid.Pile(
+        self.now_playing_content = urwid.Pile(
             [
                 urwid.Divider(),
-                np_columns,
+                self.np_columns,
                 urwid.Divider(),
             ]
         )
 
-        self.now_playing_box = urwid.LineBox(now_playing_content, title="♪ Now Playing")
+        self.now_playing_box = urwid.LineBox(self.now_playing_content,
+                                             title="♪ Now Playing")
 
         # ── Console panel ──
         self.console_walker = urwid.SimpleFocusListWalker(
             [urwid.Text(("console_text", "── console ready ──"))]
         )
         console_lb = urwid.ListBox(self.console_walker)
-        # BoxAdapter gives the ListBox a fixed height inside a Pile
+        # BoxAdapter gives the ListBox a fixed height inside a Pile.
+        # WidgetDisable makes it non-selectable, so ↑↓ and ENTER reach
+        # `unhandled_input` instead of being swallowed by this ListBox's own
+        # scrolling — the Pile would otherwise focus it, being the first
+        # selectable thing in the body.
         self.console_box = urwid.LineBox(
             urwid.BoxAdapter(console_lb, CONSOLE_ROWS), title="System Console"
         )
 
-        # ── Queue panel ── (navigable with ↑↓, press Enter to play)
-        self.queue_walker = urwid.SimpleFocusListWalker([])
-        self.queue_listbox = urwid.ListBox(self.queue_walker)
-        self.queue_box = urwid.LineBox(
-            self.queue_listbox, title="Upcoming Queue  [↑↓ navigate · ENTER play]"
+        # ── Session panel ──
+        #
+        # This was the "Upcoming Queue", listing ten tracks drawn from
+        # `mpc playlist` — which with consume off is the session's *history*,
+        # numbered as if it were the future (audit H2).  Stage 2 cut it to a
+        # one-line `↓ next:`; this is what it becomes (H1c): the lookahead, a
+        # divider, then what actually played, newest first, with ♥ / ⏭ / ✓.
+        #
+        # It is truthful because it happened, which is the whole argument for
+        # replacing a queue view with a history view at depth 1.
+        self.next_up_text = urwid.Text("  ↓ next:  —")
+        self.history_walker = urwid.SimpleFocusListWalker([])
+        self.history_listbox = urwid.ListBox(self.history_walker)
+        self.session_box = urwid.LineBox(
+            urwid.Pile([
+                ("pack", urwid.AttrMap(self.next_up_text, "next_up")),
+                ("pack", urwid.AttrMap(urwid.Divider("─"), "divider")),
+                ("weight", 1, self.history_listbox),
+            ]),
+            title="Session",
         )
 
         # ── Main layout ──
-        # now_playing_box: weight 0 means it takes only its natural (pack) height.
-        # We use ('given', N) via BoxAdapter trick — but the cleanest urwid way
-        # is to give now_playing a fixed row count computed at render time.
-        # Instead we use weight proportions and let urwid divide the space.
-        # Proportions: now_playing=3, queue=2 gives now_playing ~60% of body.
-        main_pile = urwid.Pile(
+        #
+        # `('pack', …)` for Now Playing, not `('weight', 3, …)`.  Its content is
+        # a flow Pile wrapping a Columns whose art cell is a box Filler, so urwid
+        # resolves the Columns as a box widget and then renders it at its natural
+        # height — which raised `WidgetError` whenever the weighted allocation
+        # disagreed, i.e. on every terminal shorter than 33 rows.  Packing gives
+        # it exactly `rows()`, so the mismatch cannot arise, the panel is the
+        # same height on an 80×24 as on an 80×50, and the album art's position
+        # stops depending on the terminal's height at all.
+        self.main_pile = urwid.Pile(
             [
-                ("weight", 3, self.now_playing_box),
-                (
-                    CONSOLE_ROWS + 2,
-                    self.console_box,
-                ),  # fixed: CONSOLE_ROWS + 2 border rows
-                ("weight", 2, self.queue_box),
+                ("pack", self.now_playing_box),
+                (CONSOLE_ROWS + 2, urwid.WidgetDisable(self.console_box)),
+                ("weight", 1, urwid.WidgetDisable(self.session_box)),
             ]
         )
 
         # ── Footer ──
+        # Reconciled with the README table and the fallback-mode bindings, which
+        # disagreed three ways (audit L9): the README listed volume on `,`/`.`,
+        # the footer on `<`/`>`, and simple mode bound ↑↓ to volume while the
+        # urwid mode had them unbound.  One set of bindings now, everywhere.
         footer_text = urwid.Text(
-            [
-                " SPACE=Play/Pause  ",
-                "N=Next  ",
-                "V=Vibe  ",
-                "L=Like  ",
-                "<,>=Vol  ",
-                "←→=Seek  ",
-                "↑↓=Queue  ",
-                "ENTER=Play  ",
-                "I=Info  ",
-                "Q=Quit",
-            ],
+            "[SPACE] Pause   [N] Skip   [L] Like   [↑↓] History   "
+            "[ENTER] Replay   [,.] Vol   [←→] Seek   [I] Info   [Q] Quit",
             align="center",
         )
-        self.footer = urwid.AttrMap(urwid.Filler(footer_text), "footer")
+        # A flow widget, so a narrow terminal wraps the hints onto a second row
+        # rather than silently truncating them — and so `rows()` reports the
+        # truth to `_art_geometry()`.
+        self.footer = urwid.AttrMap(footer_text, "footer")
 
         # ── Frame ──
         self.frame = urwid.Frame(
-            body=main_pile,
+            body=self.main_pile,
             header=self.header,
             footer=self.footer,
         )
@@ -307,9 +515,40 @@ class AdaptiveDJTUI:
         # is moved between monitors.  We use it to mark the art dirty so the
         # next 0.5s tick re-renders without issuing a "remove" first (which
         # would cause a visible blank frame).
+        #
+        # Installing it here is not enough and never was (audit L1): urwid's
+        # `Screen.start()` installs its own handler when `loop.run()` is called,
+        # replacing this one.  `_install_sigwinch_chain()` puts it back from
+        # inside the running loop; this call covers the fallback text mode,
+        # which has no urwid to overwrite it.
         signal.signal(signal.SIGWINCH, self._on_sigwinch)
 
+        # A self-pipe the loop watches, so a signal arriving in the middle of
+        # `loop.run()` can end it (audit H3).  `os.write` is async-signal-safe;
+        # raising ExitMainLoop from a signal handler is not, because urwid may
+        # be anywhere inside its own event processing when it fires.
+        self._exit_pipe = self.loop.watch_pipe(self._on_exit_requested)
+
         self.loop.set_alarm_in(0.5, self._periodic_update)
+
+    def request_exit(self):
+        """
+        Ask the TUI to shut down.  Safe to call from a signal handler.
+
+        Without this the SIGTERM path set a flag the urwid loop never read, so
+        the UI stayed on screen with no MPD polling behind it and `_shutdown()`
+        — and therefore every save, and the MPD mode restore — was unreachable.
+        """
+        self.running = False
+        if self._exit_pipe is not None:
+            try:
+                os.write(self._exit_pipe, b"x")
+            except OSError:
+                pass
+
+    def _on_exit_requested(self, _data):
+        """Runs inside the main loop, so raising ExitMainLoop here is safe."""
+        raise urwid.ExitMainLoop()
 
     # ── Input handling ────────────────────────────────────────────────────────
 
@@ -323,22 +562,20 @@ class AdaptiveDJTUI:
             self._toggle_play_pause()
         elif key_lower == "n":
             self._skip_track()
-        elif key_lower == "v":
-            self._skip_vibe()
         elif key_lower == "l":
             self._like_track()
         elif key_lower == "i":
-            self._show_context_info()
-        elif key == "up":
-            self._queue_navigate(-1)
-        elif key == "down":
-            self._queue_navigate(+1)
-        elif key == "enter":
-            self._queue_play_selected()
+            self._show_model_info()
         elif key == "right":
             self._seek_forward()
         elif key == "left":
             self._seek_backward()
+        elif key == "up":
+            self._history_scroll(-1)
+        elif key == "down":
+            self._history_scroll(+1)
+        elif key == "enter":
+            self._replay_focused()
         elif key_lower in (",", "<"):
             self._volume_down()
         elif key_lower in (".", ">"):
@@ -354,26 +591,68 @@ class AdaptiveDJTUI:
             self.dj.mpd_controller.play()
 
     def _skip_track(self):
-        t = self.current_status.get("track_file")
-        if t:
-            self.dj.feedback_handler.process_skip(t)
-        # Mark skip time so background loop does not also fire process_full_listen
-        self.dj._last_skip_time = time.time()
-        self.dj.mpd_controller.next_track()
-
-    def _skip_vibe(self):
-        t = self.current_status.get("track_file")
-        if t:
-            self.dj.feedback_handler.process_vibe_skip(t)
-        # Mark skip time so background loop does not also fire process_full_listen
-        self.dj._last_skip_time = time.time()
-        self.dj.mpd_controller.next_track()
+        """
+        [N].  The orchestrator owns the whole skip — feedback, lookahead
+        replacement and the single advance — because the *order* of those three
+        is what keeps the session alive (audit C4), and that ordering should not
+        be something a key handler can get wrong.
+        """
+        self.dj.skip_current_track()
 
     def _like_track(self):
+        """
+        [L].  Like the playing track, or retract the like if it already has one.
+
+        The model half is `FeedbackHandler.process_unlike()`, which deletes the
+        like from the feedback history and replays the taste model over what is
+        left rather than subtracting a magnitude — see there for why a negative
+        update cannot undo a normalised EMA (audit L8).  The `♥` follows the
+        model rather than leading it: it is only added or removed once the
+        handler reports that the history actually changed, so a track with no
+        embedding cannot end up wearing a heart that `[L]` is then unable to
+        take off.
+        """
         t = self.current_status.get("track_file")
-        if t:
-            self.dj.feedback_handler.process_like(t)
-            self.liked_tracks.add(t)
+        if not t:
+            return
+        if self.history.is_liked(t):
+            if self.dj.feedback_handler.process_unlike(t) is not None:
+                self.history.unlike(t)
+        elif self.dj.feedback_handler.process_like(t):
+            self.history.like(t)
+        if self.use_urwid:
+            self._update_session_panel()
+
+    def _history_scroll(self, delta: int):
+        """
+        [↑] / [↓].  Move the cursor through the session history, newest at top.
+
+        The indices are the history model's own, derived from what this session
+        played.  They deliberately share no numbering with MPD: the bindings this
+        replaces indexed into `mpc playlist`, which under the old modes held the
+        session's history above the current track, so ENTER on the first row
+        replayed the first track of the evening (audit H2).
+        """
+        if self.history.move_focus(delta) and self.use_urwid:
+            self._update_session_panel()
+
+    def _replay_focused(self):
+        """
+        [ENTER].  Put the track under the cursor in the lookahead slot.
+
+        The queue operation itself is `QueueManager.requeue_next()` — the
+        ordering of an add against a delete is the thing C4 and M1 are about, and
+        a display layer that reimplemented it would be a second place for it to
+        drift.
+        """
+        track = self.history.focused_track()
+        if not track:
+            return
+        if self.dj.queue_manager.requeue_next(track):
+            label = self._label_for(track)
+            print(f"Replay: {label} queued next", file=sys.stderr)
+            if self.use_urwid:
+                self._update_session_panel()
 
     def _volume_up(self):
         self.dj.mpd_controller.volume_up(5)
@@ -387,90 +666,255 @@ class AdaptiveDJTUI:
     def _seek_backward(self, delta: int = 10):
         self.dj.mpd_controller.seek_relative(-delta)
 
-    def _queue_navigate(self, direction: int):
-        """Move queue focus up (-1) or down (+1)."""
-        queue = self.dj.queue_manager.get_upcoming_tracks()
-        if not queue:
-            return
-        # Exclude the currently playing track from selectable items
-        current = self.current_status.get("track_file")
-        selectable = [t for t in queue if t != current]
-        if not selectable:
-            return
-        self.queue_focus_index = max(
-            0, min(len(selectable) - 1, self.queue_focus_index + direction)
-        )
-        self._update_queue_display()
-
-    def _queue_play_selected(self):
-        """Play the highlighted queue item immediately."""
-        queue = self.dj.queue_manager.get_upcoming_tracks()
-        current = self.current_status.get("track_file")
-        selectable = [t for t in queue if t != current]
-        if not selectable or self.queue_focus_index >= len(selectable):
-            return
-        target_track = selectable[self.queue_focus_index]
-        # Mark skip time so background loop does not also fire process_full_listen
-        self.dj._last_skip_time = time.time()
-        # Tell MPD to skip to that track in the playlist
-        self.dj.mpd_controller.play_track(target_track)
-        # Reset focus
-        self.queue_focus_index = 0
+    # NOTE: _queue_navigate() and _queue_play_selected() are gone with the queue
+    # panel (audit D1/H2).  They indexed into `mpc playlist`, which with consume
+    # off is the session's *history*, so ENTER on "1." replayed the first track
+    # of the evening.  Stage 3 rebinds ↑↓ and ENTER to the session-history panel
+    # — deriving the indices from scratch rather than porting these.
 
     def _quit(self):
         self.running = False
-        # Restore default SIGWINCH handler
-        signal.signal(signal.SIGWINCH, signal.SIG_DFL)
+        # Only hand SIGWINCH back if we took it.  This used to drop to SIG_DFL
+        # unconditionally, which takes the handler away from urwid while urwid
+        # is still holding the screen — and its handler is how it learns about a
+        # resize during teardown.  `Screen.stop()` restores what it captured, so
+        # the right move is usually to leave it alone (audit L1).
+        if self._sigwinch_installed:
+            signal.signal(signal.SIGWINCH,
+                          self._urwid_sigwinch or signal.SIG_DFL)
+            self._sigwinch_installed = False
         if self.use_urwid:
             raise urwid.ExitMainLoop()
 
-    def _show_context_info(self):
-        if not config.enable_time_context or not hasattr(
-            self.dj.session_state, "time_context"
-        ):
-            return
+    def _model_info_lines(self) -> List[str]:
+        """
+        What the machine currently believes, in measured quantities only.
 
-        stats = self.dj.session_state.time_context.get_stats()
+        This replaced the time-context overlay, which had no content left after
+        that subsystem was removed (audit D6/L9).  Stage 3 (H1d) adds the
+        descriptor rows: the top words for the session vector *and* the taste
+        vector, and the drift figure the vibe line summarises.  Everything here
+        is derived — there is no vocabulary in this overlay that the system
+        cannot back with a number it computed.
+        """
+        session = self.dj.session_state.get_stats()
+        taste = self.dj.user_taste.get_stats()
+        exploration = self.dj.exploration_controller.get_stats()
+        selector = self.dj.track_selector.get_stats()
+        weights = self.dj.exploration_controller.get_weights(
+            taste_updates=taste['total_updates'])
+
+        # τ is the effective number of candidates the sampler is choosing among.
+        # Reporting it is the point of picking a rank-based rule: it is a true
+        # statement about what the machine is doing, derived rather than named.
+        tau = self.dj.track_selector.temperature(exploration['exploration'])
+        ramp = self.dj.exploration_controller.taste_ramp(taste['total_updates'])
+
+        schedule = config.skip_turnover_schedule
+        run = exploration['consecutive_skips']
+        next_target = schedule[min(run + 1, len(schedule)) - 1]
+
+        # Descriptor rows (audit H1d).  Both are gated on their vector carrying
+        # evidence: z-scoring a zero vector yields a confident-looking ranking of
+        # the bank's own baselines rather than an error, so an ungated readout
+        # would state a vibe about nothing (H1, and the module note in
+        # vibe_readout.py).
+        seeded = session['is_seeded']
+        session_vector = self.dj.session_state.get_session_vector()
+        taste_vector = self.dj.user_taste.get_taste_vector()
+        drift = self.vibe.drift(session_vector, seeded)
+
+        if self.vibe.bank is None:
+            descriptor_lines = ["  (no descriptor bank loaded — see the startup log)"]
+        else:
+            session_words = (format_descriptors(
+                self.vibe.descriptors(session_vector, seeded))
+                if seeded else "— nothing has played yet")
+            taste_words = (format_descriptors(
+                self.vibe.bank.top(taste_vector, self.vibe.top_n))
+                if taste['is_seeded'] else "— no positive signal yet")
+            descriptor_lines = [
+                f"  bank             {len(self.vibe.bank)} descriptors, "
+                f"z-scored against this library",
+                f"  session          {session_words}",
+                f"  taste            {taste_words}",
+            ]
+            if drift is None:
+                descriptor_lines.append(
+                    "  drift            — (fewer than two tracks recorded)")
+            else:
+                descriptor_lines.append(
+                    f"  drift            {drift['held']} of {drift['of']} words held "
+                    f"over {drift['distance']} tracks")
+                # The cosine H1 originally specified.  It is kept here rather
+                # than on the vibe line because it is a compressed scale: over 40
+                # real sessions its median is 0.988 and its p10 is 0.947, so it
+                # reads as "0.99" almost always (§10d).  The word count above is
+                # what occupies its range; this is the underlying measurement.
+                descriptor_lines.append(
+                    f"  drift cosine     {drift['cosine']:+.3f}   "
+                    f"(ordinary listening: median 0.99, p10 0.95)")
+
         lines = [
-            "TIME CONTEXT STATISTICS",
+            "MODEL STATE",
             "",
-            f"Period:    {stats['current_period'].upper()}",
-            f"Day type:  {stats['current_day_type'].upper()}",
-            f"Modifier:  {stats['day_modifier']:.2f}× exploration",
+            f"Library             {self.dj.track_library.get_track_count()} tracks",
+            f"Session started     {'yes' if session['session_started'] else 'no'}",
+            f"Session vector      "
+            + ("seeded" if seeded else "unseeded (nothing has played yet)"),
+            f"Tracks this session {session['tracks_played']}",
+            f"Unique tracks seen  {selector['unique_tracks_played']}",
             "",
             "─" * 50,
-        ]
-        for period, d in stats["periods"].items():
-            status = "✓" if d["has_data"] else "○"
-            last = d["last_update"] or "never"
-            lines.append(
-                f"{status} {period.capitalize():12} "
-                f"{d['updates']:4d} updates   last: {last}"
-            )
-        lines += [
-            "─" * 50,
-            f"Total updates: {stats['total_updates']}",
+            "DESCRIPTORS",
+            *descriptor_lines,
             "",
-            "Press any key to close…",
+            "─" * 50,
+            "SELECTION",
+            f"  sampling         rank-Boltzmann, choosing from ~top {tau:.0f}",
+            f"  τ                {tau:.1f}   (bounds {config.tau_min:.0f}–{config.tau_max:.0f})",
+            f"  last pick        "
+            + (f"rank {selector['last_rank']} of {selector['last_pool_size']} scored"
+               if selector['last_rank'] is not None else "— (uniform draw: no evidence yet)"),
+            "",
+            "─" * 50,
+            "TASTE MODEL",
+            f"  seeded           {'yes' if taste['is_seeded'] else 'no (no positive signal yet)'}",
+            f"  updates          {taste['total_updates']}",
+            f"  β earned         {ramp:.0%}   (full weight after "
+            f"{config.taste_ramp_updates} updates)",
+            f"  likes            {taste['like_count']}",
+            f"  full listens     {taste['full_listen_count']}",
+            f"  skips            {taste['skip_count']}",
+            "",
+            "─" * 50,
+            "EXPLORATION",
+            f"  value            {exploration['exploration']:.2f}"
+            f"   (bounds {config.exploration_min:.2f}–{config.exploration_max:.2f})",
+            f"  consecutive skips   {run}",
+            f"  consecutive listens {exploration['consecutive_listens']}",
+            f"  next skip targets   {next_target:.0%} of the candidate pool",
+            "",
+            "─" * 50,
+            "CURRENT SCORING WEIGHTS",
+            f"  session          {weights['session_weight']:.3f}",
+            f"  taste            {weights['taste_weight']:.3f}",
+            f"  novelty          {weights['novelty_weight']:.3f}",
+            f"  anti-repetition  {weights['anti_repetition_weight']:.3f}",
+            "",
+            "[↑↓] scroll   any other key closes",
         ]
+        return lines
 
-        if self.use_urwid:
-            overlay_text = urwid.Text("\n".join(lines))
-            overlay_fill = urwid.Filler(overlay_text, valign="top")
-            overlay_box = urwid.LineBox(overlay_fill, title="Context Info")
-            overlay = urwid.Overlay(
-                overlay_box,
-                self.frame,
-                align="center",
-                width=("relative", 70),
-                valign="middle",
-                height=("relative", 70),
-            )
-            orig = self.loop.widget
-            self.loop.widget = overlay
-            self.loop.draw_screen()
-            self.loop.screen.get_input()
+    # Keys that dismiss the inspector rather than scrolling it.
+    _INFO_SCROLL_KEYS = ("up", "down", "page up", "page down", "home", "end")
+
+    # A LineBox draws one row above and below and one column each side.  That is
+    # structural to urwid's own widget, not a count of this application's
+    # layout, which is the distinction H8 is about.
+    _LINEBOX_BORDER = 2
+
+    def _overlay_inner_size(self, overlay):
+        """
+        The size urwid will hand the inspector's ListBox — asked, not derived.
+
+        This used to be `(int(cols * 0.7) - 2, box_rows - 2)`: our own copy of
+        the arithmetic urwid performs on the `("relative", 70)` width the
+        overlay declares.  Two places computing the same layout is how H8's
+        album-art constants came to be wrong, and being wrong here costs a
+        scroll page that jumps by the wrong amount.
+
+        `calculate_padding_filler` and `top_w_size` are the Overlay's own
+        methods, so this asks the widget where it is putting its child.  Read
+        per keypress rather than once, so the page still scrolls correctly if
+        the terminal is resized while `[I]` is held open — which it can be, now
+        that ↑↓ no longer dismiss it.
+        """
+        size = self.loop.screen.get_cols_rows()
+        left, right, top, bottom = overlay.calculate_padding_filler(size, True)
+        inner = overlay.top_w_size(size, left, right, top, bottom)
+        cols = inner[0] if len(inner) > 0 else size[0]
+        rows = inner[1] if len(inner) > 1 else size[1]
+        return (max(1, cols - self._LINEBOX_BORDER),
+                max(1, rows - self._LINEBOX_BORDER))
+
+    def _show_model_info(self):
+        """
+        [I].  Draw the inspector and block on it until a key dismisses it.
+
+        Stage 2 sized this box to its contents after the sampling and skip rows
+        overflowed a fixed 70% height and the last third was silently cut off.
+        The descriptor rows push it past a 40-row terminal, so content-sizing is
+        no longer enough: it is a ListBox now, and ↑↓ scroll it.  An inspector
+        that hides part of what it is inspecting is worse than no inspector.
+        """
+        lines = self._model_info_lines()
+        if not self.use_urwid:
+            # The fallback mode had no `[I]` binding at all while this method
+            # already returned its lines for a non-urwid caller — a loose end
+            # rather than an intended asymmetry (§8, trap 4).  Print the page
+            # and hold it until a key, which is the same gesture the overlay
+            # makes in a terminal that has no loop to block.
+            print("\033[2J\033[H", end="")
+            for line in lines:
+                print(line)
+            print("\n── any key to return ──")
+            sys.stdout.flush()
+            self._wait_for_any_key()
+            return lines
+
+        walker = urwid.SimpleListWalker([urwid.Text(line) for line in lines])
+        listbox = urwid.ListBox(walker)
+        overlay_box = urwid.LineBox(listbox, title="Model Info")
+
+        _, screen_rows = self.loop.screen.get_cols_rows()
+        box_rows = min(len(lines) + self._LINEBOX_BORDER,
+                       max(6, screen_rows - 2))
+
+        overlay = urwid.Overlay(
+            overlay_box,
+            self.frame,
+            align="center",
+            width=("relative", 70),
+            valign="middle",
+            height=box_rows,
+        )
+        orig = self.loop.widget
+        self.loop.widget = overlay
+        # Wake even with no keypress.  This loop owns the thread that runs the
+        # session bookkeeping, and the overlay can stay open indefinitely now
+        # that ↑↓ no longer dismiss it — without a timeout, a track that starts
+        # *and* finishes while `[I]` is up never reaches the history panel and
+        # its ✓ is dropped on the floor.  Stage 2's version closed on any key,
+        # so it could not be held open long enough for this to bite.
+        try:
+            self.loop.screen.set_input_timeouts(max_wait=0.5)
+        except Exception:
+            pass
+        try:
+            while True:
+                self.loop.draw_screen()
+                keys = self.loop.screen.get_input()
+                if not keys:
+                    self._sync_session_state()
+                    continue
+                dismissed = False
+                for key in keys:
+                    if key in self._INFO_SCROLL_KEYS:
+                        listbox.keypress(self._overlay_inner_size(overlay), key)
+                    elif isinstance(key, tuple):
+                        continue        # a mouse event; not a dismissal
+                    else:
+                        dismissed = True
+                if dismissed:
+                    break
+        finally:
+            try:
+                self.loop.screen.set_input_timeouts(max_wait=None)
+            except Exception:
+                pass
             self.loop.widget = orig
+        return lines
 
     # ── Periodic update ───────────────────────────────────────────────────────
 
@@ -480,20 +924,108 @@ class AdaptiveDJTUI:
         Marks the album art dirty so _render_art re-sends on the next tick.
         We do NOT call render() here directly — signal handlers must be fast
         and must not write to the ueberzug pipe (not async-signal-safe).
+
+        Then hands the signal on to whatever urwid installed, because urwid's
+        own handler is how the screen learns its size changed.  Displacing it
+        outright would fix the album art by breaking the layout.
         """
         if self.show_album_art:
             self.album_art_renderer.force_redraw()
 
+        chained = self._urwid_sigwinch
+        if callable(chained):
+            chained(signum, frame)
+
+    def _install_sigwinch_chain(self):
+        """
+        Make sure `_on_sigwinch` is actually reached once the loop is running (L1).
+
+        L1 says urwid replaces our handler at startup, and the measurement it
+        cites is real:
+
+            after _setup_urwid()    <bound method AdaptiveDJTUI._on_sigwinch …>
+            after Screen.start()    <bound method Screen._sigwinch_handler …>
+
+        **But the conclusion drawn from it does not hold on urwid 3.0.5.**
+        `Screen.start()` *captures* what was installed and calls it — see
+        `_posix_raw_display.py`, where line 129 stores `_prev_sigwinch_handler`
+        and line 98 invokes it — and `Screen.stop()` puts it back.  urwid wraps
+        our handler rather than displacing it, so it was being invoked all
+        along.  `getsignal` shows urwid's handler because urwid's is on the
+        outside, which looks identical to being replaced and is not.
+
+        Installing on top of that is not a fix, it is a cycle: ours → urwid's →
+        ours (as urwid's `_prev`) → urwid's → … Driving it produced exactly
+        that, a `RecursionError` on the first real resize.
+
+        So this asks the screen whether we are already in its chain, and only
+        installs when we are not — which is the case on urwid versions without
+        `_prev_sigwinch_handler`, and the case the finding describes.  Reading
+        the screen object rather than the version number keeps it a property of
+        what is actually there.
+
+        **What the handler is for is a window move, not a resize.**  A resize
+        already self-heals within 0.5 s: `_art_geometry()` is re-derived from
+        `get_cols_rows()` on every tick, so the renderer's key changes and the
+        image is re-sent on its own.  A move to another monitor at the same size
+        produces the same key, the send is skipped, and the image is left
+        behind — which is what `force_redraw()` exists for.
+
+        Idempotent, so the tick can call it freely.
+        """
+        screen = getattr(self.loop, 'screen', None)
+        if getattr(screen, '_prev_sigwinch_handler', None) == self._on_sigwinch:
+            self._urwid_sigwinch = None
+            return False        # urwid already calls us; do not close the loop
+
+        current = signal.getsignal(signal.SIGWINCH)
+        if current == self._on_sigwinch:
+            return False
+
+        # Anything that is not a real callable — SIG_DFL, SIG_IGN, None — is not
+        # something to chain into.
+        self._urwid_sigwinch = current if callable(current) else None
+        signal.signal(signal.SIGWINCH, self._on_sigwinch)
+        self._sigwinch_installed = True
+        return True
+
     def _periodic_update(self, loop=None, user_data=None):
+        # The first tick is the earliest point at which urwid's own handler is
+        # in place to be chained: it is installed by `loop.run()`, which has not
+        # happened yet when `_setup_urwid` runs (audit L1).
+        self._install_sigwinch_chain()
         self._update_display()
         if self.running:
             self.loop.set_alarm_in(0.5, self._periodic_update)
 
     # ── Display update ────────────────────────────────────────────────────────
 
-    def _update_display(self):
+    def _sync_session_state(self) -> dict:
+        """
+        Observe what the player has done since the last look, and return MPD's
+        status so the caller does not poll it twice.
+
+        Separate from drawing because it must keep running while the `[I]`
+        overlay has the loop blocked.  It is the only place the history learns
+        that a track started, so a gap here is a track missing from the panel —
+        and the panel's whole claim is that it lists what actually played.
+
+        Order matters: a track must be in the history before an event can mark
+        it, and the vibe snapshot must come from the vector as it stands now.
+        """
         status = self.dj.mpd_controller.get_status()
         self.current_status = status
+
+        self.history.note_playing(status.get("track_file"))
+        self._drain_feedback_events()
+        stats = self.dj.session_state.get_stats()
+        self.vibe.observe(self.dj.session_state.get_session_vector(),
+                          stats['tracks_played'], stats['is_seeded'])
+        return status
+
+    def _update_display(self):
+        status = self._sync_session_state()
+        session_stats = self.dj.session_state.get_stats()
 
         if not self.use_urwid:
             self._update_simple_display(status)
@@ -518,7 +1050,7 @@ class AdaptiveDJTUI:
         self.artist_text.set_text(f"Artist:  {artist}")
         self.album_text.set_text(f"Album:   {album}")
 
-        if track_file and track_file in self.liked_tracks:
+        if self.history.is_liked(track_file):
             self.track_text.set_text(["Track:   ", ("liked", "❤ "), title])
         else:
             self.track_text.set_text(f"Track:   {title}")
@@ -535,15 +1067,20 @@ class AdaptiveDJTUI:
             self.seek_bar_progress.set_completion(0)
             self.seek_time_text.set_text("0:00 / 0:00")
 
-        # Vibe
-        vibe = self.dj.session_state.get_vibe_description()
-        self.vibe_text.set_text(("vibe", f"Vibe:    {vibe}"))
+        # Vibe readout: the descriptors, then the drift and the counter.
+        descriptor_line, drift_line = self.vibe.lines(
+            self.dj.session_state.get_session_vector(),
+            session_stats['is_seeded'],
+            session_stats['tracks_played'],
+        )
+        self.descriptor_text.set_text(descriptor_line)
+        self.drift_text.set_text(drift_line)
 
         # Console
         self._update_console()
 
-        # Queue
-        self._update_queue_display()
+        # Session panel
+        self._update_session_panel()
 
         # Album art
         if self.show_album_art and track_file:
@@ -560,43 +1097,104 @@ class AdaptiveDJTUI:
 
     # ── Album art positioning ─────────────────────────────────────────────────
 
+    def _art_geometry(self, cols: int, rows: int):
+        """
+        Where the album art goes, asked of the widget tree (audit H8/L3).
+
+        Returns `(x, y, width, height)` in 0-indexed terminal cells, or None when
+        there is no usable art area.
+
+        This replaces four hand-counted constants — `x=2`, `y=3`, `width=33`,
+        `height=RIGHT_COL_ROWS=10` — whose comment block documented the
+        arithmetic carefully while nothing enforced it.  Two of them were already
+        wrong: the art column starts at column **1** (the LineBox's left border
+        is column 0, not column 1), and the art area's true height is whatever
+        the right-hand Pile happens to be, which Stage 3 changes from 10 rows to
+        11.  Every number below is read from the widgets that produce it, so a
+        row added to the Now Playing panel moves the image without an edit here.
+
+        The walk, outside in:
+
+            frame        → header.rows() gives the body's first row
+            main_pile    → get_item_rows() gives the Now Playing box's height
+                           and, by summing the items above it, its first row
+            LineBox      → one border row and one border column
+            content Pile → the rows of every widget above np_columns
+            np_columns   → column_widths() gives the art cell's width, and the
+                           widths of the cells before it give its x-offset
+        """
+        if cols <= 0 or rows <= 0:
+            return None
+
+        header_rows = self.frame.header.rows((cols,)) if self.frame.header else 0
+        footer_rows = self.frame.footer.rows((cols,)) if self.frame.footer else 0
+        body_rows = rows - header_rows - footer_rows
+        if body_rows <= 0:
+            return None
+
+        # Row and column of the Now Playing box's top-left corner.
+        item_rows = self.main_pile.get_item_rows((cols, body_rows), False)
+        y = header_rows
+        for (widget, _options), height in zip(self.main_pile.contents, item_rows):
+            if widget is self.now_playing_box:
+                np_rows = height
+                break
+            y += height
+        else:
+            return None
+        x = 0
+
+        # Inside the LineBox: one border row, one border column.
+        y += 1
+        x += 1
+        inner_cols = cols - 2
+        if inner_cols <= 0:
+            return None
+
+        # Inside the content Pile: everything stacked above np_columns.
+        for widget, _options in self.now_playing_content.contents:
+            if widget is self.np_columns:
+                break
+            y += widget.rows((inner_cols,))
+        else:
+            return None
+
+        # Inside the Columns: the cells to the left of the art cell.
+        widths = self.np_columns.column_widths((inner_cols,))
+        if self.art_column_index >= len(widths):
+            return None
+        x += sum(widths[:self.art_column_index])
+        width = widths[self.art_column_index]
+
+        # The art cell's height is the Columns' height, which is the tallest of
+        # its cells — in practice the right-hand Pile.  Clip it to what is
+        # actually on screen: the Now Playing box is packed, so it can still be
+        # cut off from below by a very short terminal.
+        height = self.np_columns.rows((inner_cols,))
+        visible = min(height, np_rows - 2, rows - footer_rows - y - 1)
+
+        if width < MIN_ART_COLS or visible < MIN_ART_ROWS:
+            return None
+        return x, y, width, visible
+
     def _render_art(self, art_path):
         """
-        Calculate the art position from live screen dimensions and re-render.
+        Position the art from the live screen size and re-render.
 
-        Position accounting (0-indexed terminal rows/cols):
-          col 0      = terminal left edge
-          col 1      = now_playing_box LineBox left │ border
-          col 2      = art column inner start            ← x_art
-
-          row 0      = header (1 row)
-          row 1      = now_playing_box LineBox top ─ border
-          row 2      = top Divider() inside now_playing_content
-          row 3      = np_columns area starts               ← y_art
-
-        We always re-send the render command (no skip-if-same guard here)
-        so the image reappears after window moves/monitor changes.
-        The AlbumArtRenderer.render() itself is the skip guard for the
-        same-image/same-position case to avoid redundant sends.
+        We always re-send the render command (no skip-if-same guard here) so the
+        image reappears after window moves and monitor changes.
+        `AlbumArtRenderer.render()` is itself the skip guard for the
+        same-image/same-position case, to avoid redundant sends.
         """
         cols, rows = self.loop.screen.get_cols_rows()
+        geometry = self._art_geometry(cols, rows)
+        if geometry is None:
+            # Too short or too narrow to draw into — an image squeezed into two
+            # rows is a smear over the seek bar, not album art.
+            self.album_art_renderer.clear()
+            return
 
-        # X: NP LineBox left border (1) = col 1, art inner starts at col 2
-        x_art = 2
-
-        # Y: header(1) + NP top border(1) + top Divider(1) = row 3
-        y_art = 3
-
-        # Width: ART_COLS columns wide (no inner LineBox to subtract)
-        art_w = ART_COLS
-
-        # Height: pin to the exact row count of the right column Pile.
-        # This ensures that even a very wide (landscape) album cover — which
-        # ueberzug would scale to fill the full width — cannot overflow
-        # downward past the seek bar or vibe line, at any terminal size.
-        # RIGHT_COL_ROWS = 10 matches the fixed Pile height exactly.
-        art_h = RIGHT_COL_ROWS
-
+        x_art, y_art, art_w, art_h = geometry
         self.album_art_renderer.render(
             art_path, x=x_art, y=y_art, width=art_w, height=art_h
         )
@@ -629,51 +1227,91 @@ class AdaptiveDJTUI:
         except Exception:
             pass
 
-    # ── Queue update ──────────────────────────────────────────────────────────
+    # ── Session panel ─────────────────────────────────────────────────────────
 
-    def _update_queue_display(self):
-        queue = self.dj.queue_manager.get_upcoming_tracks()
-        current_track = self.current_status.get("track_file")
+    def _drain_feedback_events(self):
+        """
+        Pull whatever `FeedbackHandler` has recorded since the last refresh and
+        mark the history with it.
 
-        self.queue_walker.clear()
+        This is how a skip becomes `⏭` and a completed track becomes `✓` without
+        the display having to observe either event directly — full listens fire
+        on the background thread, and there is no callback into the UI.  The
+        cursor is what keeps a file spanning every previous session from
+        back-filling tonight's panel.
+        """
+        events = getattr(self.dj.feedback_handler, 'feedback_history', None)
+        if events is None:
+            return
+        if self._feedback_cursor > len(events):
+            # The handler truncated its history (it caps at 1000 events).
+            self._feedback_cursor = 0
+        self._feedback_cursor = self.history.drain_events(
+            events, self._feedback_cursor)
 
-        if not queue:
-            self.queue_walker.append(urwid.Text("  Queue empty"))
+    def _update_session_panel(self):
+        """
+        The lookahead on top, then what actually played, newest first.
+
+        This is what the queue panel was standing in for.  At depth 1 there is
+        exactly one upcoming track and nothing to navigate, so the panel's real
+        subject is the past — which has the advantage of being true (audit H1c).
+        """
+        next_track = self._next_track_label()
+        self.next_up_text.set_text(
+            f"  ↓ next:  {next_track}" if next_track else "  ↓ next:  —")
+
+        current = self.current_status.get("track_file")
+        rows = self.history.rows(current_track=current,
+                                 labeller=self._label_for,
+                                 limit=HISTORY_RENDER_LIMIT)
+
+        self.history_walker.clear()
+        if not rows:
+            self.history_walker.append(
+                urwid.AttrMap(urwid.Text("  — nothing has played yet —"),
+                              "history_item"))
             return
 
-        playlist_meta = self.dj.mpd_controller.get_playlist_metadata()
-
-        # Build selectable (non-current) index for focus tracking
-        selectable_idx = 0
-        display_num = 0
-        for tf in queue:
-            meta = playlist_meta.get(tf, {})
-            artist = meta.get("artist", "Unknown Artist")
-            album = meta.get("album", "Unknown Album")
-            title = meta.get("title", Path(tf).stem)
-            label = f"{artist} – {album} – {title}"
-            if tf in self.liked_tracks:
-                label = f"❤ {label}"
-
-            if tf == current_track:
-                item = urwid.AttrMap(urwid.Text(f"  ▶ {label}"), "queue_current")
+        for row in rows:
+            text = urwid.Text(f" {row['marks']} {row['label']}")
+            if row['focused']:
+                attr = "history_focus"
+            elif row['playing']:
+                attr = "history_playing"
             else:
-                display_num += 1
-                is_focused = selectable_idx == self.queue_focus_index
-                if is_focused:
-                    prefix = f"  » {display_num}."
-                    attr = "queue_focused"
-                else:
-                    prefix = f"  {display_num}."
-                    attr = "queue_item"
-                item = urwid.AttrMap(urwid.Text(f"{prefix} {label}"), attr)
-                selectable_idx += 1
-            self.queue_walker.append(item)
+                attr = "history_item"
+            self.history_walker.append(urwid.AttrMap(text, attr))
 
-        # Clamp focus index in case queue shrank
-        max_idx = max(0, display_num - 1)
-        if self.queue_focus_index > max_idx:
-            self.queue_focus_index = max_idx
+        # Keep the cursor on screen as the list grows past the panel's height.
+        try:
+            self.history_walker.set_focus(
+                min(self.history.focus, len(self.history_walker) - 1))
+        except Exception:
+            pass
+
+    def _label_for(self, track: str) -> str:
+        """
+        `Artist – Title` for one track key.
+
+        `fetch_track_tags` rather than the deleted `get_playlist_metadata`: with
+        `consume on` a played track is gone from `mpc playlist`, so the map that
+        method built covered exactly the tracks this panel does not show (audit
+        §8, Stage 3 trap 2).
+        """
+        meta = self.dj.mpd_controller.fetch_track_tags(track)
+        artist = meta.get("artist") or "Unknown Artist"
+        title = meta.get("title") or Path(track).stem
+        return f"{artist} – {title}"
+
+    def _next_track_label(self) -> Optional[str]:
+        """`artist – title` for the lookahead, or None if there is none."""
+        current = self.current_status.get("track_file")
+        track = self.dj.queue_manager.get_next_track(current_track=current)
+        if not track:
+            return None
+        label = self._label_for(track)
+        return f"❤ {label}" if self.history.is_liked(track) else label
 
     # ── Simple (non-urwid) display ────────────────────────────────────────────
 
@@ -690,7 +1328,7 @@ class AdaptiveDJTUI:
 
         tf = status.get("track_file")
         t = status.get("title", "Unknown")
-        if tf and tf in self.liked_tracks:
+        if self.history.is_liked(tf):
             t = f"❤ {t}"
         print(f"Track:  {t}")
 
@@ -701,17 +1339,29 @@ class AdaptiveDJTUI:
             print(f"\n[{bar}]")
             print(f"{self._fmt(pos)} / {self._fmt(dur)}")
 
-        vibe = self.dj.session_state.get_vibe_description()
-        print(f"\nVibe: {vibe}")
+        stats = self.dj.session_state.get_stats()
+        vector = self.dj.session_state.get_session_vector()
+        for line in self.vibe.lines(vector, stats['is_seeded'],
+                                    stats['tracks_played']):
+            print(line)
 
         print("\n" + "─" * 60)
-        print("Upcoming Queue:")
-        for i, track in enumerate(self.dj.queue_manager.get_upcoming_tracks()[:5], 1):
-            liked = "❤ " if track in self.liked_tracks else ""
-            print(f"  {i}. {liked}{Path(track).stem}")
+        next_track = self._next_track_label()
+        print(f"↓ next:  {next_track}" if next_track else "↓ next:  —")
+
+        current = status.get("track_file")
+        for row in self.history.rows(current_track=current,
+                                     labeller=self._label_for, limit=8):
+            cursor = "▸" if row['focused'] else " "
+            print(f"{cursor} {row['marks']} {row['label']}")
 
         print("\n" + "=" * 60)
-        print("SPACE=Play/Pause  N=Next  V=Vibe  L=Like  ↑↓=Vol  ←→=Seek  Q=Quit")
+        # The same bindings as the urwid mode — and now literally the same
+        # dispatch, via `decode_key()` into `_handle_input` (audit L9/M1c).
+        # These used to disagree: ↑↓ were volume here and queue navigation
+        # there, while the README said a third thing.
+        print("SPACE=Play/Pause  N=Next  L=Like  ↑↓=History  ENTER=Replay")
+        print(",.=Vol  ←→=Seek  I=Info  Q=Quit")
         print("=" * 60)
         sys.stdout.flush()
 
@@ -722,10 +1372,23 @@ class AdaptiveDJTUI:
         s = seconds % 60
         return f"{m}:{s:02d}"
 
+    # NOTE: `_session_line()` is gone.  It reported the track count because that
+    # was the only honest thing the session vector could say about itself with
+    # the descriptor bank unwired — the mood, momentum and stage words it
+    # replaced were all invented against thresholds the data never occupied
+    # (audit D4).  The bank is wired now; see `vibe_readout.py`.
+
     # ── Run ───────────────────────────────────────────────────────────────────
 
     def run(self):
         self.running = True
+        # This session's feedback events start here.  Taken at run() rather than
+        # at construction because `persistence.load_all()` and `start_session()`
+        # both happen in between, and the file it loads spans every previous
+        # session.
+        events = getattr(self.dj.feedback_handler, 'feedback_history', None)
+        if events is not None:
+            self._feedback_cursor = len(events)
         if not self.use_urwid:
             self._run_simple_mode()
         else:
@@ -746,42 +1409,79 @@ class AdaptiveDJTUI:
                     self.album_art_renderer.clear()
 
     def _run_simple_mode(self):
+        """
+        The no-urwid fallback.  Reads raw stdin and feeds `_handle_input`.
+
+        It used to carry its own `if key == …` ladder — a second binding table
+        beside the urwid one, which is how ↑↓ ended up meaning *volume* here and
+        *queue navigation* there while the README claimed a third thing (audit
+        L9).  Stage 3 reconciled the three lists by reading them; this makes
+        there be one list.  `decode_key()` turns terminal bytes into the names
+        urwid uses, and the dispatch after that is the same method the urwid
+        mode calls, so a binding cannot exist in one interface and not the
+        other.
+        """
         import select, termios, tty
 
-        old = termios.tcgetattr(sys.stdin)
+        fd = sys.stdin.fileno()
+        old = termios.tcgetattr(fd)
+        pending = ""
         try:
-            tty.setcbreak(sys.stdin.fileno())
+            tty.setcbreak(fd)
             while self.running:
                 self._update_display()
-                if select.select([sys.stdin], [], [], 0.5)[0]:
-                    key = sys.stdin.read(1)
-                    if key == "\x1b":
-                        if select.select([sys.stdin], [], [], 0.05)[0]:
-                            key += sys.stdin.read(1)
-                        if select.select([sys.stdin], [], [], 0.05)[0]:
-                            key += sys.stdin.read(1)
+                if not select.select([sys.stdin], [], [], 0.5)[0]:
+                    # A partial escape sequence that no further input completed
+                    # was never a key.  Dropping it here stops it from swallowing
+                    # the front of whatever is typed next.
+                    pending = ""
+                    continue
 
-                    if key.lower() == "q":
-                        self._quit()
-                    elif key == " ":
-                        self._toggle_play_pause()
-                    elif key.lower() == "n":
-                        self._skip_track()
-                    elif key.lower() == "v":
-                        self._skip_vibe()
-                    elif key.lower() == "l":
-                        self._like_track()
-                    elif key == "\x1b[A":
-                        self._volume_up()
-                    elif key == "\x1b[B":
-                        self._volume_down()
-                    elif key == "\x1b[C":
-                        self._seek_forward()
-                    elif key == "\x1b[D":
-                        self._seek_backward()
+                # `os.read` on the raw descriptor rather than `sys.stdin.read`,
+                # so what `select` reports and what is consumed are the same
+                # thing — see `decode_keys`.
+                chunk = os.read(fd, 64).decode("utf-8", "ignore")
+                if not chunk:
+                    break                       # EOF: the terminal went away
+
+                keys, pending = decode_keys(pending + chunk)
+                for key in keys:
+                    self._handle_input(key)
+                    if not self.running:
+                        break
         except KeyboardInterrupt:
             pass
         finally:
-            termios.tcsetattr(sys.stdin, termios.TCSADRAIN, old)
+            termios.tcsetattr(fd, termios.TCSADRAIN, old)
             self.running = False
             print("\n")
+
+    def _wait_for_any_key(self):
+        """
+        Hold the fallback mode's `[I]` page until a key dismisses it.
+
+        The urwid inspector holds its loop the same way — but it wakes every
+        0.5 s without a keypress, and this must too, for the same class of
+        reason.  A single unbounded `select` cannot be interrupted by anything:
+        `request_exit()` sets `running` false from the signal handler and the
+        page would sit there regardless, which is H3's shape in the one
+        interface H3 was never driven through.  So it polls, and a shutdown
+        gets out of here.
+
+        Reads the raw descriptor rather than `sys.stdin`, so `select` and the
+        read agree about what is pending — see `decode_keys`.  Returns at once
+        when stdin is not a terminal, so a non-interactive caller cannot be
+        wedged here at all.
+        """
+        import select
+
+        try:
+            if not sys.stdin.isatty():
+                return
+            fd = sys.stdin.fileno()
+            while self.running:
+                if select.select([sys.stdin], [], [], 0.25)[0]:
+                    os.read(fd, 64)
+                    return
+        except Exception:
+            pass

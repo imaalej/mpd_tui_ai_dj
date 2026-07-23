@@ -39,7 +39,7 @@ echo -e "${BOLD}╚════════════════════�
 echo ""
 
 # ── 1. Python check ───────────────────────────────────────────────────────────
-header "Step 1/4 · Checking Python"
+header "Step 1/5 · Checking Python"
 
 if ! command -v python3 &>/dev/null; then
   error "Python 3 is not installed."
@@ -58,7 +58,7 @@ fi
 success "Python $PY_VER found"
 
 # ── 2. pip dependencies ───────────────────────────────────────────────────────
-header "Step 2/4 · Installing dependencies"
+header "Step 2/5 · Installing dependencies"
 
 if ! python3 -c "import numpy, urwid, PIL, mutagen" &>/dev/null 2>&1; then
   info "Installing Python packages from requirements.txt …"
@@ -78,7 +78,7 @@ else
 fi
 
 # ── 3. MPD / MPC check ───────────────────────────────────────────────────────
-header "Step 3/4 · Checking MPD"
+header "Step 3/5 · Checking MPD"
 
 MPD_HOST="${MPD_HOST:-localhost}"
 MPD_PORT="${MPD_PORT:-6600}"
@@ -115,8 +115,34 @@ if [ "$TRACK_COUNT" -eq 0 ]; then
   exit 1
 fi
 
-# ── 4. Embeddings check ───────────────────────────────────────────────────────
-header "Step 4/4 · Checking audio embeddings"
+# ── 4. Music directory ────────────────────────────────────────────────────────
+# Audit M3: this used to default to /var/lib/mpd/music, unvalidated, and worked
+# on the developer's machine only because that path happened to be a symlink.
+# Detection reads MPD's own config; if that fails, ask rather than guess — a
+# wrong directory wastes an entire embedding-generation run.
+header "Step 4/5 · Locating MPD's music directory"
+
+if MUSIC_DIR=$(python3 music_directory.py 2>/dev/null); then
+  success "Music directory: $MUSIC_DIR"
+else
+  warn "Could not read MPD's music_directory from its config."
+  echo ""
+  echo "  This is the folder MPD plays from — the one its config calls"
+  echo "  music_directory. Album art and tag reading need it, and embedding"
+  echo "  generation cannot decode a single file without it."
+  echo ""
+  read -rp "  Path to your music folder: " MUSIC_DIR
+  MUSIC_DIR="${MUSIC_DIR/#\~/$HOME}"
+  if [ ! -d "$MUSIC_DIR" ]; then
+    error "Not a directory: $MUSIC_DIR"
+    exit 1
+  fi
+  export MPD_MUSIC_DIR="$MUSIC_DIR"
+  success "Using $MUSIC_DIR (set MPD_MUSIC_DIR to make this permanent)"
+fi
+
+# ── 5. Embeddings check ───────────────────────────────────────────────────────
+header "Step 5/5 · Checking audio embeddings"
 
 EMBED_FILE="$SCRIPT_DIR/data/embeddings/track_embeddings.npz"
 
@@ -127,16 +153,24 @@ if [ ! -f "$EMBED_FILE" ]; then
   echo "  Embeddings capture the 'sound fingerprint' of each song so the AI"
   echo "  can find musically similar tracks. You need to generate them once."
   echo ""
-  echo "  Choose an option:"
-  echo "    [1] Generate REAL embeddings using CLAP (best quality, slow,"
-  echo "        requires ~4 GB download on first run)"
-  echo "    [2] Generate DEMO embeddings (fast, random — good for testing)"
-  echo "    [Q] Quit"
+  # Measured, not estimated — this script used to say "~4 GB download" while the
+  # README said "~1 GB" and the pre-flight check demanded 700 MB (audit M7).
+  echo "  What this costs, measured on a 674-track library:"
+  echo "    • 1.15 GB one-time model download (cached in ~/.cache/huggingface)"
+  echo "    • 46 MB of embeddings in data/embeddings/"
+  echo "    • about 5 minutes on an RTX 3070, or 25-35 minutes on CPU"
   echo ""
-  read -rp "  Your choice [1/2/Q]: " EMB_CHOICE
+  echo "  There is no demo/random option: random vectors make every similarity,"
+  echo "  every novelty score and every learned preference meaningless while the"
+  echo "  interface keeps presenting them as insight."
+  echo ""
+  # Lowercase via tr, not ${VAR,,} — the latter is a bash 4+ expansion and a
+  # hard syntax error on the bash 3.2 that macOS ships (audit M7).
+  read -rp "  Generate CLAP embeddings now? [y/N]: " EMB_CHOICE
+  EMB_CHOICE=$(printf '%s' "$EMB_CHOICE" | tr '[:upper:]' '[:lower:]')
 
-  case "${EMB_CHOICE,,}" in
-  1)
+  case "$EMB_CHOICE" in
+  y | yes)
     echo ""
     info "Checking for CLAP dependencies …"
     if ! python3 -c "import transformers, torch, torchaudio" &>/dev/null 2>&1; then
@@ -155,37 +189,11 @@ if [ ! -f "$EMBED_FILE" ]; then
     python3 generate_embeddings.py
     success "Embeddings generated!"
     ;;
-  2)
-    echo ""
-    info "Generating demo embeddings …"
-    python3 - <<'PYEOF'
-import sys
-sys.path.insert(0, '.')
-from config import config
-from track_library import generate_dummy_embeddings
-import subprocess, re
-
-result = subprocess.run(
-    ['mpc', 'listall'],
-    capture_output=True, text=True
-)
-tracks = [l.strip() for l in result.stdout.splitlines()
-          if l.strip() and re.search(r'\.(mp3|flac|ogg|m4a|wav|opus)$', l, re.I)]
-if not tracks:
-    print("No music tracks found!", file=sys.stderr)
-    sys.exit(1)
-generate_dummy_embeddings(tracks, config.embeddings_file)
-print(f"Generated demo embeddings for {len(tracks)} tracks.")
-PYEOF
-    success "Demo embeddings ready"
-    ;;
-  q | quit)
-    echo "Bye!"
-    exit 0
-    ;;
   *)
-    error "Invalid choice."
-    exit 1
+    echo ""
+    echo "  Nothing to play against. Run this when you are ready:"
+    echo "      python3 generate_embeddings.py"
+    exit 0
     ;;
   esac
 else
@@ -198,14 +206,11 @@ echo -e "${BOLD}${GREEN}Everything looks good — starting the DJ! 🎶${RESET}"
 echo ""
 echo "  Controls inside the TUI:"
 echo "    SPACE         Play / Pause"
-echo "    N             Skip track"
-echo "    V             Change vibe (new direction)"
+echo "    N             Skip track (escalates on consecutive presses)"
 echo "    L             Like current song"
 echo "    , / .         Volume down / up"
 echo "    ← / →         Seek backward / forward"
-echo "    ↑ / ↓         Navigate queue"
-echo "    ENTER         Play selected queue item"
-echo "    I             Time-context info"
+echo "    I             Model info"
 echo "    Q             Quit"
 echo ""
 sleep 1

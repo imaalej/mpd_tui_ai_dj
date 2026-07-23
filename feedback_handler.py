@@ -17,118 +17,199 @@ class FeedbackHandler:
     Maintains feedback history for persistence.
     """
     
-    def __init__(self, 
-                 session_state, 
-                 user_taste, 
+    # No `queue_manager` here, deliberately.  This class updates the models and
+    # records history; it does not touch MPD or the queue.  The skip path's
+    # ordering — feedback, then replace the lookahead, then advance exactly once
+    # — is the thing C4 is about, so it lives in one place on the orchestrator
+    # rather than being split across a component that cannot see the advance.
+    def __init__(self,
+                 session_state,
+                 user_taste,
                  exploration_controller,
-                 queue_manager,
                  track_library):
         self.session_state = session_state
         self.user_taste = user_taste
         self.exploration_controller = exploration_controller
-        self.queue_manager = queue_manager
         self.track_library = track_library
         
         self.feedback_history = []
+        # No 'vibe_skips' counter: [V] is deleted (audit D8/H9) and a key that
+        # can never fire should not have a tally the [I] overlay reports as 0.
         self.session_feedback_count = {
             'skips': 0,
-            'vibe_skips': 0,
             'likes': 0,
             'full_listens': 0
         }
     
-    def process_skip(self, track_file: str):
+    def process_skip(self, track_file: str) -> Optional[dict]:
         """
-        Process skip feedback: user skipped current song.
-        - Penalizes similar tracks in session
-        - Increases exploration
-        - Keeps session direction but nudges away
+        Process a skip, and re-pick the lookahead under the result.
+
+        There is exactly **one** skip path (audit C4/H9).  `[V]` and
+        `process_vibe_skip()` are gone: `[V]` blended half a random direction
+        into the session vector, which is not a direction at all — it landed the
+        vector at 0.56 mean similarity to the nearest real music against 0.73 for
+        a real track — while turning over less of the candidate pool than two
+        escalated presses of this key do.  Its actual job was clearing the
+        ten-track queue, and there is no longer a queue to clear.
+
+        The escalation replaces it, driven by evidence rather than by a second
+        keypress: *n* consecutive rejections is the system observing that the
+        neighbourhood is wrong, which is strictly better information than the
+        user asserting the same thing, because it arrives without them having to
+        diagnose their own dissatisfaction first.
+
+        Returns the measured outcome of the vector move, or None if the track had
+        no embedding.  **The caller advances MPD; this method must not** — see
+        `QueueManager.replace_next()` for why the ordering matters.
         """
-        # Silently process skip (no print to avoid TUI interference)
-        
         track_embedding = self.track_library.get_embedding(track_file)
         if track_embedding is None:
-            print(f"Warning: No embedding found for skipped track", file=sys.stderr)
-            return
-        
-        # Update session state: penalize similar tracks
-        self.session_state.penalize_similar(track_embedding)
-        
-        # Update user taste: small negative signal
-        self.user_taste.update_from_skip(track_embedding)
-        
-        # Increase exploration
+            print("Warning: No embedding found for skipped track", file=sys.stderr)
+            return None
+
+        # Exploration first: it owns `consecutive_skips`, and the run length it
+        # produces is what the repulsion's turnover target is chosen from.
         self.exploration_controller.increase_exploration()
-        
-        # Record feedback
+        run_length = self.exploration_controller.consecutive_skips
+
+        outcome = self.session_state.repel_from_skip_run(
+            track_embedding,
+            run_length=run_length,
+            embedding_matrix=self.track_library.embedding_matrix,
+        )
+
+        # Small negative signal to long-term taste.  Unlike the session move,
+        # this is deliberately not escalated: a run of skips says a great deal
+        # about tonight and very little about what the listener likes in general.
+        self.user_taste.update_from_skip(track_embedding)
+
         self._record_feedback('skip', track_file)
         self.session_feedback_count['skips'] += 1
-        
-        # NOTE: recalculate() is intentionally NOT called here.
-        # [N] = skip one track, keeps the current queue direction.
-        # Only [V] (vibe skip) should recalculate the entire queue.
-    
-    def process_vibe_skip(self, track_file: str):
-        """
-        Process vibe skip: user wants completely different direction.
-        - Forces significant trajectory shift
-        - Sets high exploration mode
-        - Recalculates entire queue
-        """
-        # Silently process vibe skip (no print to avoid TUI interference)
-        
-        # Force session shift
-        self.session_state.force_shift()
-        
-        # Set high exploration
-        self.exploration_controller.set_high_exploration()
-        
-        # Recalculate entire queue
-        self.queue_manager.recalculate()
-        
-        # Record feedback
-        self._record_feedback('vibe_skip', track_file)
-        self.session_feedback_count['vibe_skips'] += 1
-    
-    def process_like(self, track_file: str):
+
+        if outcome and outcome['turnover'] > 0:
+            print(f"Skip #{run_length}: λ={outcome['lambda']:.2f}"
+                  f"{' + snap' if outcome['snapped'] else ''}, "
+                  f"{outcome['turnover']:.0%} of what you would have heard is now "
+                  f"different (target {outcome['target']:.0%})", file=sys.stderr)
+
+        return outcome
+
+    def process_like(self, track_file: str) -> bool:
         """
         Process like: user explicitly liked current track.
         - Strong positive signal for user taste
         - Confirms session direction
         - No exploration change (likes don't affect exploration directly)
-        - Updates time context (Phase 3)
+
+        Returns True if the like was recorded.  The caller needs this: a track
+        with no embedding produces no event, and drawing a `♥` for it would
+        leave a heart that `[L]` cannot retract, because there is nothing in the
+        history to retract (audit L8).
         """
         # Silently process like (no print to avoid TUI interference)
-        
+
         track_embedding = self.track_library.get_embedding(track_file)
         if track_embedding is None:
             print(f"Warning: No embedding found for liked track", file=sys.stderr)
-            return
-        
+            return False
+
         # Strong update to user taste
         self.user_taste.update_from_like(track_embedding)
-        
-        # Update time context (Phase 3)
-        if hasattr(self.session_state, 'time_context') and config.enable_time_context:
-            self.session_state.time_context.update(
-                track_embedding,
-                config.time_update_rate_like
-            )
-        
+
         # Save taste after explicit like
         self.user_taste.save()
-        
+
         # Record feedback
         self._record_feedback('like', track_file)
         self.session_feedback_count['likes'] += 1
-    
+        return True
+
+    def process_unlike(self, track_file: str) -> Optional[dict]:
+        """
+        Retract a like: drop it from the history and recompute the model.
+
+        `[L]` on an already-liked track (audit L8).  The retraction is a
+        *deletion plus a replay*, not a negative update, and the difference is
+        not stylistic.  `_update` is a normalised EMA, so subtracting
+        `taste_update_like` after adding it does not return the vector to where
+        it was — and the error depends on how many events landed in between.
+        There is no magnitude that makes it symmetric, so choosing one would be
+        asserting a fact the arithmetic cannot support (D4).  Removing the event
+        and replaying `UserTaste` over what remains asserts nothing: it produces
+        the model you would have had if the key had never been pressed.
+
+        Every like for the track goes, not just the last one, because the claim
+        being retracted is "you like this track" and the panel shows one `♥`
+        however many times it was pressed.
+
+        **The replay only runs if the history can account for the model.**  It
+        cannot always: the history is capped at 1000 events, tracks leave the
+        library, and a `user_taste.npz` can outlive the feedback file beside it.
+        Replaying a partial history would rewrite the taste vector for reasons
+        the listener did not ask for — measured at cos 0.923 against the model
+        it replaced, one lifetime past the cap, which dwarfs the retraction
+        itself.  So `UserTaste.explains()` is checked first, and when it says no
+        the retraction is display-only: the like leaves the history, the `♥`
+        goes, the taste vector is left exactly where it is, and the console says
+        which of the two happened.  That is the audit's own second option, taken
+        only where the first one cannot be honest.
+
+        Both files are written here.  The taste model is authoritative at the
+        next launch while the hearts are rehydrated from the history, so saving
+        one without the other leaves a restart showing a `♥` for a like the
+        model no longer holds.
+
+        Returns a report, or None if there was no like to retract.
+        """
+        def is_target(event):
+            return (event.get('type') == 'like'
+                    and event.get('track') == track_file)
+
+        removed = sum(1 for event in self.feedback_history if is_target(event))
+        if not removed:
+            return None
+
+        get_embedding = self.track_library.get_embedding
+        exact = self.user_taste.explains(self.feedback_history, get_embedding)
+
+        self.feedback_history = [e for e in self.feedback_history
+                                 if not is_target(e)]
+
+        if exact:
+            report = self.user_taste.replay(self.feedback_history, get_embedding)
+            self.user_taste.save()
+        else:
+            report = {'applied': 0, 'missing_embedding': 0, 'unrecognised': 0}
+
+        report['exact'] = exact
+        report['removed'] = removed
+        self.save_feedback_history()
+
+        self.session_feedback_count['likes'] = max(
+            0, self.session_feedback_count['likes'] - removed)
+
+        if exact:
+            note = ""
+            if report['missing_embedding']:
+                note = (f", {report['missing_embedding']} skipped — no embedding "
+                        "in the current library")
+            print(f"Un-liked; taste model rebuilt from {report['applied']} "
+                  f"feedback events{note}", file=sys.stderr)
+        else:
+            print("Un-liked (heart only): the saved feedback history no longer "
+                  "accounts for the taste model, so rebuilding it would move "
+                  "your taste for reasons unrelated to this track. The taste "
+                  "vector is unchanged.", file=sys.stderr)
+
+        return report
+
     def process_full_listen(self, track_file: str):
         """
         Process full listen: user listened to entire track.
         - Updates session state (confirms direction)
         - Weak positive signal for user taste
         - Decreases exploration (exploitation)
-        - Updates time context (Phase 3)
         """
         # Don't print for every full listen (too noisy)
         
@@ -142,14 +223,7 @@ class FeedbackHandler:
         
         # Weak update to user taste
         self.user_taste.update_from_full_listen(track_embedding)
-        
-        # Update time context (Phase 3)
-        if hasattr(self.session_state, 'time_context') and config.enable_time_context:
-            self.session_state.time_context.update(
-                track_embedding,
-                config.time_update_rate_listen
-            )
-        
+
         # Decrease exploration (things are working)
         self.exploration_controller.decrease_exploration()
         
@@ -208,7 +282,6 @@ class FeedbackHandler:
         """Reset session statistics."""
         self.session_feedback_count = {
             'skips': 0,
-            'vibe_skips': 0,
             'likes': 0,
             'full_listens': 0
         }

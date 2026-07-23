@@ -1,173 +1,224 @@
 """
-Queue Manager - Dynamic queue generation and management
-Maintains rolling buffer of upcoming tracks.
+Queue Manager — keeps exactly one track in MPD ahead of the current one.
+
+This file used to maintain a ten-track rolling buffer with two parallel books
+(`planned_queue` and `currently_queued_in_mpd`), a `_sync_to_mpd` reconciler, a
+5% trajectory blend that simulated the session vector forward across the batch,
+and a `recalculate()` that cleared and rebuilt everything.  Almost all of it
+existed to compensate for the depth (audit D1/D7), and the refill condition at
+the centre of it compared `len(mpc playlist)` — which, with consume off, counts
+every track already played — against a low-water mark of 3.  That count only
+ever grew, so after the first ten tracks it was pinned at 10, `10 < 3` was never
+true, and the queue never refilled again: playback stopped dead (C1).
+
+What replaced it rests on two verified facts about MPD under `consume on`:
+
+  • MPD removes a track from the queue when you *leave* it, not when you start
+    it.  The currently playing track is still queue position 1, so during normal
+    playback `len(playlist)` is exactly 2 — current plus lookahead — and the
+    refill condition is simply `< 2`.  No `#N/M` position parsing.
+  • Adding to a stopped, empty queue does **not** start playback, and `mpc next`
+    off the last remaining track empties the queue and stops.  Together those
+    mean a skip must **add the replacement before it advances**; advance-then-add
+    kills the session silently and nothing recovers on its own.
+
+Both were re-measured against the live MPD (0.24.0) rather than remembered — see
+PROJECT_AUDIT.md §M1 for the full table.
 """
 
 import sys
-from typing import List, Set, Optional
+from typing import List, Optional, Set
+
 from config import config
 
 
 class QueueManager:
-    """
-    Manages dynamic queue generation.
-    Generates tracks on-demand rather than precomputing long playlists.
-    """
-    
-    def __init__(self, track_selector, session_state, user_taste, exploration_controller, mpd_controller):
+    """Maintains `config.queue_lookahead` tracks in MPD ahead of the current one."""
+
+    def __init__(self, track_selector, session_state, user_taste,
+                 exploration_controller, mpd_controller):
         self.track_selector = track_selector
         self.session_state = session_state
         self.user_taste = user_taste
         self.exploration_controller = exploration_controller
         self.mpd_controller = mpd_controller
-        
-        self.planned_queue = []  # Tracks we plan to play
-        self.currently_queued_in_mpd = []  # Tracks actually in MPD queue
-        
-    def initialize_queue(self):
-        """Generate initial queue for session start."""
-        print("Generating initial queue...", file=__import__("sys").stderr)
-        self._generate_tracks(config.queue_buffer_size)
-        self._sync_to_mpd()
-    
-    def check_and_refill(self):
+
+        # Whether MPD has ever been observed playing this session.  The refill
+        # path is allowed to restart a queue that ran dry, but only after
+        # playback has actually begun — otherwise it would override the
+        # deliberate "wait for [SPACE]" at startup.
+        self._playback_started = False
+
+    # ── Selection ────────────────────────────────────────────────────────────
+
+    def _pick(self, exclude: Optional[Set[str]] = None) -> Optional[str]:
         """
-        Check queue level and refill if needed.
-        Called regularly from main loop.
+        Choose one track under the *current* vectors and weights.
+
+        Every call reads the session vector, the taste vector and the weights
+        fresh.  That is the whole benefit of depth 1: a pick made now reflects
+        feedback given a moment ago, where the ten-track buffer scored all ten
+        under whatever the weights happened to be when the batch was generated.
         """
-        # Get current MPD queue state
-        mpd_queue = self.mpd_controller.get_queue()
-        queue_length = len(mpd_queue)
+        return self.track_selector.select_track(
+            session_vector=self.session_state.get_session_vector(),
+            taste_vector=self.user_taste.get_taste_vector(),
+            weights=self.exploration_controller.get_weights(
+                taste_updates=self.user_taste.total_updates),
+            exploration=self.exploration_controller.exploration,
+            exclude_tracks=set(exclude or ()),
+        )
 
-        # Also check MPD playback state so we can restart if it stopped
-        # because the queue ran out.
-        status = self.mpd_controller.get_status()
-        mpd_state = status.get("state", "stopped")
+    # ── Queue maintenance ────────────────────────────────────────────────────
 
-        # Refill whenever we drop below the low threshold OR the queue is empty
-        if queue_length < config.queue_low_threshold or queue_length == 0:
-            tracks_needed = config.queue_buffer_size - queue_length
-            if tracks_needed > 0:
-                self._generate_tracks(tracks_needed)
-                self._sync_to_mpd()
-
-                # If MPD stopped because the queue was exhausted, restart it
-                # automatically so playback is seamless.
-                # (paused means the user paused deliberately — don't touch it.)
-                if mpd_state == "stopped":
-                    self.mpd_controller.play()
-    
-    def recalculate(self):
+    def ensure_one_ahead(self, mpd_state: Optional[str] = None) -> List[str]:
         """
-        Recalculate entire queue (after significant feedback).
-        Called after vibe skip or multiple consecutive skips.
+        Top the queue up to `1 + queue_lookahead` entries.  Returns what was added.
+
+        Called from the background poller.  During playback the queue holds the
+        current track plus the lookahead, so this is a no-op most of the time
+        and adds exactly one track just after each track boundary.
+
+        Args:
+            mpd_state: MPD's playback state, passed in by the caller that just
+                polled it rather than re-shelled here — the poller runs at 2 Hz
+                and every `mpc` invocation is a subprocess.
         """
-        # Check if MPD is currently playing so we can restore that state
-        # after rebuilding the queue (clear_queue() stops MPD).
-        status = self.mpd_controller.get_status()
-        was_playing = status.get("state") == "playing"
+        if mpd_state == 'playing':
+            self._playback_started = True
 
-        # Clear planned queue
-        self.planned_queue.clear()
+        queue = self.mpd_controller.get_queue()
+        target = 1 + config.queue_lookahead
+        if len(queue) >= target:
+            return []
 
-        # Clear MPD queue (this stops MPD playback)
-        self.mpd_controller.clear_queue()
-        self.currently_queued_in_mpd.clear()
-
-        # Generate fresh queue and push it to MPD
-        self._generate_tracks(config.queue_buffer_size)
-        self._sync_to_mpd()
-
-        # Resume playback if it was active before the recalculate.
-        # This makes [V] seamless: new direction starts immediately.
-        if was_playing:
-            self.mpd_controller.play()
-    
-    def _generate_tracks(self, count: int):
-        """
-        Generate specified number of tracks to add to queue.
-        """
-        session_vector = self.session_state.get_session_vector()
-        taste_vector = self.user_taste.get_taste_vector()
-        weights = self.exploration_controller.get_weights()
-        
-        # Get time context if available (Phase 3)
-        time_context = getattr(self.session_state, 'time_context', None)
-        
-        # Build exclusion set
-        exclude_tracks = set(self.planned_queue)
-        exclude_tracks.update(self.currently_queued_in_mpd)
-        exclude_tracks.update(self.track_selector.get_recent_history())
-        
-        # Generate tracks
-        for _ in range(count):
-            track = self.track_selector.select_track(
-                session_vector=session_vector,
-                taste_vector=taste_vector,
-                weights=weights,
-                exclude_tracks=exclude_tracks,
-                time_context=time_context
-            )
-            
+        started_empty = not queue
+        added = []
+        while len(queue) < target:
+            track = self._pick(exclude=set(queue))
             if track is None:
-                print("Warning: Could not generate track", file=sys.stderr)
+                print("Queue refill: the selector had no candidate to offer",
+                      file=sys.stderr)
                 break
-            
-            self.planned_queue.append(track)
-            exclude_tracks.add(track)
-            
-            # Update session vector slightly to ensure smooth progression
-            # This creates a trajectory rather than similar tracks
-            track_embedding = self.track_selector.track_library.get_embedding(track)
-            if track_embedding is not None:
-                # Blend new track into session vector (small weight for lookahead)
-                import numpy as np
-                blend_weight = 0.05
-                session_vector = (1 - blend_weight) * session_vector + blend_weight * track_embedding
-                norm = np.linalg.norm(session_vector)
-                if norm > 0:
-                    session_vector = session_vector / norm
-    
-    def _sync_to_mpd(self):
+            if not self.mpd_controller.add_track(track):
+                # add_track logs MPD's own refusal.  Give the selection back so
+                # a track MPD would not accept does not sit in the replay gap.
+                self.track_selector.forget_selection(track)
+                break
+            queue.append(track)
+            added.append(track)
+
+        # Recovery for the one case that ends a session silently: the queue ran
+        # completely dry — a refill failed for a whole track's duration, or the
+        # library was exhausted — so MPD hit the end and stopped.  Adding to a
+        # stopped queue does not restart it, verified against the live MPD, so
+        # nothing recovers without this.
+        #
+        # It is deliberately *not* the skip path's escape hatch (audit C4): this
+        # fires only when the queue was empty on entry, so it can never combine
+        # with an advance to produce the double-skip that C4 documents.
+        if started_empty and added and self._playback_started and mpd_state == 'stopped':
+            print("Queue had run dry and MPD stopped; restarting playback",
+                  file=sys.stderr)
+            self.mpd_controller.play()
+
+        return added
+
+    def replace_next(self) -> Optional[str]:
         """
-        Sync planned queue to MPD.
-        Only adds new tracks not already in MPD.
+        Drop the lookahead and re-pick it under the current vectors.
+
+        This is the first half of a skip, and the order is load-bearing: the
+        replacement is added *before* the caller advances.  `mpc next` off the
+        last remaining track empties the queue and stops MPD, and a subsequent
+        `mpc add` will not restart it — so advance-then-add ends the session, and
+        the only way back would be a `play()` call in a skip path, which is what
+        C4 forbids.  Add-then-advance never sees an empty queue.
+
+        Returns the newly queued track, or None if nothing could be queued — in
+        which case the caller **must not advance**.
         """
-        # Get current MPD queue
-        mpd_queue = self.mpd_controller.get_queue()
-        
-        # Add planned tracks that aren't in MPD yet
-        for track in self.planned_queue:
-            if track not in mpd_queue:
-                success = self.mpd_controller.add_track(track)
-                if success:
-                    self.currently_queued_in_mpd.append(track)
-                else:
-                    print(f"Failed to add track to MPD: {track}", file=__import__("sys").stderr)
-    
-    def on_track_started(self, track_file: str):
+        queue = self.mpd_controller.get_queue()
+
+        # Position 2 is the lookahead; position 1 is what is playing.  When the
+        # queue holds only the current track there is nothing to drop, and the
+        # delete is expected to fail — mpc exits 1 with "song number does not
+        # exist" — so the result is checked rather than assumed.
+        if len(queue) >= 2:
+            if self.mpd_controller.delete_position(2):
+                self.track_selector.forget_selection(queue[1])
+                queue = queue[:1]
+
+        track = self._pick(exclude=set(queue))
+        if track is None:
+            print("Skip: no candidate available to replace the lookahead",
+                  file=sys.stderr)
+            return None
+
+        if not self.mpd_controller.add_track(track):
+            self.track_selector.forget_selection(track)
+            return None
+
+        return track
+
+    def requeue_next(self, track: str) -> bool:
         """
-        Called when a track starts playing.
-        Removes it from planned queue.
+        Put a *specific* track in the lookahead slot, replacing whatever is there.
+
+        This is what `ENTER` on the session-history panel does (audit H1d).  It
+        lives here rather than in the TUI because it is a queue operation, and
+        the ordering below is the same thing C4 and M1 are about — a display
+        layer that reimplemented it would be one more place for the sequence to
+        drift out of agreement with the verified MPD semantics.
+
+        The order is `add` **then** `del`, which is safer than `replace_next()`'s
+        `del` then `add`: the new track is appended to the end, so the queue is
+        momentarily `[current, old_next, new]` and the delete takes it back to
+        `[current, new]`.  If the add fails, nothing was removed and the queue is
+        untouched — where deleting first and failing to add would leave the
+        session one track deep until the poller noticed.  `replace_next()` cannot
+        do it in this order because it has to *choose* the replacement, and the
+        choice must exclude the entry it is about to drop.
+
+        The selector is not told about this track: it was chosen by the listener,
+        not drawn, so recording it would let a deliberate replay push the
+        selector's own history around.  The dropped lookahead *is* given back —
+        it never played, and leaving it recorded would sit it inside the 20-track
+        replay gap having never been heard.
         """
-        if track_file in self.planned_queue:
-            self.planned_queue.remove(track_file)
-        
-        if track_file in self.currently_queued_in_mpd:
-            self.currently_queued_in_mpd.remove(track_file)
-    
-    def get_upcoming_tracks(self) -> List[str]:
-        """Get list of upcoming tracks in queue."""
-        # Combine MPD queue with planned queue
-        mpd_queue = self.mpd_controller.get_queue()
-        
-        # Return MPD queue (which should match our planned queue)
-        return mpd_queue
-    
+        queue = self.mpd_controller.get_queue()
+
+        if not self.mpd_controller.add_track(track):
+            print(f"Replay: MPD would not accept {track}", file=sys.stderr)
+            return False
+
+        # Position 2 is the lookahead; position 1 is what is playing.  When the
+        # queue held only the current track there was no lookahead to drop, and
+        # the track just added is already in the right place.
+        if len(queue) >= 2:
+            if self.mpd_controller.delete_position(2):
+                self.track_selector.forget_selection(queue[1])
+
+        return True
+
+    def get_next_track(self, current_track: Optional[str] = None) -> Optional[str]:
+        """
+        The track queued to play next, for display.
+
+        Before playback begins nothing is current, so the first queue entry *is*
+        the next track; once something is playing it sits at position 1 and the
+        lookahead is position 2.
+        """
+        queue = self.mpd_controller.get_queue()
+        for track in queue:
+            if track != current_track:
+                return track
+        return None
+
     def get_stats(self) -> dict:
         """Get queue statistics."""
         return {
-            'planned_queue_size': len(self.planned_queue),
             'mpd_queue_size': self.mpd_controller.get_queue_length(),
-            'currently_queued_count': len(self.currently_queued_in_mpd)
+            'lookahead': config.queue_lookahead,
+            'playback_started': self._playback_started,
         }

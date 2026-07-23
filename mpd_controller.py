@@ -21,7 +21,11 @@ class MPDController:
         self.connected = False
         self._current_track = None
         self._last_status = {}
-        
+        # Tags resolved per track, keyed by the `mpc listall` path.  The session
+        # history panel asks for the same handful of tracks on every 0.5 s
+        # refresh, and the first resolution reads the file with mutagen.
+        self._tag_cache: Dict[str, dict] = {}
+
     def connect(self) -> bool:
         """Verify connection to MPD."""
         try:
@@ -125,52 +129,15 @@ class MPDController:
             print(f"Error getting MPD status: {e}", file=sys.stderr)
             return self._last_status if self._last_status else {'state': 'error'}
     
-    def play(self):
-        """Start playback."""
-        try:
-            subprocess.run(
-                ['mpc', '-h', self.host, '-p', str(self.port), 'play'],
-                capture_output=True,
-                timeout=2
-            )
-        except Exception as e:
-            print(f"Play command failed: {e}", file=sys.stderr)
-    
-    def pause(self):
-        """Pause playback."""
-        try:
-            subprocess.run(
-                ['mpc', '-h', self.host, '-p', str(self.port), 'pause'],
-                capture_output=True,
-                timeout=2
-            )
-        except Exception as e:
-            print(f"Pause command failed: {e}", file=sys.stderr)
-    
-    def toggle(self):
-        """Toggle play/pause."""
-        try:
-            subprocess.run(
-                ['mpc', '-h', self.host, '-p', str(self.port), 'toggle'],
-                capture_output=True,
-                timeout=2
-            )
-        except Exception as e:
-            print(f"Toggle command failed: {e}", file=sys.stderr)
-    
-    def next_track(self):
-        """Skip to next track."""
-        try:
-            subprocess.run(
-                ['mpc', '-h', self.host, '-p', str(self.port), 'next'],
-                capture_output=True,
-                timeout=2
-            )
-        except Exception as e:
-            print(f"Next command failed: {e}", file=sys.stderr)
-    
     def previous_track(self):
-        """Go to previous track."""
+        """
+        Go to previous track.
+
+        Currently unbound.  Retained per audit L8, but note that Stage 2 forces
+        MPD's `consume` mode on (D2), after which played tracks are gone from
+        MPD's queue and this cannot work — a working "previous" will have to
+        re-add from the application's own history instead of delegating here.
+        """
         try:
             subprocess.run(
                 ['mpc', '-h', self.host, '-p', str(self.port), 'prev'],
@@ -179,17 +146,6 @@ class MPDController:
             )
         except Exception as e:
             print(f"Previous command failed: {e}", file=sys.stderr)
-    
-    def seek(self, seconds: int):
-        """Seek to absolute position in current track (seconds)."""
-        try:
-            subprocess.run(
-                ['mpc', '-h', self.host, '-p', str(self.port), 'seek', str(seconds)],
-                capture_output=True,
-                timeout=2
-            )
-        except Exception as e:
-            print(f"Seek command failed: {e}", file=sys.stderr)
 
     def seek_relative(self, delta: int):
         """
@@ -256,131 +212,34 @@ class MPDController:
         except Exception as e:
             print(f"Volume down command failed: {e}", file=sys.stderr)
     
-    def add_track(self, track_file: str) -> bool:
-        """Add track to queue."""
-        try:
-            result = subprocess.run(
-                ['mpc', '-h', self.host, '-p', str(self.port), 'add', track_file],
-                capture_output=True,
-                timeout=2
-            )
-            return result.returncode == 0
-        except Exception as e:
-            print(f"Add track failed: {e}", file=sys.stderr)
-            return False
-    
-    def clear_queue(self):
-        """Clear the playback queue."""
-        try:
-            subprocess.run(
-                ['mpc', '-h', self.host, '-p', str(self.port), 'clear'],
-                capture_output=True,
-                timeout=2
-            )
-        except Exception as e:
-            print(f"Clear queue failed: {e}", file=sys.stderr)
-    
-    def get_queue(self) -> List[str]:
-        """Get current queue as list of track files."""
-        try:
-            result = subprocess.run(
-                ['mpc', '-h', self.host, '-p', str(self.port), 'playlist', '-f', '%file%'],
-                capture_output=True,
-                text=True,
-                timeout=2
-            )
-            if result.returncode == 0:
-                return [line.strip() for line in result.stdout.strip().split('\n') if line.strip()]
-            return []
-        except Exception as e:
-            print(f"Get queue failed: {e}", file=sys.stderr)
-            return []
-    
-    def get_queue_length(self) -> int:
-        """Get number of tracks in queue."""
-        return len(self.get_queue())
-    
-    def get_all_tracks(self) -> List[str]:
-        """Get all tracks in MPD database."""
-        try:
-            result = subprocess.run(
-                ['mpc', '-h', self.host, '-p', str(self.port), 'listall'],
-                capture_output=True,
-                text=True,
-                timeout=10
-            )
-            if result.returncode == 0:
-                return [line.strip() for line in result.stdout.strip().split('\n') if line.strip()]
-            return []
-        except Exception as e:
-            print(f"Get all tracks failed: {e}", file=sys.stderr)
-            return []
-    
-    def update_database(self):
-        """Trigger MPD database update."""
-        try:
-            subprocess.run(
-                ['mpc', '-h', self.host, '-p', str(self.port), 'update'],
-                capture_output=True,
-                timeout=2
-            )
-            print("MPD database update triggered", file=sys.stderr)
-        except Exception as e:
-            print(f"Database update failed: {e}", file=sys.stderr)
-    
-    def get_playlist_metadata(self) -> dict:
+    # NOTE: `get_playlist_metadata()` is gone (audit §8, Stage 3 trap 2).  It
+    # built its map from `mpc playlist`, and with `consume on` a played track is
+    # *removed* from the playlist — so the one existing metadata path covered
+    # exactly the tracks the session-history panel does not show, and shelled out
+    # an extra `mpc playlist` on every 0.5 s refresh to do it.  Its only caller
+    # wanted tags for one track at a time, which is what `fetch_track_tags` is.
+
+    def fetch_track_tags(self, track_file: str) -> dict:
         """
-        Get metadata for all tracks in current playlist.
-        Returns dict keyed by file path.
-
-        NOTE: `mpc playlist -f FORMAT` does NOT support the -f flag — it is
-        silently ignored, producing no tag data.  Instead we fetch the plain
-        file list and then resolve each track's tags via `mpc search file`.
-        Results are cached so repeated calls are fast.
-        """
-        # --- Step 1: get file list from playlist ---
-        try:
-            list_result = subprocess.run(
-                ['mpc', '-h', self.host, '-p', str(self.port), 'playlist', '-f', '%file%'],
-                capture_output=True,
-                text=True,
-                timeout=5
-            )
-            if list_result.returncode != 0 or not list_result.stdout.strip():
-                return {}
-            track_files = [
-                line.strip()
-                for line in list_result.stdout.strip().split('\n')
-                if line.strip()
-            ]
-        except Exception:
-            return {}
-
-        # --- Step 2: for each file resolve tags, using cache ---
-        if not hasattr(self, '_metadata_cache'):
-            self._metadata_cache: Dict[str, dict] = {}
-
-        metadata_map: Dict[str, dict] = {}
-        for track_file in track_files:
-            if track_file in self._metadata_cache:
-                metadata_map[track_file] = self._metadata_cache[track_file]
-                continue
-
-            meta = self._fetch_track_tags(track_file)
-            self._metadata_cache[track_file] = meta
-            metadata_map[track_file] = meta
-
-        return metadata_map
-
-    def _fetch_track_tags(self, track_file: str) -> dict:
-        """
-        Fetch artist/album/title for a single track file.
+        Fetch artist/album/title for a single track file, cached.
 
         Strategy (in order of preference):
           1. mutagen  – reads ID3/FLAC/etc. tags directly from the file.
           2. mpc search file – asks MPD for the track info by file path.
           3. Filename stem fallback.
+
+        The cache is what makes this usable from the display loop: the history
+        panel asks about the same tracks twice a second, and step 1 is file I/O.
         """
+        cached = self._tag_cache.get(track_file)
+        if cached is not None:
+            return cached
+        tags = self._resolve_track_tags(track_file)
+        self._tag_cache[track_file] = tags
+        return tags
+
+    def _resolve_track_tags(self, track_file: str) -> dict:
+        """Uncached resolution — see `fetch_track_tags`."""
         # --- Try mutagen first (most reliable, zero extra processes) ---
         try:
             import mutagen
@@ -434,15 +293,6 @@ class MPDController:
             'title':  Path(track_file).stem,
             'file':   track_file,
         }
-    
-    def get_track_metadata(self, track_file: str) -> dict:
-        """Get metadata for a specific track file."""
-        # Re-use the cache-aware helper so both call sites stay consistent.
-        if not hasattr(self, '_metadata_cache'):
-            self._metadata_cache: Dict[str, dict] = {}
-        if track_file not in self._metadata_cache:
-            self._metadata_cache[track_file] = self._fetch_track_tags(track_file)
-        return self._metadata_cache[track_file]
     
     def get_current_track_file(self) -> Optional[str]:
         """Get the file path of currently playing track."""
@@ -505,18 +355,109 @@ class MPDController:
         """
         Add a track to the MPD queue.
         track_file must be relative to MPD's music directory.
+
+        Returns True only if MPD actually accepted the track.  This used to
+        return True unconditionally (audit H7), which made every caller's
+        `if success:` check decorative: a track MPD refused — removed file,
+        stale database, path mismatch — was recorded as queued.  Once the queue
+        is one track deep (D1) a swallowed failure means playback silently runs
+        dry, so the return code is load-bearing, not hygiene.
         """
         try:
-            subprocess.run(
+            result = subprocess.run(
                 ['mpc', '-h', self.host, '-p', str(self.port), 'add', track_file],
                 capture_output=True,
+                text=True,
                 timeout=2
             )
+            if result.returncode != 0:
+                detail = (result.stderr or '').strip() or f"mpc exited {result.returncode}"
+                print(f"MPD refused track {track_file}: {detail}", file=sys.stderr)
+                return False
             return True
         except Exception as e:
             print(f"Error adding track {track_file}: {e}", file=sys.stderr)
             return False
     
+    # ── Playback modes (audit C2/D2) ─────────────────────────────────────────
+    #
+    # MPD's playback modes are the *user's* state, and the application only gets
+    # to borrow them.  `random on` was the live setting of the development
+    # machine, and it silently discards every ordering decision the DJ makes:
+    # MPD picks an arbitrary queue entry on auto-advance and on `mpc next`.  At
+    # queue depth 1 it is worse than mis-ordering — with two entries in the
+    # queue, MPD may replay the current track instead of advancing, so the DJ
+    # looks stuck rather than merely wrong.
+    #
+    # So the modes are read, forced, *logged*, and restored on every exit path.
+    # Silently clobbering a user's configuration is worse than telling them.
+
+    MODE_NAMES = ('repeat', 'random', 'single', 'consume')
+
+    def get_modes(self) -> Dict[str, str]:
+        """
+        Read MPD's playback modes as raw strings.
+
+        Strings rather than bools because `single` has three states in modern
+        MPD — `off`, `on`, `oneshot` — and restoring a user's `oneshot` as `off`
+        would be a silent change of their setting.
+        """
+        try:
+            result = subprocess.run(
+                ['mpc', '-h', self.host, '-p', str(self.port), 'status'],
+                capture_output=True, text=True, timeout=2
+            )
+            if result.returncode != 0:
+                return {}
+            modes = {}
+            for name in self.MODE_NAMES:
+                match = re.search(rf'{name}:\s*(\S+)', result.stdout)
+                if match:
+                    modes[name] = match.group(1)
+            return modes
+        except Exception as e:
+            print(f"Error reading MPD modes: {e}", file=sys.stderr)
+            return {}
+
+    def set_mode(self, name: str, value: str) -> bool:
+        """Set one playback mode.  `value` is passed through to mpc verbatim."""
+        if name not in self.MODE_NAMES:
+            raise ValueError(f"unknown MPD mode {name!r}")
+        try:
+            result = subprocess.run(
+                ['mpc', '-h', self.host, '-p', str(self.port), name, value],
+                capture_output=True, text=True, timeout=2
+            )
+            if result.returncode != 0:
+                detail = (result.stderr or '').strip() or f"mpc exited {result.returncode}"
+                print(f"MPD refused {name} {value}: {detail}", file=sys.stderr)
+                return False
+            return True
+        except Exception as e:
+            print(f"Error setting {name}={value}: {e}", file=sys.stderr)
+            return False
+
+    def delete_position(self, position: int) -> bool:
+        """
+        Remove one entry from the queue by 1-based position.
+
+        Position 2 is the lookahead while something is playing: verified against
+        the live MPD, `mpc del 2` removes it and the current track keeps playing,
+        uninterrupted, still at #1.  Deleting a position that does not exist is
+        an ordinary miss — mpc exits 1 with "song number does not exist" — so it
+        returns False rather than raising; the skip path relies on that when the
+        queue happens to hold only the current track.
+        """
+        try:
+            result = subprocess.run(
+                ['mpc', '-h', self.host, '-p', str(self.port), 'del', str(position)],
+                capture_output=True, text=True, timeout=2
+            )
+            return result.returncode == 0
+        except Exception as e:
+            print(f"Error deleting queue position {position}: {e}", file=sys.stderr)
+            return False
+
     def get_queue(self) -> List[str]:
         """Get list of tracks currently in MPD queue."""
         try:

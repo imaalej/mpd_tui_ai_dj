@@ -1,25 +1,83 @@
 """
-CLAP Embedding Generator
-Generates high-quality audio embeddings using Microsoft's CLAP model.
+CLAP Embedding Generator.
+
+Turns a music library into the vector space everything else in this project is
+built on: one L2-normalised 512-d embedding per track, plus the per-window
+matrix those embeddings were pooled from, plus the library centroid.
+
+What changed, and why (audit C3, C5, M8)
+----------------------------------------
+The previous generator handed each whole track to `ClapProcessor` with default
+arguments.  For `laion/clap-htsat-unfused` those defaults are `max_length_s=10`
+and `truncation="rand_trunc"`, so every embedding described a **randomly
+positioned ten-second crop**: re-running generation produced a different vector
+for the same file, and a track was less recognisable as itself than a stranger
+was 36% of the time.
+
+The window length is not a tunable.  HTSAT's input is fixed at 10 s of 48 kHz
+audio; feeding it more only changes *which* ten seconds survive.  So the fix is
+not a longer window, it is **all** the windows:
+
+  * Non-overlapping 10 s windows tile the track.  The final window is
+    end-aligned — it covers the last ten seconds, overlapping its predecessor —
+    so the tail is neither dropped nor zero-padded.  (Zero-padding is actively
+    harmful: CLAP maps silence to a consistent direction that then contaminates
+    the pooled vector.)
+  * Each window is exactly `WINDOW_SAMPLES` long, so inside `ClapFeatureExtractor`
+    neither the truncation branch nor the padding branch fires.  The random crop
+    that caused C3 cannot happen: there is nothing left to crop.
+  * Windows whose RMS falls below `RMS_GATE` are dropped — lead-ins, run-outs,
+    gaps between movements.  If *every* window is below the gate (a genuinely
+    quiet ambient track) they are all kept rather than returning nothing.
+  * The survivors are mean-pooled and re-normalised.  Mean, not max: max would
+    let a seven-minute track with one matching passage score like a track that
+    matches throughout, which is musical whiplash.  The per-window matrix is
+    persisted so that decision can be revisited without regenerating.
+
+`truncation` is pinned to `rand_trunc` explicitly.  It is the checkpoint's own
+setting and the only one this checkpoint can consume: `fusion` stacks four mel
+crops into a 4-channel tensor, and the *unfused* model's patch embedding takes
+one channel — it raises a shape error rather than producing a worse embedding.
+
+Batching (M8) is real this time: ~25 windows per track means ~26,000 forward
+passes for a 690-track library.  Windows are batched, and the mel extraction —
+which measurement shows is the actual bottleneck, not the GPU — runs on a
+worker pool that overlaps with it.
+
+Batches are filled from **one track at a time**.  Cross-track packing would be
+marginally more efficient, but floating-point reductions depend on batch
+composition, so a track's embedding would then depend on which tracks happened
+to be next to it in the run.  Per-track batching makes bit-identical
+reproduction a property of the *file*, which is what C3's acceptance criterion
+asserts and what the test suite can check.
 """
 
-import numpy as np
 import json
-from pathlib import Path
-from typing import List, Dict, Any, Optional, Callable
-from datetime import datetime
 import warnings
+from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass, field
+from datetime import datetime
+from pathlib import Path
+from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
+
+import numpy as np
+
+# Reading/validating the artifact is pure numpy and lives in embeddings_io so
+# the player never has to import torch.  SCHEMA_VERSION is defined there, once.
+from embeddings_io import SCHEMA_VERSION
 
 # Try to import torch/transformers - these are optional dependencies
 try:
     import torch
     import torchaudio
+    import transformers
     from transformers import ClapModel, ClapProcessor
     CLAP_AVAILABLE = True
 except ImportError:
     CLAP_AVAILABLE = False
     torch = None
     torchaudio = None
+    transformers = None
     ClapModel = None
     ClapProcessor = None
 
@@ -29,33 +87,107 @@ class EmbeddingGenerationError(Exception):
     pass
 
 
+@dataclass
+class PreparedTrack:
+    """A decoded track reduced to model-ready mel features. The waveform is
+    dropped as soon as the features exist — full-length waveforms are hundreds
+    of megabytes and several tracks are in flight at once."""
+    track_file: str
+    features: Optional[Any] = None       # torch.Tensor (W, mel_bins, frames)
+    is_longer: Optional[Any] = None      # torch.Tensor (W, 1)
+    window_rms: List[float] = field(default_factory=list)
+    n_windows_total: int = 0
+    n_windows_gated: int = 0
+    error: Optional[str] = None
+
+
+def window_bounds(n_samples: int, window: int) -> List[Tuple[int, int]]:
+    """
+    Tile `n_samples` with non-overlapping windows of length `window`, ending with
+    an end-aligned window when the track does not divide evenly.
+
+    Pure arithmetic, no torch — so the tiling is testable without the model.
+
+      length 25 s, window 10 s -> [0:10] [10:20] [15:25]
+      length 20 s, window 10 s -> [0:10] [10:20]
+      length  4 s, window 10 s -> [0:4]   (padded by the feature extractor)
+    """
+    if n_samples <= 0:
+        return []
+    if n_samples <= window:
+        return [(0, n_samples)]
+
+    starts = list(range(0, n_samples - window + 1, window))
+    if starts[-1] + window < n_samples:
+        starts.append(n_samples - window)
+    return [(s, s + window) for s in starts]
+
+
 class CLAPEmbeddingGenerator:
     """
     Generates CLAP embeddings for audio files.
-    Uses laion/clap-htsat-unfused model from HuggingFace.
+    Uses the laion/clap-htsat-unfused model from HuggingFace.
     """
-    
+
     MODEL_NAME = "laion/clap-htsat-unfused"
     EMBEDDING_DIM = 512
     TARGET_SAMPLE_RATE = 48000
-    
-    # Generation constants
-    PARTIAL_SAVE_INTERVAL = 100  # Save progress every N tracks
-    REQUIRED_DISK_SPACE_MB = 700  # Required disk space for model download
-    
+
+    # HTSAT's fixed input size.  Not a parameter — see the module docstring.
+    WINDOW_SECONDS = 10
+    WINDOW_SAMPLES = WINDOW_SECONDS * TARGET_SAMPLE_RATE
+
+    # Silence gate, as RMS of a peak-normalised window.
+    #
+    # Measured over 1,475 windows from 40 random tracks of this library, the
+    # distribution is bimodal: 1.8% of windows sit at RMS ~4e-5 (digital
+    # silence) and the quietest real content starts around 0.04 (5th
+    # percentile).  Every threshold between 0.001 and 0.01 drops the same
+    # windows to within half a percent, so 0.01 sits inside a measured gap
+    # rather than on a slope — it is a boundary the data draws, not one chosen
+    # for it.
+    RMS_GATE = 0.01
+
+    # The checkpoint's own setting, pinned rather than inherited: `fusion` is
+    # for the -fused variant and this model cannot consume its 4-channel output.
+    TRUNCATION = 'rand_trunc'
+
+    PARTIAL_SAVE_INTERVAL = 100   # Save progress every N tracks
+
+    # What the first run actually puts on disk, measured rather than guessed
+    # (audit M7).  The old figure was 700 MB, stated nowhere else the same way:
+    # the README said "~1 GB model download" and start.sh said "~4 GB".  All
+    # three were wrong, and 700 was wrong in the direction that matters — the
+    # check would pass on a disk the download then fills.
+    #
+    # `du -sb ~/.cache/huggingface/hub/models--laion--clap-htsat-unfused`
+    # after a first run: 1,232,327,859 bytes.  It is twice the model's size
+    # because the repository's `main` carries only `pytorch_model.bin`
+    # (614.5 MB) and transformers ≥5 additionally fetches the safetensors
+    # conversion from `refs/pr/3` (614.4 MB).  Both end up cached.
+    # The artifact is counted too.  It is written to `data/embeddings/` rather
+    # than to the cache, so on a split filesystem this asks for slightly more
+    # than it will use in one place — the conservative direction for a check
+    # whose whole job is to refuse a run that cannot finish.
+    MODEL_CACHE_MB = 1176         # 1.15 GiB, measured
+    ARTIFACT_MB = 46              # track_embeddings.npz 45.5 MiB + descriptors
+    REQUIRED_DISK_SPACE_MB = MODEL_CACHE_MB + ARTIFACT_MB
+
     def __init__(
         self,
         device: str = 'auto',
         cache_dir: Optional[Path] = None,
-        batch_size: int = 16
+        batch_size: int = 32,
+        workers: int = 4,
     ):
         """
-        Initialize CLAP embedding generator.
-        
         Args:
-            device: Device to use ('cpu', 'cuda', 'cuda:0', or 'auto')
-            cache_dir: Optional directory for model cache
-            batch_size: Batch size for processing
+            device:     'cpu', 'cuda', 'cuda:0', or 'auto'
+            cache_dir:  Optional directory for model cache
+            batch_size: Windows per forward pass
+            workers:    Threads decoding audio and extracting mel features.
+                        Measurement puts the bottleneck there, not on the GPU:
+                        one thread sustains ~37 windows/s, four sustain ~75.
         """
         if not CLAP_AVAILABLE:
             raise ImportError(
@@ -64,23 +196,23 @@ class CLAPEmbeddingGenerator:
                 "or:\n"
                 "  conda install transformers pytorch torchaudio -c pytorch"
             )
-        
-        self.batch_size = batch_size
+
+        self.batch_size = max(1, int(batch_size))
+        self.workers = max(1, int(workers))
         self.cache_dir = cache_dir
-        
-        # Determine device
+
         if device == 'auto':
             self.device = 'cuda' if torch.cuda.is_available() else 'cpu'
         else:
             self.device = device
-        
-        # Track device info
+
         self.device_name = self._get_device_name()
-        
-        # Model and processor (loaded on demand)
+
         self.model = None
         self.processor = None
-        
+
+    # ------------------------------------------------------------------ setup
+
     def _get_device_name(self) -> str:
         """Get human-readable device name."""
         if self.device.startswith('cuda'):
@@ -89,45 +221,37 @@ class CLAPEmbeddingGenerator:
                 return f"CUDA ({torch.cuda.get_device_name(device_id)})"
             return "CUDA (not available)"
         return "CPU"
-    
+
     def load_model(self, progress_callback: Optional[Callable] = None):
-        """
-        Load CLAP model and processor.
-        Downloads model if not cached.
-        
-        Args:
-            progress_callback: Optional callback for download progress
-        """
+        """Load CLAP model and processor, downloading them if not cached."""
         if self.model is not None:
             return
-        
+
         if progress_callback:
             progress_callback("Loading CLAP model...")
-        
+
         try:
-            # Check disk space before download (model is ~600MB)
             cache_dir = self.cache_dir or Path.home() / '.cache' / 'huggingface'
             self._check_disk_space(cache_dir, self.REQUIRED_DISK_SPACE_MB)
-            
-            # Load processor
+
             self.processor = ClapProcessor.from_pretrained(
-                self.MODEL_NAME,
-                cache_dir=self.cache_dir
+                self.MODEL_NAME, cache_dir=self.cache_dir
             )
-            
-            # Load model
             self.model = ClapModel.from_pretrained(
-                self.MODEL_NAME,
-                cache_dir=self.cache_dir
+                self.MODEL_NAME, cache_dir=self.cache_dir
             )
-            
-            # Move to device
             self.model = self.model.to(self.device)
             self.model.eval()
-            
+
+            # Determinism (C3).  Autotuning picks convolution algorithms by
+            # timing them, which can differ between runs of the same input; with
+            # benchmarking off the choice is fixed.
+            if self.device.startswith('cuda'):
+                torch.backends.cudnn.benchmark = False
+
             if progress_callback:
                 progress_callback(f"Model loaded on {self.device_name}")
-                
+
         except ImportError as e:
             raise EmbeddingGenerationError(
                 f"Missing dependencies: {e}\n"
@@ -140,33 +264,23 @@ class CLAPEmbeddingGenerator:
                     "Please check your internet connection and try again.\n"
                     "If the download was interrupted, it will resume automatically on retry."
                 )
-            else:
-                raise EmbeddingGenerationError(f"Failed to load CLAP model: {e}")
+            raise EmbeddingGenerationError(f"Failed to load CLAP model: {e}")
         except Exception as e:
             raise EmbeddingGenerationError(
                 f"Failed to load CLAP model: {e}\n"
                 "If this persists, try deleting the cache directory and retrying:\n"
                 f"  rm -rf ~/.cache/huggingface/hub/models--laion--clap-htsat-unfused"
             )
-    
+
     def _check_disk_space(self, path: Path, required_mb: int):
-        """
-        Check if sufficient disk space is available.
-        
-        Args:
-            path: Directory to check
-            required_mb: Required space in megabytes
-            
-        Raises:
-            EmbeddingGenerationError: If insufficient space
-        """
+        """Refuse to start a download that cannot finish."""
         import os
-        
+
         try:
             path.mkdir(parents=True, exist_ok=True)
             stat = os.statvfs(path)
             available_mb = (stat.f_bavail * stat.f_frsize) / (1024 * 1024)
-            
+
             if available_mb < required_mb:
                 raise EmbeddingGenerationError(
                     f"Insufficient disk space. Need {required_mb}MB, "
@@ -175,429 +289,411 @@ class CLAPEmbeddingGenerator:
         except AttributeError:
             # Windows doesn't have statvfs, skip check
             pass
-    
-    def load_audio(self, audio_path: str) -> Optional[torch.Tensor]:
+
+    # ------------------------------------------------------------------ audio
+
+    def load_audio(self, audio_path: str):
         """
-        Load and preprocess audio file.
-        
-        Args:
-            audio_path: Path to audio file
-            
-        Returns:
-            Preprocessed audio tensor or None if failed
+        Load one file as a mono 48 kHz peak-normalised 1-D tensor.
+
+        Peak normalisation is what makes `RMS_GATE` meaningful: the gate is then
+        relative to the track's own loudest moment rather than to whatever
+        mastering level the release happened to use.
+
+        Raises on failure rather than returning None — the caller records the
+        exception per file in `failed.txt` (C3: the original run lost 16 tracks
+        with no diagnostic).
         """
+        waveform, sample_rate = torchaudio.load(audio_path)
+
+        if waveform.shape[0] > 1:
+            waveform = torch.mean(waveform, dim=0, keepdim=True)
+
+        if sample_rate != self.TARGET_SAMPLE_RATE:
+            resampler = torchaudio.transforms.Resample(
+                orig_freq=sample_rate, new_freq=self.TARGET_SAMPLE_RATE
+            )
+            waveform = resampler(waveform)
+
+        max_val = torch.max(torch.abs(waveform))
+        if max_val > 1e-8:
+            waveform = waveform / max_val
+
+        return waveform.reshape(-1)
+
+    def slice_windows(self, waveform) -> Tuple[List[Any], List[float], int, int]:
+        """
+        Cut a waveform into gated windows.
+
+        Returns (windows, rms_of_kept, n_total, n_gated).  If the gate would
+        remove everything, nothing is removed: a quiet ambient track is still a
+        track, and an empty window list would be a silent data loss.
+        """
+        bounds = window_bounds(int(waveform.shape[0]), self.WINDOW_SAMPLES)
+        windows, rms = [], []
+        for start, end in bounds:
+            segment = waveform[start:end]
+            windows.append(segment)
+            rms.append(float(torch.sqrt(torch.mean(segment.double() ** 2))))
+
+        keep = [i for i, r in enumerate(rms) if r >= self.RMS_GATE]
+        if not keep:
+            keep = list(range(len(windows)))
+
+        return (
+            [windows[i] for i in keep],
+            [rms[i] for i in keep],
+            len(windows),
+            len(windows) - len(keep),
+        )
+
+    def prepare_track(self, track_file: str, music_dir: Path) -> PreparedTrack:
+        """
+        Decode → window → gate → mel features.  Runs on a worker thread; the
+        result carries no waveform, only what the GPU needs.
+        """
+        prepared = PreparedTrack(track_file=track_file)
         try:
-            # Load audio
-            waveform, sample_rate = torchaudio.load(audio_path)
-            
-            # Convert stereo to mono (average channels)
-            if waveform.shape[0] > 1:
-                waveform = torch.mean(waveform, dim=0, keepdim=True)
-            
-            # Resample if needed
-            if sample_rate != self.TARGET_SAMPLE_RATE:
-                resampler = torchaudio.transforms.Resample(
-                    orig_freq=sample_rate,
-                    new_freq=self.TARGET_SAMPLE_RATE
-                )
-                waveform = resampler(waveform)
-            
-            # Normalize amplitude to [-1, 1] range
-            max_val = torch.max(torch.abs(waveform))
-            if max_val > 1e-8:
-                waveform = waveform / max_val
-            
-            # Squeeze to 1D
-            waveform = waveform.squeeze()
-            
-            return waveform
-            
-        except Exception as e:
-            warnings.warn(f"Failed to load audio {audio_path}: {e}")
-            return None
-    
-    def generate_embedding(self, audio: torch.Tensor) -> np.ndarray:
+            waveform = self.load_audio(str(music_dir / track_file))
+            if waveform.numel() == 0:
+                prepared.error = "empty waveform"
+                return prepared
+
+            windows, rms, n_total, n_gated = self.slice_windows(waveform)
+            del waveform
+
+            inputs = self.processor(
+                audio=[w.numpy() for w in windows],
+                return_tensors="pt",
+                sampling_rate=self.TARGET_SAMPLE_RATE,
+                truncation=self.TRUNCATION,
+            )
+            prepared.features = inputs['input_features']
+            prepared.is_longer = inputs.get('is_longer')
+            prepared.window_rms = rms
+            prepared.n_windows_total = n_total
+            prepared.n_windows_gated = n_gated
+        except Exception as exc:                      # noqa: BLE001 - recorded per file
+            prepared.error = f"{type(exc).__name__}: {exc}"
+        return prepared
+
+    # ------------------------------------------------------------------ model
+
+    def embed_prepared(self, prepared: PreparedTrack) -> np.ndarray:
         """
-        Generate CLAP embedding for audio tensor.
-        
-        Args:
-            audio: Preprocessed audio tensor
-            
-        Returns:
-            Normalized embedding vector
+        Run one track's windows through the audio tower.
+
+        Windows are chunked in fixed `batch_size` groups drawn only from this
+        track, so the result depends on the file and the batch size and nothing
+        else.  Returns (n_windows, dim), L2-normalised.
         """
         if self.model is None:
             raise EmbeddingGenerationError("Model not loaded. Call load_model() first.")
-        
-        try:
-            # Process audio
-            inputs = self.processor(
-                audio=audio.numpy(),  # Fixed: Changed from 'audios' to 'audio'
-                return_tensors="pt",
-                sampling_rate=self.TARGET_SAMPLE_RATE
-            )
-            
-            # Move to device
-            inputs = {k: v.to(self.device) for k, v in inputs.items()}
-            
-            # Generate embedding
+
+        features = prepared.features
+        outputs = []
+        for start in range(0, features.shape[0], self.batch_size):
+            chunk = {'input_features': features[start:start + self.batch_size].to(self.device)}
+            if prepared.is_longer is not None:
+                chunk['is_longer'] = prepared.is_longer[start:start + self.batch_size].to(self.device)
             with torch.no_grad():
-                audio_features = self.model.get_audio_features(**inputs)
-            
-            # Extract embedding tensor from model output
-            # CLAP returns BaseModelOutputWithPooling, need to get the pooler_output or last_hidden_state
-            if hasattr(audio_features, 'pooler_output'):
-                embedding_tensor = audio_features.pooler_output
-            elif hasattr(audio_features, 'last_hidden_state'):
-                # Use mean pooling if pooler_output not available
-                embedding_tensor = audio_features.last_hidden_state.mean(dim=1)
-            else:
-                # Fallback: assume it's already a tensor
-                embedding_tensor = audio_features
-            
-            # Convert to numpy and normalize
-            embedding = embedding_tensor.cpu().numpy()
-            if len(embedding.shape) > 1:
-                embedding = embedding[0]  # Take first item if batched
-            
-            norm = np.linalg.norm(embedding)
-            if norm > 1e-8:
-                embedding = embedding / norm
-            
-            return embedding
-            
-        except Exception as e:
-            raise EmbeddingGenerationError(f"Failed to generate embedding: {e}")
-    
-    def generate_embeddings_batch(
+                result = self.model.get_audio_features(**chunk)
+            outputs.append(self._as_matrix(result))
+
+        embeddings = np.concatenate(outputs, axis=0).astype(np.float32)
+        norms = np.linalg.norm(embeddings, axis=1, keepdims=True)
+        norms[norms < 1e-12] = 1.0
+        return embeddings / norms
+
+    @staticmethod
+    def _as_matrix(model_output) -> np.ndarray:
+        """CLAP returns BaseModelOutputWithPooling; the projected, normalised
+        embedding is `pooler_output`."""
+        if hasattr(model_output, 'pooler_output'):
+            tensor = model_output.pooler_output
+        elif hasattr(model_output, 'last_hidden_state'):
+            tensor = model_output.last_hidden_state.mean(dim=1)
+        else:
+            tensor = model_output
+        return tensor.detach().cpu().numpy()
+
+    @staticmethod
+    def pool(window_embeddings: np.ndarray) -> np.ndarray:
+        """Mean over windows, re-normalised — the track's single vector."""
+        pooled = window_embeddings.mean(axis=0)
+        norm = np.linalg.norm(pooled)
+        if norm > 1e-12:
+            pooled = pooled / norm
+        return pooled.astype(np.float32)
+
+    def embed_track(self, track_file: str, music_dir: Path) -> Tuple[np.ndarray, np.ndarray]:
+        """
+        Whole pipeline for one file: (pooled, windows).  Raises
+        EmbeddingGenerationError with the underlying cause on failure.
+
+        This is the unit the determinism test exercises: calling it twice on the
+        same file must return bit-identical arrays.
+        """
+        prepared = self.prepare_track(track_file, music_dir)
+        if prepared.error:
+            raise EmbeddingGenerationError(f"{track_file}: {prepared.error}")
+        windows = self.embed_prepared(prepared)
+        return self.pool(windows), windows
+
+    def embed_texts(self, prompts: Sequence[str]) -> np.ndarray:
+        """Text tower — the half of the model the project never used (D5)."""
+        if self.model is None:
+            raise EmbeddingGenerationError("Model not loaded. Call load_model() first.")
+
+        inputs = self.processor(text=list(prompts), return_tensors="pt", padding=True)
+        inputs = {k: v.to(self.device) for k, v in inputs.items()}
+        with torch.no_grad():
+            result = self.model.get_text_features(**inputs)
+        embeddings = self._as_matrix(result).astype(np.float32)
+        norms = np.linalg.norm(embeddings, axis=1, keepdims=True)
+        norms[norms < 1e-12] = 1.0
+        return embeddings / norms
+
+    # ------------------------------------------------------------- generation
+
+    def generate_library(
         self,
         track_files: List[str],
         music_dir: Path,
         output_file: Path,
         progress_callback: Optional[Callable] = None,
-        resume: bool = False
+        resume: bool = False,
     ) -> Dict[str, Any]:
         """
-        Generate embeddings for a batch of tracks.
-        
-        Args:
-            track_files: List of track file paths (relative to music_dir)
-            music_dir: Base music directory
-            output_file: Output file path (.npz)
-            progress_callback: Optional progress callback
-            resume: Whether to resume from partial results
-            
-        Returns:
-            Dictionary with generation statistics
+        Embed every track and write the artifact described in the audit's §7.
+
+        Decoding and mel extraction run on `self.workers` threads while the main
+        thread feeds the GPU.  Tracks are consumed in submission order, so the
+        output is ordered by `track_files` regardless of which worker finished
+        first — another thing determinism depends on.
         """
-        # Load model
         self.load_model(progress_callback)
-        
-        # Check for existing partial results
+
         partial_file = output_file.parent / f"{output_file.stem}.partial.npz"
-        processed_tracks = set()
-        embeddings_dict = {}
-        
+        pooled: Dict[str, np.ndarray] = {}
+        windows: Dict[str, np.ndarray] = {}
+
         if resume and partial_file.exists():
-            try:
-                partial_data = np.load(partial_file, allow_pickle=True)
-                embeddings_dict = dict(zip(
-                    partial_data['track_files'],
-                    partial_data['embeddings']
-                ))
-                processed_tracks = set(partial_data['track_files'])
-                if progress_callback:
-                    progress_callback(f"Resuming: {len(processed_tracks)} tracks already processed")
-            except Exception as e:
-                warnings.warn(f"Failed to load partial results: {e}")
-        
-        # Filter tracks to process
-        tracks_to_process = [t for t in track_files if t not in processed_tracks]
-        
-        # Statistics
+            pooled, windows = self._load_partial(partial_file)
+            if progress_callback:
+                progress_callback(f"Resuming: {len(pooled)} tracks already processed")
+
+        todo = [t for t in track_files if t not in pooled]
+
         stats = {
             'total': len(track_files),
-            'processed': len(processed_tracks),
-            'successful': len(processed_tracks),
+            'resumed': len(pooled),
+            'processed': 0,
+            'successful': 0,
             'failed': 0,
             'failed_tracks': [],
+            'windows': 0,
+            'windows_gated': 0,
+            'window_rms': [],
             'device': self.device_name,
-            'start_time': datetime.now()
+            'start_time': datetime.now(),
         }
-        
-        # Process tracks
-        for i, track_file in enumerate(tracks_to_process):
-            full_path = music_dir / track_file
-            
-            # Progress callback
-            if progress_callback:
-                progress_info = {
-                    'current': stats['processed'] + 1,
-                    'total': stats['total'],
-                    'track': track_file,
-                    'failed': stats['failed']
-                }
-                progress_callback(progress_info)
-            
-            # Load and process audio
-            audio = self.load_audio(str(full_path))
-            if audio is None:
-                stats['failed'] += 1
-                stats['failed_tracks'].append((track_file, "Failed to load audio"))
-                continue
-            
-            try:
-                # Generate embedding
-                embedding = self.generate_embedding(audio)
-                embeddings_dict[track_file] = embedding
-                stats['successful'] += 1
-                stats['processed'] += 1
-                
-                # Save partial results periodically
-                if stats['processed'] % self.PARTIAL_SAVE_INTERVAL == 0:
-                    self._save_partial(embeddings_dict, partial_file)
-                
-            except Exception as e:
-                stats['failed'] += 1
-                stats['failed_tracks'].append((track_file, str(e)))
-                warnings.warn(f"Failed to generate embedding for {track_file}: {e}")
-        
-        # Save final results
+
+        # Bounded look-ahead: enough prepared tracks to keep the GPU fed, few
+        # enough that several hundred megabytes of mel features never pile up.
+        lookahead = self.workers * 2
+
+        try:
+            with ThreadPoolExecutor(max_workers=self.workers) as pool_executor:
+                pending = []
+                next_index = 0
+
+                def submit_more():
+                    nonlocal next_index
+                    while len(pending) < lookahead and next_index < len(todo):
+                        pending.append(
+                            pool_executor.submit(self.prepare_track, todo[next_index], music_dir)
+                        )
+                        next_index += 1
+
+                submit_more()
+                while pending:
+                    prepared = pending.pop(0).result()
+                    submit_more()
+
+                    stats['processed'] += 1
+                    if progress_callback:
+                        progress_callback({
+                            'current': stats['resumed'] + stats['processed'],
+                            'total': stats['total'],
+                            'track': prepared.track_file,
+                            'failed': stats['failed'],
+                        })
+
+                    if prepared.error:
+                        stats['failed'] += 1
+                        stats['failed_tracks'].append((prepared.track_file, prepared.error))
+                        continue
+
+                    try:
+                        window_embeddings = self.embed_prepared(prepared)
+                    except Exception as exc:          # noqa: BLE001 - recorded per file
+                        stats['failed'] += 1
+                        stats['failed_tracks'].append(
+                            (prepared.track_file, f"{type(exc).__name__}: {exc}")
+                        )
+                        continue
+                    finally:
+                        prepared.features = None
+                        prepared.is_longer = None
+
+                    pooled[prepared.track_file] = self.pool(window_embeddings)
+                    windows[prepared.track_file] = window_embeddings
+                    stats['successful'] += 1
+                    stats['windows'] += window_embeddings.shape[0]
+                    stats['windows_gated'] += prepared.n_windows_gated
+                    stats['window_rms'].extend(prepared.window_rms)
+
+                    if stats['processed'] % self.PARTIAL_SAVE_INTERVAL == 0:
+                        self._save_partial(pooled, windows, track_files, partial_file)
+        except KeyboardInterrupt:
+            # The CLI tells the user "partial results saved, use --resume".  Make
+            # that true: without this, Ctrl-C anywhere in the 99 tracks between
+            # checkpoints throws all of them away while the message claims
+            # otherwise.
+            self._save_partial(pooled, windows, track_files, partial_file)
+            raise
+
         stats['end_time'] = datetime.now()
         stats['duration'] = (stats['end_time'] - stats['start_time']).total_seconds()
-        
-        if embeddings_dict:
-            self._save_embeddings(embeddings_dict, output_file, stats)
-            
-            # Remove partial file if successful
-            if partial_file.exists():
-                partial_file.unlink()
-        
+
+        if not pooled:
+            raise EmbeddingGenerationError(
+                "No track produced an embedding — nothing to write."
+            )
+
+        self._save_embeddings(pooled, windows, track_files, output_file, stats)
+        if partial_file.exists():
+            partial_file.unlink()
+
         return stats
-    
-    def _save_partial(self, embeddings_dict: Dict[str, np.ndarray], partial_file: Path):
-        """Save partial results."""
-        track_files = list(embeddings_dict.keys())
-        embeddings = np.array([embeddings_dict[t] for t in track_files])
-        
-        np.savez_compressed(
+
+    # ------------------------------------------------------------------- I/O
+
+    @staticmethod
+    def _stack(
+        pooled: Dict[str, np.ndarray],
+        windows: Dict[str, np.ndarray],
+        order: Sequence[str],
+    ) -> Tuple[List[str], np.ndarray, np.ndarray, np.ndarray]:
+        """
+        Flatten the per-track dicts into the CSR-style layout of §7: track *i*
+        owns `windows[offsets[i]:offsets[i + 1]]`.
+        """
+        names = [t for t in order if t in pooled]
+        if not names:
+            # Reachable when the first PARTIAL_SAVE_INTERVAL tracks all fail.
+            # np.stack([]) raises, and losing the run to a bookkeeping call
+            # would be an absurd way to lose it.
+            return [], np.zeros((0, 0), np.float32), np.zeros(1, np.int32), \
+                np.zeros((0, 0), np.float32)
+
+        embeddings = np.stack([pooled[t] for t in names]).astype(np.float32)
+
+        counts = [windows[t].shape[0] for t in names]
+        offsets = np.zeros(len(names) + 1, dtype=np.int32)
+        np.cumsum(counts, out=offsets[1:])
+        window_matrix = np.concatenate(
+            [windows[t] for t in names], axis=0
+        ).astype(np.float32)
+        return names, embeddings, offsets, window_matrix
+
+    def _save_partial(self, pooled, windows, order, partial_file: Path):
+        """Checkpoint mid-run.  Same layout as the final file minus the
+        centroid, which is only meaningful over a complete library."""
+        names, embeddings, offsets, window_matrix = self._stack(pooled, windows, order)
+        partial_file.parent.mkdir(parents=True, exist_ok=True)
+        np.savez(
             partial_file,
-            track_files=track_files,
-            embeddings=embeddings
+            track_files=np.array(names, dtype=np.str_),
+            embeddings=embeddings,
+            window_offsets=offsets,
+            windows=window_matrix,
         )
-    
-    def _save_embeddings(
-        self,
-        embeddings_dict: Dict[str, np.ndarray],
-        output_file: Path,
-        stats: Dict[str, Any]
-    ):
-        """Save final embeddings with metadata."""
-        track_files = list(embeddings_dict.keys())
-        embeddings = np.array([embeddings_dict[t] for t in track_files])
-        
+
+    @staticmethod
+    def _load_partial(partial_file: Path):
+        try:
+            data = np.load(partial_file, allow_pickle=False)
+            names = [str(t) for t in data['track_files']]
+            offsets = data['window_offsets']
+            matrix = data['windows']
+            pooled = {t: data['embeddings'][i] for i, t in enumerate(names)}
+            windows = {
+                t: matrix[offsets[i]:offsets[i + 1]] for i, t in enumerate(names)
+            }
+            return pooled, windows
+        except Exception as exc:                       # noqa: BLE001
+            warnings.warn(f"Failed to load partial results: {exc}")
+            return {}, {}
+
+    def _save_embeddings(self, pooled, windows, order, output_file: Path, stats):
+        """Write `track_embeddings.npz` to the schema in the audit's §7."""
+        names, embeddings, offsets, window_matrix = self._stack(pooled, windows, order)
+
+        # C5: stored uncentred, with the centroid alongside, so the centring
+        # transform can be re-derived (or recomputed) as the library grows.
+        centroid = embeddings.mean(axis=0).astype(np.float32)
+
+        rms = np.asarray(stats.get('window_rms') or [0.0], dtype=np.float64)
         metadata = {
+            'schema_version': SCHEMA_VERSION,
             'model': self.MODEL_NAME,
-            'dimension': self.EMBEDDING_DIM,
-            'generated_at': datetime.now().isoformat(),
-            'n_tracks': len(track_files),
-            'device': self.device_name,
-            'version': '1.0',
+            'dimension': int(embeddings.shape[1]),
+            'generated_at': datetime.now().isoformat(timespec='seconds'),
+            'device': stats['device'],
+            'transformers_version': getattr(transformers, '__version__', 'unknown'),
+            'torch_version': getattr(torch, '__version__', 'unknown'),
+            'window_scheme': {
+                'length_s': self.WINDOW_SECONDS,
+                'hop_s': self.WINDOW_SECONDS,          # non-overlapping; tail end-aligned
+                'tail': 'end-aligned',
+                'rms_gate': self.RMS_GATE,
+                'truncation': self.TRUNCATION,
+                'pooling': 'mean-then-renormalise',
+                'batch_size': self.batch_size,
+            },
             'stats': {
                 'total': stats['total'],
-                'successful': stats['successful'],
+                'successful': len(names),
                 'failed': stats['failed'],
-                'duration_seconds': stats['duration']
-            }
+                'windows': int(window_matrix.shape[0]),
+                'windows_gated': stats['windows_gated'],
+                'window_rms_median': float(np.median(rms)),
+                'window_rms_p05': float(np.percentile(rms, 5)),
+                'duration_seconds': stats['duration'],
+            },
         }
-        
-        # Ensure output directory exists
+
         output_file.parent.mkdir(parents=True, exist_ok=True)
-        
+        # Metadata is a JSON string rather than a pickled dict so the artifact
+        # loads with `allow_pickle=False` (M5 asks for validation on load; not
+        # executing arbitrary pickles while doing it is free).
         np.savez_compressed(
             output_file,
-            track_files=track_files,
+            schema_version=np.array(SCHEMA_VERSION),
+            track_files=np.array(names, dtype=np.str_),
             embeddings=embeddings,
-            metadata=np.array([metadata])  # Wrap in array for npz compatibility
+            centroid=centroid,
+            window_offsets=offsets,
+            windows=window_matrix,
+            metadata=np.array(json.dumps(metadata)),
         )
-
-
-def validate_embeddings(embeddings_file: Path) -> Dict[str, Any]:
-    """
-    Validate embeddings file.
-    
-    Args:
-        embeddings_file: Path to embeddings file
-        
-    Returns:
-        Validation results dictionary
-    """
-    try:
-        data = np.load(embeddings_file, allow_pickle=True)
-        
-        # Check required fields
-        if 'track_files' not in data or 'embeddings' not in data:
-            return {
-                'valid': False,
-                'error': 'Missing required fields (track_files, embeddings)'
-            }
-        
-        track_files = data['track_files']
-        embeddings = data['embeddings']
-        
-        # Check dimensions
-        if len(embeddings.shape) != 2:
-            return {
-                'valid': False,
-                'error': f'Invalid embedding shape: {embeddings.shape}'
-            }
-        
-        n_tracks, embed_dim = embeddings.shape
-        
-        # Check normalization
-        norms = np.linalg.norm(embeddings, axis=1)
-        if not np.allclose(norms, 1.0, atol=0.01):
-            return {
-                'valid': False,
-                'error': f'Embeddings not normalized (norm range: {norms.min():.3f} - {norms.max():.3f})'
-            }
-        
-        # Extract metadata
-        metadata = None
-        if 'metadata' in data:
-            metadata = data['metadata'].item()
-        
-        return {
-            'valid': True,
-            'n_tracks': n_tracks,
-            'dimension': embed_dim,
-            'metadata': metadata,
-            'norm_min': float(norms.min()),
-            'norm_max': float(norms.max()),
-            'norm_mean': float(norms.mean())
-        }
-        
-    except Exception as e:
-        return {
-            'valid': False,
-            'error': f'Failed to validate: {e}'
-        }
-
-
-def get_embedding_stats(embeddings_file: Path) -> Dict[str, Any]:
-    """
-    Get statistics about embeddings.
-    
-    Args:
-        embeddings_file: Path to embeddings file
-        
-    Returns:
-        Statistics dictionary
-    """
-    try:
-        data = np.load(embeddings_file, allow_pickle=True)
-        embeddings = data['embeddings']
-        track_files = data['track_files']
-        
-        # Calculate similarity statistics
-        # Sample random pairs to avoid memory issues
-        n_samples = min(1000, len(embeddings))
-        indices = np.random.choice(len(embeddings), n_samples, replace=False)
-        sample_embeddings = embeddings[indices]
-        
-        # Pairwise similarities
-        similarities = np.dot(sample_embeddings, sample_embeddings.T)
-        
-        # Exclude diagonal
-        mask = ~np.eye(n_samples, dtype=bool)
-        similarities = similarities[mask]
-        
-        # Quality assessment
-        quality_score = _assess_embedding_quality(similarities)
-        
-        metadata = None
-        if 'metadata' in data:
-            metadata = data['metadata'].item()
-        
-        return {
-            'n_tracks': len(embeddings),
-            'dimension': embeddings.shape[1],
-            'similarity_min': float(similarities.min()),
-            'similarity_max': float(similarities.max()),
-            'similarity_mean': float(similarities.mean()),
-            'similarity_std': float(similarities.std()),
-            'quality_score': quality_score,
-            'quality_assessment': _quality_interpretation(quality_score),
-            'metadata': metadata
-        }
-        
-    except Exception as e:
-        return {'error': f'Failed to compute stats: {e}'}
-
-
-def _assess_embedding_quality(similarities: np.ndarray) -> float:
-    """
-    Assess embedding quality based on similarity distribution.
-    
-    Args:
-        similarities: Array of pairwise similarities
-        
-    Returns:
-        Quality score from 0-100
-    """
-    mean_sim = similarities.mean()
-    std_sim = similarities.std()
-    min_sim = similarities.min()
-    max_sim = similarities.max()
-    
-    # Good embeddings should have:
-    # 1. Moderate mean (0.3-0.5) - not all similar, not all different
-    # 2. Good spread (std > 0.15) - can distinguish tracks
-    # 3. Range that uses the space (-0.2 to 0.9)
-    
-    score = 100.0
-    
-    # Penalize if mean is too high (all tracks similar)
-    if mean_sim > 0.6:
-        score -= (mean_sim - 0.6) * 100
-    
-    # Penalize if mean is too low (all tracks different)
-    if mean_sim < 0.2:
-        score -= (0.2 - mean_sim) * 100
-    
-    # Penalize if standard deviation is too low (no discrimination)
-    if std_sim < 0.15:
-        score -= (0.15 - std_sim) * 200
-    
-    # Penalize if range is too narrow (not using embedding space)
-    sim_range = max_sim - min_sim
-    if sim_range < 0.6:
-        score -= (0.6 - sim_range) * 50
-    
-    return max(0.0, min(100.0, score))
-
-
-def _quality_interpretation(score: float) -> str:
-    """Interpret quality score."""
-    if score >= 80:
-        return "Excellent - Embeddings show good discrimination"
-    elif score >= 60:
-        return "Good - Embeddings are usable"
-    elif score >= 40:
-        return "Fair - Embeddings may work but check similarity distribution"
-    elif score >= 20:
-        return "Poor - Embeddings show limited discrimination"
-    else:
-        return "Very Poor - Embeddings may be random or corrupted"
+        return metadata
 
 
 def check_clap_available() -> tuple[bool, str]:
-    """
-    Check if CLAP dependencies are available.
-    
-    Returns:
-        (available, message) tuple
-    """
+    """Report whether generation can run here, and on what."""
     if not CLAP_AVAILABLE:
         return False, (
             "CLAP dependencies not available.\n"
@@ -606,11 +702,7 @@ def check_clap_available() -> tuple[bool, str]:
             "or:\n"
             "  conda install transformers pytorch torchaudio -c pytorch"
         )
-    
-    # Check CUDA availability
-    cuda_available = torch.cuda.is_available()
-    if cuda_available:
-        device_name = torch.cuda.get_device_name(0)
-        return True, f"CLAP available (CUDA: {device_name})"
-    else:
-        return True, "CLAP available (CPU only)"
+
+    if torch.cuda.is_available():
+        return True, f"CLAP available (CUDA: {torch.cuda.get_device_name(0)})"
+    return True, "CLAP available (CPU only — expect a long run)"

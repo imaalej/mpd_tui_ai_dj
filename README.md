@@ -13,19 +13,21 @@ A terminal-based DJ that learns your taste in real time and curates a continuous
 ║  │             │   Album:   Promises                               ║
 ║  │             │   Track:   ❤ LesAlpx                              ║
 ║  └─────────────┘   [████████████░░░░░░░░░░░░]  3:12 / 8:44         ║
-║                    Vibe: focused cohesive vibe, deep in the zone   ║
+║                    ♪ hypnotic · nocturnal · sparse                 ║
+║                    ⟳ 2 of 3 held over 5 tracks · 14 played         ║
 ╠════════════════════════════════════════════════════════════════════╣
 ║  System Console                                                    ║
 ║  [14:32:01] Exploration decreased to 0.18 (6 consecutive listens)  ║
 ╠════════════════════════════════════════════════════════════════════╣
-║  Upcoming Queue  [↑↓ navigate · ENTER play]                        ║
-║    ▶ Floating Points – Promises – LesAlpx                          ║
-║    1. Pharoah Sanders – Karma – The Creator Has a Master Plan      ║
-║  » 2. Nils Frahm – Spaces – Said and Done                          ║
-║    3. ❤ Jon Hopkins – Immunity – Open Eye Signal                   ║
-║    4. Four Tet – There Is Love In You – Love Cry                   ║
+║  Session                                                           ║
+║    ↓ next:  Pharoah Sanders – The Creator Has a Master Plan        ║
+║  ──────────────────────────────────────────────────────────────    ║
+║   ♥♪ Floating Points – LesAlpx                                     ║
+║    ✓ Alice Coltrane – Journey in Satchidananda                     ║
+║    ⏭ Kamasi Washington – Change of the Guard                       ║
 ╠════════════════════════════════════════════════════════════════════╣
-║ SPACE=Play/Pause  N=Next  V=Vibe  L=Like  <,>=Vol  ←→=Seek  Q=Quit ║
+║ [SPACE] Pause  [N] Skip  [L] Like  [↑↓] History  [ENTER] Replay    ║
+║ [,.] Vol  [←→] Seek  [I] Info  [Q] Quit                            ║
 ╚════════════════════════════════════════════════════════════════════╝
 ```
 
@@ -35,7 +37,13 @@ A terminal-based DJ that learns your taste in real time and curates a continuous
 
 - **Python 3.9+**
 - **MPD** (Music Player Daemon) + **MPC** — must be running with your music library indexed
-- A terminal (Linux or macOS)
+- **Linux.** Developed and run on Fedora with Python 3.14. macOS is *untested* — the README used to
+  claim it, and nothing had ever been run there. `start.sh` no longer uses any bash 4+ syntax, so it
+  should survive the bash 3.2 macOS ships, but album art will not work: the only two working
+  renderers are `ueberzug` and `ueberzugpp`, and both draw into an X11/Wayland surface.
+- **About 1.3 GB of free disk** for the first run — 1.15 GB of model cache and a 46 MB embedding file.
+  See "First run" below for where that goes.
+- A GPU is optional. See the table below for what it costs without one.
 
 ---
 
@@ -49,12 +57,27 @@ cd mpd_tui_ai_dj
 bash start.sh
 ```
 
-`start.sh` will check your Python version, install pip dependencies, verify MPD is reachable, and walk you through generating embeddings if this is your first run. After that it launches the TUI automatically.
+`start.sh` will check your Python version, install pip dependencies, verify MPD is reachable, locate MPD's music directory, and walk you through generating embeddings if this is your first run. After that it launches the TUI automatically.
 
-**First run only — embeddings:** The DJ needs audio fingerprints of your library to find musically similar tracks. You'll be offered two options:
+The music directory is read from MPD's own config (`~/.config/mpd/mpd.conf`, `/etc/mpd.conf`, …). If that cannot be found you will be asked for it; set `MPD_MUSIC_DIR` to skip the question permanently.
 
-- **Real embeddings** via [CLAP](https://github.com/LAION-AI/CLAP) — audio-based, best quality, slow (~1–60 min depending on library size, requires ~1 GB model download)
-- **Demo embeddings** — random vectors, instant, good enough to try the interface
+**First run only — embeddings:** The DJ needs audio fingerprints of your library to find musically similar tracks. These come from [CLAP](https://github.com/LAION-AI/CLAP), and generating them is the one slow step: a model download, then a decode-and-encode pass over every track.
+
+Every number here is measured on this machine against a 674-track library, not estimated:
+
+| | Measured |
+|---|---|
+| Model cache after the first run | **1.15 GB** (1,232,327,859 bytes) |
+| Why it is twice the model's size | The repo's `main` carries only `pytorch_model.bin` (614.5 MB); transformers ≥ 5 also fetches the safetensors conversion from `refs/pr/3` (614.4 MB), and both stay cached |
+| Embedding pass, RTX 3070 | **5 min 23 s** — 674 tracks, 24,494 windows, 75.8 windows/s |
+| Embedding pass, CPU only (12 threads) | **≈ 25–35 min** — the audio encoder runs at 17.0 windows/s against the GPU's 333 |
+| Output | `track_embeddings.npz` **45.5 MB** + `descriptors.npz` 93 KB |
+
+`start.sh` refuses to begin a run that cannot finish, checking free space against the same figures.
+
+Tracks are enumerated from `mpc listall`, so the embedding keys are exactly the paths MPD will be asked to play. Files MPD cannot decode are skipped and listed in `data/embeddings/failed.txt` with the reason, rather than disappearing silently.
+
+There is no "demo mode" with random vectors. Random embeddings make every similarity, every novelty score and every learned preference meaningless while the interface keeps presenting them as insight — it looks like it works, and none of it does.
 
 You only ever run this once. The result is saved to `data/embeddings/`.
 
@@ -77,15 +100,38 @@ mpc status   # should show your track count
 | Key | Action |
 |-----|--------|
 | `Space` | Play / Pause |
-| `N` | Skip track (stays in current vibe) |
-| `V` | Skip vibe (hard shift to a new direction) |
-| `L` | Like current track |
+| `N` | Skip track — escalates if you keep pressing it (see below) |
+| `L` | Like current track — press again on a liked track to un-like it |
+| `↑` / `↓` | Move the cursor through the session history |
+| `Enter` | Play the track under the cursor again — it becomes `↓ next:` |
 | `,` / `.` | Volume down / up |
 | `←` / `→` | Seek backward / forward 10s |
-| `↑` / `↓` | Navigate the queue |
-| `Enter` | Play selected queue item immediately |
-| `I` | Show time-context stats |
+| `I` | Show model state (descriptors, sampling, taste, exploration, weights) — `↑↓` scrolls it |
 | `Q` | Quit |
+
+These are the same bindings in the urwid interface and in the plain-text fallback,
+and the footer advertises exactly this list. They are not merely documented as the
+same: the fallback decodes terminal bytes into key names and then calls the *same*
+dispatch method the urwid mode does, so a binding cannot exist in one interface and
+not the other. A test drives every row of the table through the real key handler,
+and a second one drives them through a pty into the fallback mode, because the
+footer, this table and the fallback used to disagree three ways.
+
+**What un-liking does to the model.** Retracting a like is not a negative update.
+The taste vector is a normalised moving average, so subtracting the same weight
+does not return it to where it was — and in the case that matters most, it fails
+outright: retract your only like and a subtraction leaves your long-term taste
+still pointing exactly at the track you just rejected, because normalising `0.9·e`
+gives back `e`. So `L` removes the like from your feedback history and *recomputes*
+the taste model from what is left. The result is the model you would have had if
+you had never pressed the key, exactly.
+
+There is one exception, and it tells you when it happens. The feedback history is
+capped at 1000 events, so a long-running listener's history may no longer account
+for their whole taste model — recomputing from a partial history would move the
+vector for reasons unrelated to this track. When that is the case the retraction
+is display-only: the heart goes and the like leaves the history, but the taste
+model is left alone, and the console says so.
 
 ---
 
@@ -95,17 +141,21 @@ mpc status   # should show your track count
 
 Every track in your library is encoded into a 512-dimensional embedding vector that represents its sonic character — timbre, texture, energy, harmonic content. These come from [CLAP](https://github.com/LAION-AI/CLAP), a model trained to understand audio similarity. Two songs that *feel* similar will have embeddings that point in roughly the same direction in that space. All selection logic operates on these vectors; no genre tags or metadata are used.
 
+CLAP's audio encoder takes exactly ten seconds of audio, so a track is covered by consecutive ten-second windows — the last one aligned to the end so nothing is dropped or padded with silence — and the window vectors are averaged into one. The whole track is represented, not a sample of it, and embedding the same file twice gives the identical vector. Near-silent windows are dropped; the per-window vectors are kept in the file so the pooling decision can be revisited without regenerating.
+
+One more step matters more than it looks. CLAP's vectors occupy a narrow cone rather than the whole space: on this library, two *completely unrelated* tracks sat at a cosine similarity of 0.67. "Similar" and "unrelated" were nearly the same number, which is why the scoring weights never seemed to do much. Subtracting the library's own centroid at load time moves unrelated pairs to ≈ 0 and gives the rest of the system the range it always assumed it had.
+
 ### Two Layers of Preference
 
 The system keeps two separate models of what you like, operating on different timescales:
 
-**Session state** is short-term and lives only for the current listening session. It's a single vector that shifts with every track you hear — pulled toward songs you listen through and nudged away from songs you skip. It represents the *vibe right now*: where the session has been and the direction it's heading. When you press `V` (skip vibe), the session vector is rotated by a large random angle, immediately breaking from the current trajectory and forcing the queue to recalculate from a new starting point.
+**Session state** is short-term and lives only for the current listening session. It's a single vector that shifts with every track you hear — pulled toward songs you listen through and nudged away from songs you skip. It represents the *vibe right now*: where the session has been and the direction it's heading. It starts empty — before anything has played there is nothing to know, so the first track is drawn at random rather than from a direction the system invented.
 
 **User taste** is long-term and persists between sessions. It accumulates slowly from everything you've heard across all sessions — strong pull toward explicit likes (`L`), weaker pull from full listens, and gentle pushback from skips. It doesn't reflect what you want *today*, it reflects what you've consistently come back to *across time*. New sessions start from a fresh vibe but are still anchored to your taste history.
 
 ### Track Selection
 
-For each slot in the queue, the system scores every candidate track across four factors, then picks the best:
+To choose the next track, the system scores a pool of candidates across four factors:
 
 ```
 score = α · session_similarity
@@ -114,29 +164,80 @@ score = α · session_similarity
       + δ · anti_repetition_penalty
 ```
 
-The weights (α, β, γ, δ) shift dynamically based on your behavior. Skip a few songs and the system increases `γ` (novelty) to try something different. Listen through several tracks and it lowers `γ`, leaning harder on what it already knows you like. Press `V` and it sets novelty to near-maximum and rebuilds the queue from scratch.
+The weights (α, β, γ, δ) shift dynamically based on your behavior. Skip a few songs and the system increases `γ` (novelty) to try something different. Listen through several tracks and it lowers `γ`, leaning harder on what it already knows you like.
+
+`β` is also *earned*. A new listener has no taste history, so the taste term starts at zero weight and ramps up over the first 20 updates, with the unearned weight going to the session term. Until then you are driven purely by what you are playing right now, which is the only thing known about you.
+
+### Skipping, and what it means
+
+`N` is the only steering key. A single press says "not this song" — the session vector is nudged away from it and the queued track behind it is dropped and re-picked immediately.
+
+Keep pressing and it escalates, because *n* consecutive rejections is the system observing that the neighbourhood is wrong — better evidence than a separate key you would have to reach for after diagnosing your own dissatisfaction. Each press targets a fraction of the candidate pool that must come out different:
+
+| consecutive skips | turns over | reads as |
+|---|---|---|
+| 1 | 5% | "not this song" |
+| 2 | 20% | "not this corner either" |
+| 3 | 50% | "this is the wrong direction" |
+| 4+ | 85% | full reset |
+
+The important part is that those are *targets*, and the magnitude of the move is solved for them at each press rather than being a constant someone picked. "85% of what I would have heard is now different" is something you can check; a rotation of 0.15 radians is not. The console reports what each press actually achieved.
+
+From the second press onward the session vector is projected back onto your library — replaced with the centre of its 25 nearest real tracks — so however hard you push, it cannot drift into a region no music occupies. A full listen ends the run and the escalation resets.
+
+*(An earlier `V` key existed for this. It blended the session vector halfway toward a random direction, which measurably landed it outside the music and turned over less than two presses of `N` do. It is gone.)*
 
 ### Exploration vs Exploitation
 
 A single **exploration value** (0.1–0.7) controls how adventurous the DJ is. It increases with every skip and decreases with every full listen, meaning it self-calibrates to your engagement. If you're in a zone and letting tracks run, it narrows in. If you're skipping around, it opens up and reaches further from your established taste.
 
-The exploration level also picks up a **day-of-week modifier**: slightly more conservative on weekdays, slightly more adventurous on weekends.
+### Describing the session
 
-### Mood & Narrative
+The session line names what is playing, in words measured against your own library:
 
-The session vector's trajectory is tracked over time and used to generate the vibe description you see on screen. If recent tracks have been highly similar to each other (cosine similarity > 0.85), the vibe reads as *focused*. More varied and it shifts to *flowing*, *drifting*, or *exploring*. The description also reflects how deep you are into the session (*warming up → building → deep in the zone*) and whether the overall spread of your session is *cohesive*, *diverse*, or *eclectic*.
+```
+♪ hypnotic · nocturnal · sparse
+⟳ 2 of 3 held over 5 tracks · 14 played
+```
 
-The queue is kept at 10 tracks and refilled dynamically so playback never stops. Each candidate is drawn from a pool of 100 nearest-neighbor tracks in embedding space, then re-ranked by the full scoring function. Recently played tracks are excluded for at least 20 songs to prevent repetition.
+Those come from 49 descriptor prompts — energy, affect, texture, rhythm, setting, instrumentation — embedded with CLAP's *text* encoder and stored with each word's mean and standard deviation over your collection. A score is therefore a **z-score against your own music**, so *"hypnotic"* means "unusually hypnotic **for this library**" rather than "hypnotic in the abstract". That matters more than it sounds: CLAP's audio and text encoders are aligned but do not share a cone, so raw similarities are not comparable between words, and a naive top-3 would return the same three words forever.
 
-### Time Context
+The second line says how many of those three words were also on screen a few tracks ago. It is a count rather than a similarity score on purpose — measured over 40 real sessions, the underlying cosine sits above 0.95 nine times out of ten, so it reads as "0.99" almost always, while the word count spans its whole range (median 2 of 3, and 0 or 1 after a run of skips). `[I]` shows both, with the cosine labelled.
 
-The system tracks which kinds of music you tend to listen to at different times of day — morning, midday, afternoon, evening, night — and adds a small time-similarity bonus to tracks that fit the current period based on your history. This builds up passively over many sessions and has a gentle influence (weighted at 15%) so it never overrides your explicit preferences.
+Nothing is shown before a track has played. The session vector starts at zero, and scoring a zero vector against the bank does not fail — it returns a confident-looking ranking of the bank's own baselines, which would be a description of nothing at all.
+
+You can also ask for any track's descriptors from the command line:
+
+```bash
+python3 generate_embeddings.py --describe "Arctic Monkeys"
+```
+
+This replaced a mood phrase — *"focused cohesive vibe, deep in the zone"* — assembled from three heuristics, all invented against scales nobody measured. The mood word came from an entropy-like quantity that is always ≈ 55 for a 512-dimensional unit vector, so it returned *eclectic* every time and its other two branches were unreachable; the *warming up → building → deep in the zone* stage word was a track counter in a costume.
+
+### The Session panel
+
+Below the console, the **Session** panel shows the one track queued ahead, then what has actually played, newest first:
+
+```
+  ↓ next:  Pharoah Sanders – The Creator Has a Master Plan
+ ──────────────────────────────────────────────────────────
+ ♥♪ Floating Points – LesAlpx
+  ✓ Alice Coltrane – Journey in Satchidananda
+  ⏭ Kamasi Washington – Change of the Guard
+```
+
+`♥` is a track you have liked, at any point, across sessions. `✓` is a full listen, `⏭` a skip, `♪` the track playing now. `↑↓` move the cursor and `ENTER` queues that track to play again next.
+
+This replaced an "Upcoming Queue" panel that listed ten tracks read from `mpc playlist` — which, with the playback modes the DJ now uses, was the session's *history* displayed above the current track and numbered as if it were the future. The panel shows the past because the past is the part that is true; at a queue depth of one there is no future to list.
+
+Exactly **one** track sits in the queue ahead of the current one, refilled as each song ends so playback never stops. That depth is deliberate: with ten queued tracks, every one of them had been scored under the weights that existed ten songs ago, so a skip or a like was inaudible until they drained. At depth one, feedback changes what plays *next*.
+
+Candidates are drawn from a pool of 100 nearest neighbours in embedding space and re-ranked by the full scoring function. The winner is not simply the top-scoring track — one is drawn by Boltzmann sampling over **rank**, `p(i) ∝ exp(−i/τ)`, with `τ` set by the exploration value and readable in `[I]` as "choosing from ~top 8". A strict argmax would replay the identical evening from the same starting state every time, which for a system built around an evolving session is the failure mode. Recently played tracks are excluded for at least 20 songs, and that exclusion now survives a restart.
 
 ### What Persists Between Sessions
 
 - Your **taste vector** — accumulated from all your likes, listens, and skips
 - Your **exploration level** — picks up roughly where you left off
-- Your **time context** — which music you listen to at which hours
 - Your **feedback history** — a log of every like, skip, and listen event
 
 The session vector itself resets each time. Every session begins fresh but informed by everything before it.
@@ -160,7 +261,17 @@ exploration_max = 0.7   # ceiling — never fully random
 
 # Session evolution speed
 session_decay_factor  = 0.85   # how quickly old tracks fade from session context
-vibe_shift_magnitude  = 0.5    # how hard V rotates the session vector
+
+# Selection temperature — the effective number of candidates in play
+tau_max = 15.0   # at the exploration ceiling; ~1 at the floor
+
+# Skip escalation: the fraction of the candidate pool each consecutive
+# press of N must turn over.  The repulsion magnitude is solved for these,
+# not declared, so they need no recalibration if the library changes.
+skip_turnover_schedule = (0.05, 0.20, 0.50, 0.85)
+
+# Queue depth ahead of the current track
+queue_lookahead = 1
 
 # Taste update rates
 taste_update_like         =  0.10   # explicit like
