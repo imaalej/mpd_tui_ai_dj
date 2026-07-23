@@ -45,6 +45,32 @@ DELETED_SYMBOLS = [
     "_assess_embedding_quality",
     "_quality_interpretation",
     "save_embeddings",
+    # Stage 2.  [V] and everything that existed only to serve it (D8/H9): it
+    # blended the session vector 50% toward a *random* direction, landing it
+    # around 0.56 mean similarity to the nearest real music against 0.73 for a
+    # real track, for less pool turnover than two escalated [N] presses.  Its
+    # real job was clearing the ten-track queue, which D1 removed.
+    "force_shift",
+    "process_vibe_skip",
+    "set_high_exploration",
+    "vibe_shift_magnitude",
+    "_skip_vibe",
+    "vibe_skips",
+    # The queue-depth-10 apparatus (D1/C1).  `check_and_refill` compared
+    # `len(mpc playlist)` — which counts already-played tracks with consume off —
+    # against a low-water mark, so after the first ten tracks it never fired.
+    "recalculate",
+    "initialize_queue",
+    "check_and_refill",
+    "planned_queue",
+    "currently_queued_in_mpd",
+    "_sync_to_mpd",
+    "get_upcoming_tracks",
+    "queue_buffer_size",
+    "queue_low_threshold",
+    # Replaced by the solved repulsion (H9) and the zero seed (L7).
+    "penalize_similar",
+    "_initialize_session_vector",
 ]
 
 SEARCHED_SUFFIXES = {".py", ".sh"}

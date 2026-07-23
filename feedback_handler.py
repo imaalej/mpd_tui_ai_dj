@@ -17,79 +17,84 @@ class FeedbackHandler:
     Maintains feedback history for persistence.
     """
     
-    def __init__(self, 
-                 session_state, 
-                 user_taste, 
+    # No `queue_manager` here, deliberately.  This class updates the models and
+    # records history; it does not touch MPD or the queue.  The skip path's
+    # ordering — feedback, then replace the lookahead, then advance exactly once
+    # — is the thing C4 is about, so it lives in one place on the orchestrator
+    # rather than being split across a component that cannot see the advance.
+    def __init__(self,
+                 session_state,
+                 user_taste,
                  exploration_controller,
-                 queue_manager,
                  track_library):
         self.session_state = session_state
         self.user_taste = user_taste
         self.exploration_controller = exploration_controller
-        self.queue_manager = queue_manager
         self.track_library = track_library
         
         self.feedback_history = []
+        # No 'vibe_skips' counter: [V] is deleted (audit D8/H9) and a key that
+        # can never fire should not have a tally the [I] overlay reports as 0.
         self.session_feedback_count = {
             'skips': 0,
-            'vibe_skips': 0,
             'likes': 0,
             'full_listens': 0
         }
     
-    def process_skip(self, track_file: str):
+    def process_skip(self, track_file: str) -> Optional[dict]:
         """
-        Process skip feedback: user skipped current song.
-        - Penalizes similar tracks in session
-        - Increases exploration
-        - Keeps session direction but nudges away
+        Process a skip, and re-pick the lookahead under the result.
+
+        There is exactly **one** skip path (audit C4/H9).  `[V]` and
+        `process_vibe_skip()` are gone: `[V]` blended half a random direction
+        into the session vector, which is not a direction at all — it landed the
+        vector at 0.56 mean similarity to the nearest real music against 0.73 for
+        a real track — while turning over less of the candidate pool than two
+        escalated presses of this key do.  Its actual job was clearing the
+        ten-track queue, and there is no longer a queue to clear.
+
+        The escalation replaces it, driven by evidence rather than by a second
+        keypress: *n* consecutive rejections is the system observing that the
+        neighbourhood is wrong, which is strictly better information than the
+        user asserting the same thing, because it arrives without them having to
+        diagnose their own dissatisfaction first.
+
+        Returns the measured outcome of the vector move, or None if the track had
+        no embedding.  **The caller advances MPD; this method must not** — see
+        `QueueManager.replace_next()` for why the ordering matters.
         """
-        # Silently process skip (no print to avoid TUI interference)
-        
         track_embedding = self.track_library.get_embedding(track_file)
         if track_embedding is None:
-            print(f"Warning: No embedding found for skipped track", file=sys.stderr)
-            return
-        
-        # Update session state: penalize similar tracks
-        self.session_state.penalize_similar(track_embedding)
-        
-        # Update user taste: small negative signal
-        self.user_taste.update_from_skip(track_embedding)
-        
-        # Increase exploration
+            print("Warning: No embedding found for skipped track", file=sys.stderr)
+            return None
+
+        # Exploration first: it owns `consecutive_skips`, and the run length it
+        # produces is what the repulsion's turnover target is chosen from.
         self.exploration_controller.increase_exploration()
-        
-        # Record feedback
+        run_length = self.exploration_controller.consecutive_skips
+
+        outcome = self.session_state.repel_from_skip_run(
+            track_embedding,
+            run_length=run_length,
+            embedding_matrix=self.track_library.embedding_matrix,
+        )
+
+        # Small negative signal to long-term taste.  Unlike the session move,
+        # this is deliberately not escalated: a run of skips says a great deal
+        # about tonight and very little about what the listener likes in general.
+        self.user_taste.update_from_skip(track_embedding)
+
         self._record_feedback('skip', track_file)
         self.session_feedback_count['skips'] += 1
-        
-        # NOTE: recalculate() is intentionally NOT called here.
-        # [N] = skip one track, keeps the current queue direction.
-        # Only [V] (vibe skip) should recalculate the entire queue.
-    
-    def process_vibe_skip(self, track_file: str):
-        """
-        Process vibe skip: user wants completely different direction.
-        - Forces significant trajectory shift
-        - Sets high exploration mode
-        - Recalculates entire queue
-        """
-        # Silently process vibe skip (no print to avoid TUI interference)
-        
-        # Force session shift
-        self.session_state.force_shift()
-        
-        # Set high exploration
-        self.exploration_controller.set_high_exploration()
-        
-        # Recalculate entire queue
-        self.queue_manager.recalculate()
-        
-        # Record feedback
-        self._record_feedback('vibe_skip', track_file)
-        self.session_feedback_count['vibe_skips'] += 1
-    
+
+        if outcome and outcome['turnover'] > 0:
+            print(f"Skip #{run_length}: λ={outcome['lambda']:.2f}"
+                  f"{' + snap' if outcome['snapped'] else ''}, "
+                  f"{outcome['turnover']:.0%} of what you would have heard is now "
+                  f"different (target {outcome['target']:.0%})", file=sys.stderr)
+
+        return outcome
+
     def process_like(self, track_file: str):
         """
         Process like: user explicitly liked current track.
@@ -192,7 +197,6 @@ class FeedbackHandler:
         """Reset session statistics."""
         self.session_feedback_count = {
             'skips': 0,
-            'vibe_skips': 0,
             'likes': 0,
             'full_listens': 0
         }

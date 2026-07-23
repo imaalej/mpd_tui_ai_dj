@@ -400,6 +400,85 @@ class MPDController:
             print(f"Error adding track {track_file}: {e}", file=sys.stderr)
             return False
     
+    # ── Playback modes (audit C2/D2) ─────────────────────────────────────────
+    #
+    # MPD's playback modes are the *user's* state, and the application only gets
+    # to borrow them.  `random on` was the live setting of the development
+    # machine, and it silently discards every ordering decision the DJ makes:
+    # MPD picks an arbitrary queue entry on auto-advance and on `mpc next`.  At
+    # queue depth 1 it is worse than mis-ordering — with two entries in the
+    # queue, MPD may replay the current track instead of advancing, so the DJ
+    # looks stuck rather than merely wrong.
+    #
+    # So the modes are read, forced, *logged*, and restored on every exit path.
+    # Silently clobbering a user's configuration is worse than telling them.
+
+    MODE_NAMES = ('repeat', 'random', 'single', 'consume')
+
+    def get_modes(self) -> Dict[str, str]:
+        """
+        Read MPD's playback modes as raw strings.
+
+        Strings rather than bools because `single` has three states in modern
+        MPD — `off`, `on`, `oneshot` — and restoring a user's `oneshot` as `off`
+        would be a silent change of their setting.
+        """
+        try:
+            result = subprocess.run(
+                ['mpc', '-h', self.host, '-p', str(self.port), 'status'],
+                capture_output=True, text=True, timeout=2
+            )
+            if result.returncode != 0:
+                return {}
+            modes = {}
+            for name in self.MODE_NAMES:
+                match = re.search(rf'{name}:\s*(\S+)', result.stdout)
+                if match:
+                    modes[name] = match.group(1)
+            return modes
+        except Exception as e:
+            print(f"Error reading MPD modes: {e}", file=sys.stderr)
+            return {}
+
+    def set_mode(self, name: str, value: str) -> bool:
+        """Set one playback mode.  `value` is passed through to mpc verbatim."""
+        if name not in self.MODE_NAMES:
+            raise ValueError(f"unknown MPD mode {name!r}")
+        try:
+            result = subprocess.run(
+                ['mpc', '-h', self.host, '-p', str(self.port), name, value],
+                capture_output=True, text=True, timeout=2
+            )
+            if result.returncode != 0:
+                detail = (result.stderr or '').strip() or f"mpc exited {result.returncode}"
+                print(f"MPD refused {name} {value}: {detail}", file=sys.stderr)
+                return False
+            return True
+        except Exception as e:
+            print(f"Error setting {name}={value}: {e}", file=sys.stderr)
+            return False
+
+    def delete_position(self, position: int) -> bool:
+        """
+        Remove one entry from the queue by 1-based position.
+
+        Position 2 is the lookahead while something is playing: verified against
+        the live MPD, `mpc del 2` removes it and the current track keeps playing,
+        uninterrupted, still at #1.  Deleting a position that does not exist is
+        an ordinary miss — mpc exits 1 with "song number does not exist" — so it
+        returns False rather than raising; the skip path relies on that when the
+        queue happens to hold only the current track.
+        """
+        try:
+            result = subprocess.run(
+                ['mpc', '-h', self.host, '-p', str(self.port), 'del', str(position)],
+                capture_output=True, text=True, timeout=2
+            )
+            return result.returncode == 0
+        except Exception as e:
+            print(f"Error deleting queue position {position}: {e}", file=sys.stderr)
+            return False
+
     def get_queue(self) -> List[str]:
         """Get list of tracks currently in MPD queue."""
         try:

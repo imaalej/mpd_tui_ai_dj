@@ -16,6 +16,7 @@ Its position is computed from the live screen size so it never overlaps
 the seek bar or vibe line regardless of terminal dimensions.
 """
 
+import os
 import sys
 import io
 import time
@@ -186,7 +187,9 @@ class AdaptiveDJTUI:
         # UI state
         self.current_status: dict = {}
         self.liked_tracks: set = set()
-        self.queue_focus_index: int = 0  # which queue item is highlighted
+        # Written to by the signal handler to unblock urwid's MainLoop; see
+        # `request_exit`.
+        self._exit_pipe: Optional[int] = None
 
         # Album art
         self.album_art_renderer = get_album_art_renderer()
@@ -298,12 +301,23 @@ class AdaptiveDJTUI:
             urwid.BoxAdapter(console_lb, CONSOLE_ROWS), title="System Console"
         )
 
-        # ── Queue panel ── (navigable with ↑↓, press Enter to play)
+        # ── Up Next panel ──
+        #
+        # This was the "Upcoming Queue", listing ten tracks — which it drew from
+        # `mpc playlist`, so with consume off it was actually showing the tracks
+        # already *played*, numbered as if they were the future (audit H2).  At
+        # depth 1 there is exactly one upcoming track and nothing to navigate, so
+        # the list, the ↑↓ bindings and the ENTER-to-play action are all gone.
+        #
+        # Stage 3 (H1c) replaces this panel with the session history — what
+        # actually happened, with ♥ / ⏭ / ✓ marks — which is the visibility the
+        # queue panel was really standing in for.  The geometry is deliberately
+        # left exactly as it was: the album art is still pinned to hand-counted
+        # row constants (H8), and moving the layout before that is fixed would
+        # misplace the image.
         self.queue_walker = urwid.SimpleFocusListWalker([])
         self.queue_listbox = urwid.ListBox(self.queue_walker)
-        self.queue_box = urwid.LineBox(
-            self.queue_listbox, title="Upcoming Queue  [↑↓ navigate · ENTER play]"
-        )
+        self.queue_box = urwid.LineBox(self.queue_listbox, title="Up Next")
 
         # ── Main layout ──
         # now_playing_box: weight 0 means it takes only its natural (pack) height.
@@ -323,16 +337,16 @@ class AdaptiveDJTUI:
         )
 
         # ── Footer ──
+        # [V] is gone (audit D8/H9) and so are the queue-navigation keys, which
+        # had nothing left to navigate.  A footer that advertises a key doing
+        # nothing is the same dishonesty the rest of this rewrite removes.
         footer_text = urwid.Text(
             [
                 "Toggle Pause - [SPACE]  ",
                 "Skip Song - [N]  ",
-                "Skip Playlist - [V]  ",
                 "Like Song - [L]  ",
                 "Vol - [<,>]  ",
                 "Seek - [←,→]  ",
-                "Scroll Queue - [↑,↓]  ",
-                "Play - [ENTER]  ",
                 "Model Info - [I]  ",
                 "Quit - [Q]",
             ],
@@ -359,7 +373,32 @@ class AdaptiveDJTUI:
         # would cause a visible blank frame).
         signal.signal(signal.SIGWINCH, self._on_sigwinch)
 
+        # A self-pipe the loop watches, so a signal arriving in the middle of
+        # `loop.run()` can end it (audit H3).  `os.write` is async-signal-safe;
+        # raising ExitMainLoop from a signal handler is not, because urwid may
+        # be anywhere inside its own event processing when it fires.
+        self._exit_pipe = self.loop.watch_pipe(self._on_exit_requested)
+
         self.loop.set_alarm_in(0.5, self._periodic_update)
+
+    def request_exit(self):
+        """
+        Ask the TUI to shut down.  Safe to call from a signal handler.
+
+        Without this the SIGTERM path set a flag the urwid loop never read, so
+        the UI stayed on screen with no MPD polling behind it and `_shutdown()`
+        — and therefore every save, and the MPD mode restore — was unreachable.
+        """
+        self.running = False
+        if self._exit_pipe is not None:
+            try:
+                os.write(self._exit_pipe, b"x")
+            except OSError:
+                pass
+
+    def _on_exit_requested(self, _data):
+        """Runs inside the main loop, so raising ExitMainLoop here is safe."""
+        raise urwid.ExitMainLoop()
 
     # ── Input handling ────────────────────────────────────────────────────────
 
@@ -373,18 +412,10 @@ class AdaptiveDJTUI:
             self._toggle_play_pause()
         elif key_lower == "n":
             self._skip_track()
-        elif key_lower == "v":
-            self._skip_vibe()
         elif key_lower == "l":
             self._like_track()
         elif key_lower == "i":
             self._show_model_info()
-        elif key == "up":
-            self._queue_navigate(-1)
-        elif key == "down":
-            self._queue_navigate(+1)
-        elif key == "enter":
-            self._queue_play_selected()
         elif key == "right":
             self._seek_forward()
         elif key == "left":
@@ -404,20 +435,13 @@ class AdaptiveDJTUI:
             self.dj.mpd_controller.play()
 
     def _skip_track(self):
-        t = self.current_status.get("track_file")
-        if t:
-            self.dj.feedback_handler.process_skip(t)
-        # Mark skip time so background loop does not also fire process_full_listen
-        self.dj._last_skip_time = time.time()
-        self.dj.mpd_controller.next_track()
-
-    def _skip_vibe(self):
-        t = self.current_status.get("track_file")
-        if t:
-            self.dj.feedback_handler.process_vibe_skip(t)
-        # Mark skip time so background loop does not also fire process_full_listen
-        self.dj._last_skip_time = time.time()
-        self.dj.mpd_controller.next_track()
+        """
+        [N].  The orchestrator owns the whole skip — feedback, lookahead
+        replacement and the single advance — because the *order* of those three
+        is what keeps the session alive (audit C4), and that ordering should not
+        be something a key handler can get wrong.
+        """
+        self.dj.skip_current_track()
 
     def _like_track(self):
         t = self.current_status.get("track_file")
@@ -437,35 +461,11 @@ class AdaptiveDJTUI:
     def _seek_backward(self, delta: int = 10):
         self.dj.mpd_controller.seek_relative(-delta)
 
-    def _queue_navigate(self, direction: int):
-        """Move queue focus up (-1) or down (+1)."""
-        queue = self.dj.queue_manager.get_upcoming_tracks()
-        if not queue:
-            return
-        # Exclude the currently playing track from selectable items
-        current = self.current_status.get("track_file")
-        selectable = [t for t in queue if t != current]
-        if not selectable:
-            return
-        self.queue_focus_index = max(
-            0, min(len(selectable) - 1, self.queue_focus_index + direction)
-        )
-        self._update_queue_display()
-
-    def _queue_play_selected(self):
-        """Play the highlighted queue item immediately."""
-        queue = self.dj.queue_manager.get_upcoming_tracks()
-        current = self.current_status.get("track_file")
-        selectable = [t for t in queue if t != current]
-        if not selectable or self.queue_focus_index >= len(selectable):
-            return
-        target_track = selectable[self.queue_focus_index]
-        # Mark skip time so background loop does not also fire process_full_listen
-        self.dj._last_skip_time = time.time()
-        # Tell MPD to skip to that track in the playlist
-        self.dj.mpd_controller.play_track(target_track)
-        # Reset focus
-        self.queue_focus_index = 0
+    # NOTE: _queue_navigate() and _queue_play_selected() are gone with the queue
+    # panel (audit D1/H2).  They indexed into `mpc playlist`, which with consume
+    # off is the session's *history*, so ENTER on "1." replayed the first track
+    # of the evening.  Stage 3 rebinds ↑↓ and ENTER to the session-history panel
+    # — deriving the indices from scratch rather than porting these.
 
     def _quit(self):
         self.running = False
@@ -489,20 +489,43 @@ class AdaptiveDJTUI:
         taste = self.dj.user_taste.get_stats()
         exploration = self.dj.exploration_controller.get_stats()
         selector = self.dj.track_selector.get_stats()
-        weights = self.dj.exploration_controller.get_weights()
+        weights = self.dj.exploration_controller.get_weights(
+            taste_updates=taste['total_updates'])
+
+        # τ is the effective number of candidates the sampler is choosing among.
+        # Reporting it is the point of picking a rank-based rule: it is a true
+        # statement about what the machine is doing, derived rather than named.
+        tau = self.dj.track_selector.temperature(exploration['exploration'])
+        ramp = self.dj.exploration_controller.taste_ramp(taste['total_updates'])
+
+        schedule = config.skip_turnover_schedule
+        run = exploration['consecutive_skips']
+        next_target = schedule[min(run + 1, len(schedule)) - 1]
 
         lines = [
             "MODEL STATE",
             "",
-            f"Library            {self.dj.track_library.get_track_count()} tracks",
-            f"Session started    {'yes' if session['session_started'] else 'no'}",
+            f"Library             {self.dj.track_library.get_track_count()} tracks",
+            f"Session started     {'yes' if session['session_started'] else 'no'}",
+            f"Session vector      "
+            + ("seeded" if session['is_seeded'] else "unseeded (nothing has played yet)"),
             f"Tracks this session {session['tracks_played']}",
             f"Unique tracks seen  {selector['unique_tracks_played']}",
+            "",
+            "─" * 50,
+            "SELECTION",
+            f"  sampling         rank-Boltzmann, choosing from ~top {tau:.0f}",
+            f"  τ                {tau:.1f}   (bounds {config.tau_min:.0f}–{config.tau_max:.0f})",
+            f"  last pick        "
+            + (f"rank {selector['last_rank']} of {selector['last_pool_size']} scored"
+               if selector['last_rank'] is not None else "— (uniform draw: no evidence yet)"),
             "",
             "─" * 50,
             "TASTE MODEL",
             f"  seeded           {'yes' if taste['is_seeded'] else 'no (no positive signal yet)'}",
             f"  updates          {taste['total_updates']}",
+            f"  β earned         {ramp:.0%}   (full weight after "
+            f"{config.taste_ramp_updates} updates)",
             f"  likes            {taste['like_count']}",
             f"  full listens     {taste['full_listen_count']}",
             f"  skips            {taste['skip_count']}",
@@ -511,8 +534,9 @@ class AdaptiveDJTUI:
             "EXPLORATION",
             f"  value            {exploration['exploration']:.2f}"
             f"   (bounds {config.exploration_min:.2f}–{config.exploration_max:.2f})",
-            f"  consecutive skips   {exploration['consecutive_skips']}",
+            f"  consecutive skips   {run}",
             f"  consecutive listens {exploration['consecutive_listens']}",
+            f"  next skip targets   {next_target:.0%} of the candidate pool",
             "",
             "─" * 50,
             "CURRENT SCORING WEIGHTS",
@@ -528,13 +552,23 @@ class AdaptiveDJTUI:
             overlay_text = urwid.Text("\n".join(lines))
             overlay_fill = urwid.Filler(overlay_text, valign="top")
             overlay_box = urwid.LineBox(overlay_fill, title="Model Info")
+
+            # Size the box to its contents rather than to a fixed 70% of the
+            # screen.  At the old fixed height the last third of this overlay was
+            # silently cut off once Stage 2 added the sampling and skip rows —
+            # an inspector that hides what it is inspecting is worse than none.
+            # Stage 3 adds the descriptor rows (H1d) and will need this to scroll
+            # rather than merely fit.
+            _, screen_rows = self.loop.screen.get_cols_rows()
+            box_rows = min(len(lines) + 2, max(6, screen_rows - 2))
+
             overlay = urwid.Overlay(
                 overlay_box,
                 self.frame,
                 align="center",
                 width=("relative", 70),
                 valign="middle",
-                height=("relative", 70),
+                height=box_rows,
             )
             orig = self.loop.widget
             self.loop.widget = overlay
@@ -701,48 +735,38 @@ class AdaptiveDJTUI:
     # ── Queue update ──────────────────────────────────────────────────────────
 
     def _update_queue_display(self):
-        queue = self.dj.queue_manager.get_upcoming_tracks()
-        current_track = self.current_status.get("track_file")
+        """
+        One line: the single track queued ahead of the current one.
 
+        There is nothing else truthful to show here.  The queue is one deep by
+        design (audit D1) so that a skip, a like or a full listen changes what
+        plays *next* rather than in ten songs' time; the panel's old job — giving
+        the listener a picture of where the session is going — passes to the
+        descriptor readout and the session history in Stage 3.
+        """
         self.queue_walker.clear()
 
-        if not queue:
-            self.queue_walker.append(urwid.Text("  Queue empty"))
-            return
+        next_track = self._next_track_label()
+        if next_track is None:
+            self.queue_walker.append(
+                urwid.AttrMap(urwid.Text("  — nothing queued yet —"), "queue_item"))
+        else:
+            self.queue_walker.append(
+                urwid.AttrMap(urwid.Text(f"  ↓ next:  {next_track}"), "queue_item"))
 
-        playlist_meta = self.dj.mpd_controller.get_playlist_metadata()
+    def _next_track_label(self) -> Optional[str]:
+        """`artist – album – title` for the lookahead, or None if there is none."""
+        current = self.current_status.get("track_file")
+        track = self.dj.queue_manager.get_next_track(current_track=current)
+        if not track:
+            return None
 
-        # Build selectable (non-current) index for focus tracking
-        selectable_idx = 0
-        display_num = 0
-        for tf in queue:
-            meta = playlist_meta.get(tf, {})
-            artist = meta.get("artist", "Unknown Artist")
-            album = meta.get("album", "Unknown Album")
-            title = meta.get("title", Path(tf).stem)
-            label = f"{artist} – {album} – {title}"
-            if tf in self.liked_tracks:
-                label = f"❤ {label}"
-
-            if tf == current_track:
-                item = urwid.AttrMap(urwid.Text(f"  ▶ {label}"), "queue_current")
-            else:
-                display_num += 1
-                is_focused = selectable_idx == self.queue_focus_index
-                if is_focused:
-                    prefix = f"  » {display_num}."
-                    attr = "queue_focused"
-                else:
-                    prefix = f"  {display_num}."
-                    attr = "queue_item"
-                item = urwid.AttrMap(urwid.Text(f"{prefix} {label}"), attr)
-                selectable_idx += 1
-            self.queue_walker.append(item)
-
-        # Clamp focus index in case queue shrank
-        max_idx = max(0, display_num - 1)
-        if self.queue_focus_index > max_idx:
-            self.queue_focus_index = max_idx
+        meta = self.dj.mpd_controller.get_playlist_metadata().get(track, {})
+        artist = meta.get("artist", "Unknown Artist")
+        album = meta.get("album", "Unknown Album")
+        title = meta.get("title", Path(track).stem)
+        label = f"{artist} – {album} – {title}"
+        return f"❤ {label}" if track in self.liked_tracks else label
 
     # ── Simple (non-urwid) display ────────────────────────────────────────────
 
@@ -773,13 +797,11 @@ class AdaptiveDJTUI:
         print(f"\nSession: {self._session_line()}")
 
         print("\n" + "─" * 60)
-        print("Upcoming Queue:")
-        for i, track in enumerate(self.dj.queue_manager.get_upcoming_tracks()[:5], 1):
-            liked = "❤ " if track in self.liked_tracks else ""
-            print(f"  {i}. {liked}{Path(track).stem}")
+        next_track = self._next_track_label()
+        print(f"↓ next:  {next_track}" if next_track else "↓ next:  —")
 
         print("\n" + "=" * 60)
-        print("SPACE=Play/Pause  N=Next  V=Vibe  L=Like  ↑↓=Vol  ←→=Seek  Q=Quit")
+        print("SPACE=Play/Pause  N=Next  L=Like  ↑↓=Vol  ←→=Seek  Q=Quit")
         print("=" * 60)
         sys.stdout.flush()
 
@@ -846,8 +868,6 @@ class AdaptiveDJTUI:
                         self._toggle_play_pause()
                     elif key.lower() == "n":
                         self._skip_track()
-                    elif key.lower() == "v":
-                        self._skip_vibe()
                     elif key.lower() == "l":
                         self._like_track()
                     elif key == "\x1b[A":

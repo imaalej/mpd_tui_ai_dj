@@ -11,7 +11,7 @@ decisions taken since the first audit, and where to pick the work back up.
 | **Environment tested** | Fedora (Linux 7.1.3), Python 3.14.6, numpy 1.26.4, transformers 5.1.0, torch 2.10.0+cu128, urwid 3.0.5, MPD/MPC present, ueberzugpp present, RTX 3070. Library: 692 MPD entries, 674 embedded (was 616 at audit time). |
 | **Audit date** | 22 July 2026 |
 | **Revision date** | 22 July 2026 — design decisions folded in, see §0 |
-| **Progress** | **Stages 0 and 1 complete** (Stage 1: 23 July 2026). Stages 2–4 outstanding. See §0b for what landed and where it deviated from the plan. |
+| **Progress** | **Stages 0, 1 and 2 complete** (Stage 2: 23 July 2026). Stages 3–4 outstanding. See §0b for what landed and where it deviated from the plan. |
 
 ---
 
@@ -32,7 +32,11 @@ conversation in context.
 - **§8** is the ordered plan. Each stage has a definition of done. **Each stage leaves the
   application runnable** — there is no point in the sequence where it is half-migrated and broken.
 - **§9** lists what is still undecided.
-- **§10** is the evidence appendix — raw measurements behind every empirical claim.
+- **§10 / §10b / §10c** are the evidence appendix, one per stage that measured anything, **newest
+  wins where they overlap**. §10 is the pre-Stage-1 library and is provenance only. §10b is the
+  embeddings, the centring and the descriptor bank. **§10c is the live record for anything about
+  skips, selection or the manifold** — it re-took §10b's two "Re-measured for Stage 2" tables by
+  driving the shipped code, and four of their figures did not reproduce.
 
 Where this document and the code disagree, the document describes the target. **Line references
 throughout §2–§5 are to `HEAD 8dc4275`, the pre-Stage-0 tree**, and are now stale for every file
@@ -69,14 +73,23 @@ distribution, or delete them.
 None of this is architectural. The reason it survived is that the test suite reports 66 passing checks
 while roughly half of them are hardcoded `True` literals.
 
-**Where it stands now.** Stages 0 and 1 are done. The ground is cleared, the invented vocabulary is
-gone, and the vector space underneath everything is now trustworthy: 674 tracks embedded from full
-coverage rather than a random ten-second crop, bit-reproducible, centred so that "similar" and
-"unrelated" are finally different numbers, and named by a 49-word CLAP descriptor bank measured
-against this library's own distribution. C3, C5, M3, M4, M5, M8 and the data half of H1 are closed.
+**Where it stands now.** Stages 0, 1 and 2 are done, and **the application does what the README
+describes.** The ground is cleared, the invented vocabulary is gone, the vector space underneath
+everything is trustworthy — 674 tracks embedded from full coverage, bit-reproducible, centred, named
+by a 49-word CLAP descriptor bank — and the player now plays.
 
-What remains is the part that makes it *play*: C1, C2, C4, H3, H6 and H9 are Stage 2, and until they
-land the queue is still ten deep, still never refills, and selection is still a strict argmax.
+Stage 2 closed every critical finding. The queue is one deep and refills as each track ends; MPD's
+modes are forced, logged and restored on every exit path including SIGTERM; selection draws by
+Boltzmann sampling over rank rather than taking the argmax; `[V]` is deleted and `[N]` escalates on
+consecutive presses by a magnitude *solved* for an observable pool-turnover target. Verified against
+the live MPD: a 30-track unattended run with no stall, no repeat inside the replay gap, and a queue
+depth of exactly 2 in all 30 samples; four consecutive skips reporting 5% → 20% → 70% → 100% turnover
+and moving from Björk to Watain; the user's playback modes restored byte-identically after a
+`kill -TERM`.
+
+What remains is presentation. **Stage 3 is display only** — the descriptor readout, the session
+history panel, and the album-art geometry that must be derived from the widget tree before the layout
+moves (H8). The data every one of those reads was built in Stage 1 and has been sitting unused.
 
 ---
 
@@ -411,32 +424,172 @@ reference values without touching the specification.
 
 ---
 
+### Stage 2 — complete, 23 July 2026
+
+Net effect: **one new module** (`manifold.py`, 190 lines of pure numpy), `queue_manager.py` cut from
+169 lines to 180 of which almost none are the old ones, and **+131 tests** (179 → 310, all green).
+The application plays continuously for the first time.
+
+| Plan item | Landed as |
+|---|---|
+| **M1b** | `FakeMPD` in `tests/conftest.py`, built to the semantics table in M1 — which was **re-verified against the live MPD** (0.24.0 / mpc 0.35) rather than taken from the audit's prose. All seven original rows reproduced; four more were measured and three of them were new (below). `tests/test_fake_mpd.py` asserts the double row by row, so the harness is itself under test, and it caught a real fixture bug: a `FakeMPD` defaulting to `consume off` silently put every component under test back in the world C1 lived in. |
+| **C2** | `MPDController.get_modes()` / `set_mode()`; modes carried as **raw strings** because `single` is off/on/`oneshot` and restoring a user's `oneshot` as `off` would be a silent change of their setting. `start_session()` forces `random`/`repeat`/`single` off and `consume` on, logs each change (`random on → off, consume off → on`) and says they will be restored. |
+| **H3** | The signal handler now sets both flags, restores the MPD modes directly, and unblocks urwid through a **self-pipe** (`loop.watch_pipe`) rather than raising `ExitMainLoop` from a signal context. Plus an `atexit` hook for the mode restore specifically, a lock-and-flag so running it three times is harmless, and `_maybe_checkpoint()` writing state every `config.checkpoint_every_n_tracks` full listens. |
+| **C1 / D1** | `config.queue_lookahead = 1`. `QueueManager` is now `ensure_one_ahead()` / `replace_next()` / `get_next_track()`. Deleted: `planned_queue`, `currently_queued_in_mpd`, `_sync_to_mpd`, `_generate_tracks`, `get_upcoming_tracks`, `recalculate`, `initialize_queue`, `on_track_started`, the 5% trajectory blend, `queue_buffer_size` and `queue_low_threshold`. |
+| **H6** | `p(i) ∝ exp(−i/τ)` over rank, τ linear in the exploration scalar and floored at `tau_min`. The map reproduces H6's own published table exactly — p(rank 0) of 63% / 12% / 6% at exploration 0.1 / 0.4 / 0.7 — and a test recomputes those from the shipped code. Below `minimum_sampled_pool` candidates it falls back to a uniform draw. The generator is injectable, so sampling did not cost testability. |
+| **C4** | One skip path, on the orchestrator: `skip_current_track()` — feedback, `replace_next()`, then exactly one `next_track()`. No `play()` anywhere in it. `tests/test_skip_path.py` drives **the real method** and asserts the ordering against the call log, not against the end state. |
+| **H9 / D8** | `[V]`, `force_shift()`, `process_vibe_skip()`, `set_high_exploration()` and `vibe_shift_magnitude` deleted. `[N]` repels from the skip-run centroid by a λ solved for the turnover schedule (5/20/50/85%), snapping back onto the manifold from the second consecutive press. The console reports what each press *measured*, not what it targeted. |
+| **H4-repl** | Falls out of D1: `replace_next()` drops the lookahead and re-picks under the post-skip vector, so a skip is audible on the very next song. |
+| **L7** | β ramps from 0 over the first 20 taste updates, with the unearned weight going to the session term. `SessionState` starts at **zero** rather than `randn`, seeds from the first track that plays, and `get_candidate_pool` now guards *both* halves — so a fresh session draws its first track uniformly at random, which is the honest answer to "no information". |
+| **M6b** | `TrackSelector.save()` / `load()` → `data/state/play_history.json`, wired into `Persistence` and the periodic checkpoint. `recent_history` is persisted alongside the two the finding names, because it is the half that does the actual excluding. |
+
+**Verification.** 310 pytest tests pass. The application was then driven end to end against the live
+MPD in a pty, with the user's queue, modes and volume snapshotted before and restored after. Against
+the stage's own definition of done:
+
+| Criterion | Result |
+|---|---|
+| 30+ tracks, no stall | **36 distinct tracks, 0 stalls** |
+| no repeat inside the replay gap | **0 violations** |
+| queue holds one ahead | **depth 2 in 30 of 30 mid-track samples** |
+| one `[N]` changes the next track | yes — the queued lookahead was dropped and replaced |
+| four consecutive `[N]` exceed 80% turnover | **5% → 20% → 70% → 100%**, each meeting its target |
+| …and audibly change the *kind* of music | Björk / Arcane OST → Watain |
+| `mpc status` after `kill -TERM` | modes restored byte-identically |
+
+### Four things the Stage 2 plan did not anticipate
+
+**1 · Three of MPD's semantics were not what the audit recorded, and one of them mattered.**
+Re-running M1's table against the live server reproduced all seven published rows and turned up four
+more:
+
+- **`mpc next` while paused consumes the track *and resumes playback*.** The audit assumed it stayed
+  paused, and C4's fix direction was written around that ("if MPD is paused, step 3 is skipped").
+  Following that would have meant a skip while paused replayed the very track the user rejected.
+  The shipped path advances and then re-pauses — which is safe because **`mpc pause` is idempotent
+  rather than a toggle**, itself verified.
+- **`mpc next` on a stopped player is an error** (`MPD error: Not playing`) that changes nothing, so
+  the skip path guards on state rather than discovering this at runtime.
+- **`mpc del N` past the end of the queue exits non-zero.** `replace_next()` relies on that when the
+  queue holds only the current track.
+
+**2 · Solving λ and *then* snapping does not deliver the schedule — and only a live run showed it.**
+H9 specifies "solve for the turnover target, then `snap()` for n ≥ 2". Built that way, the offline
+medians looked right (5.5% → 15.7% → 53.2% → 99.3% over 60 simulated runs). The first live session
+printed:
+
+```
+Skip #1: λ=0.60, 5% of what you would have heard is now different (target 5%)
+Skip #2: λ=0.80 + snap, 1% of what you would have heard is now different (target 20%)
+```
+
+The second press **undid the first**. `snap()` relocates to the centroid of the 25 nearest tracks,
+and after a modest λ those 25 are largely the neighbourhood the vector started in, so the result
+lands back where the run began. The median hid a bad tail.
+
+The fix applies the plan's own principle one level more consistently: **the target is stated on the
+vector that actually selects**, so the snap belongs *inside* the objective rather than applied to its
+result. `solve_repulsion(..., snap_result=True)` snaps every candidate on the λ grid before measuring
+its turnover — two matrix products instead of one, still microseconds. Measured after the change,
+over 40 simulated runs of five presses: **0 of 160 presses moved backwards**, against a schedule
+every press meets. The live session now reads 5% → 20% → 70% → 100%.
+
+**3 · The reason to gate `snap()` at n ≥ 2 is stronger than the audit's, and the audit's is also
+true.** §10b justified the gate by overshoot at the 5% target. That holds — post-snap turnover has a
+floor around 8%. But the load-bearing argument is the other direction: an **unguarded** repulsion
+solved for the 85% target lands below the 1st percentile of the library's own on-manifold quality
+**100% of the time** (and at the 50% target, 87% of the time), while a single skip's λ never does.
+Gating at n ≥ 3 instead leaves press 2 at quality 0.42 — worse than the deleted `[V]`'s 0.56.
+
+**4 · "Is this vector still music?" has no fixed threshold, only the library's own distribution.**
+The first attempt asserted snapped vectors stayed above ~95% of a typical real track's on-manifold
+quality, and it failed — because real tracks themselves span **0.43 to 0.96** on this library. A track
+in a sparse corner legitimately scores low, and so does a legitimate centroid near it. The assertion
+that means something is *no worse than the least typical real track*: snapped vectors never fall below
+the library's 1st percentile, and unguarded ones at the escalated targets always do. This is D4's rule
+applied to a test rather than to a feature.
+
+### Stage 2 — deviations from the plan's letter
+
+- **The "negative updates are a no-op while unseeded" guard was kept, not retired.** §8 and §9 both
+  say to retire it once the β ramp lands, on the grounds that the ramp makes it redundant. It does
+  not. From zero, one skip normalises to `−track` at unit length; β would damp that in the *score*,
+  but **β never gates retrieval**, and `get_candidate_pool` opens its taste half on
+  `np.any(taste_vector)`. So retiring the guard would hand half the candidate pool, at full strength,
+  to "the tracks least like the one song you rejected" — reintroducing in retrieval exactly the defect
+  Stage 0 removed from scoring. The plan's own reasoning ("β gates the score, not the pool") is the
+  argument for keeping it.
+- **`get_random_track()` no longer draws from numpy's global RNG.** It is the "no evidence yet" path
+  (L7), so it decides the first track of every session; leaving it on the global state made that
+  untestable for reasons unrelated to selection. It takes an optional generator, and the selector
+  passes its own.
+- **`TrackSelector.forget_selection()` is new, and was not in the plan.** A selection is normally a
+  play at depth 1, but two paths break that: a skip drops the lookahead and re-picks it, and MPD can
+  refuse an `add`. Left recorded, those tracks would sit inside the 20-track replay gap having never
+  been heard, and the `[I]` inspector's "tracks played" would claim more music than the session
+  played.
+- **The queue panel became a one-line "Up Next" rather than going blank.** `get_upcoming_tracks()` is
+  deleted as the plan says, and with it the ↑↓/ENTER bindings and their footer entries — they indexed
+  into `mpc playlist`, which with consume off is the session's *history*, so ENTER on "1." replayed
+  the first track of the evening. The panel's geometry is deliberately untouched: the album art is
+  still pinned to hand-counted row constants, and H8 must land before the layout moves.
+- **`[I]` gained the sampling and skip rows now rather than in Stage 3.** Stage 2 ships a sampler and
+  an escalation schedule; an inspector that could not show either would be advertising less than the
+  machine does. Everything added is measured — τ, the drawn rank, β earned, the next skip's target.
+  Doing so overflowed the overlay's fixed 70% height, so it is now sized to its content; **Stage 3's
+  descriptor rows (H1d) will need it to scroll rather than merely fit.**
+- **`MPDController.next_track()` now checks its return code.** It returned `True` unconditionally,
+  which is the H7 pattern; the stopped-player error made it observable.
+- **`FeedbackHandler` no longer takes a `queue_manager`.** Once the skip path moved to the
+  orchestrator it stopped using it, and carrying the reference would have left the door open to
+  re-splitting the ordering across two objects — which is the shape of C4. The class now updates the
+  models and records history; it does not touch MPD or the queue, and a comment in its constructor
+  says why the parameter is absent.
+- **README and `start.sh` surgery, not the M7 rewrite.** Only what Stage 2 falsified: the `[V]` row
+  and its two prose paragraphs, the queue-navigation bindings, "the queue is kept at 10 tracks",
+  "picks the best", `vibe_shift_magnitude`, and the screenshot's queue panel. New: the skip-escalation
+  table and the rank-sampling paragraph. The rest of M7 — the three contradictory download sizes, the
+  untested macOS claim — is still Stage 4.
+
+### What Stage 2 did **not** do
+
+Nothing in the descriptor display changed. `descriptor_bank` still loads at startup and is still
+unused; the vibe line still shows a track count; the session-history panel does not exist; album-art
+geometry is still hand-counted constants (H8). Those are Stage 3. `[L]` is still not a toggle and
+`liked_tracks` still does not rehydrate from `feedback_history.json` (L4).
+
+---
+
 ## 1 · How the system actually works
 
-*Read this first if you are picking the project up cold. This section describes the system **as it will
-be after the revision**; where it differs from `HEAD 8dc4275`, the current behaviour is noted in
-brackets.*
+*Read this first if you are picking the project up cold. **As of Stage 2 this describes the system as
+it is**, not as it is planned to be — the bracketed "currently…" notes that used to qualify each step
+are gone because the behaviour they described is gone. The only part of this section still ahead of
+the code is the descriptor readout, which is Stage 3.*
 
 Everything is driven by 512-dimensional CLAP audio embeddings, one per track, stored L2-normalised
 in `data/embeddings/track_embeddings.npz`. All similarity is a dot product **on centred vectors**
 (C5). No genre tags or metadata enter the selection logic.
 
 ```
-start.sh  ──▶ main_tui.py (AdaptiveDJWithTUI)      [ main.py = stale headless twin — deleting ]
-                   │
+start.sh  ──▶ main_tui.py (AdaptiveDJWithTUI)
+                   │        owns: MPD mode force/restore, signal handling,
+                   │               the one skip path, periodic checkpoint
    ┌───────────────┼────────────────────────────────┐
    ▼               ▼                                ▼
 tui.py         background thread                mpd_controller.py
-(urwid loop,   (polls MPD 2×/sec,                (every op = an `mpc`
- 0.5s redraw)   detects track change,             subprocess; 8 methods
-   │            fires full-listen)                 are defined twice)
+(urwid loop,   (polls MPD 2×/sec, detects        (every op = an `mpc`
+ 0.5s redraw)   track change, fires               subprocess)
+   │            full-listen, refills, seeds
+   │            the session vector)
    │               │
    ▼               ▼
 feedback_handler.py ──┬──▶ session_state.py   short-term vibe vector
+                      │        └──▶ manifold.py   turnover · solved λ · snap
                       ├──▶ user_taste.py      long-term taste vector → data/state/*.npz
-                      ├──▶ exploration_controller.py   scalar 0.1–0.7 → scoring weights
+                      ├──▶ exploration_controller.py   scalar 0.1–0.7 → weights + τ
                       └──▶ queue_manager.py ──▶ track_selector.py ──▶ track_library.py
-                                                 (softmax-sampled over ~100 candidates)
+                             (one ahead)          (rank-Boltzmann over ~100 candidates)
 ```
 
 ### The selection loop, precisely
@@ -444,32 +597,34 @@ feedback_handler.py ──┬──▶ session_state.py   short-term vibe vector
 1. `TrackLibrary.get_candidate_pool()` takes the top ~150 tracks nearest the session vector and the
    top ~150 nearest the taste vector, interleaves them, and truncates to 100.
 2. `TrackSelector._calculate_score()` scores each candidate as
-   `α·session_sim + β·taste_sim + γ·novelty + δ·anti_repetition`.
-   *[Currently also adds `0.15·time_sim` — removed per D6, restoring the weight-sum-to-1.0 invariant.]*
+   `α·session_sim + β·taste_sim + γ·novelty + δ·anti_repetition`. Those four are the whole score.
 3. The weights come from `ExplorationController.get_weights()`, which shifts mass from session/taste
    into novelty as the exploration scalar rises. β is additionally ramped from 0 as taste updates
-   accumulate (L7).
+   accumulate, and the unearned share goes to the session term (L7).
 4. **One track is drawn by Boltzmann sampling over rank** — `p(i) ∝ exp(−i/τ)` with τ set by the
    exploration scalar. Rank-based rather than score-based, so it needs no recalibration when the score
-   scale moves. *[Currently strict argmax — H6.]*
-5. `QueueManager` ensures exactly one track sits ahead of the current one in MPD, with `consume on`
-   so MPD pops finished tracks itself.
-   *[Currently generates ten, blends 5% of each into a working session vector, and never refills — C1.]*
+   scale moves.
+5. `QueueManager.ensure_one_ahead()` keeps exactly one track ahead of the current one, with
+   `consume on` so MPD pops finished tracks itself — making the refill condition `len(playlist) < 2`.
+
+Before anything has played, both vectors are zero and step 1 returns an empty pool, so the first
+track is drawn uniformly at random rather than from an arbitrary `argpartition` ordering (L7).
 
 ### What feeds back
 
 | Event | Trigger | Effect |
 |---|---|---|
 | **Full listen** | ≥90% of duration played | Session vector updated (the primary driver). Taste +0.02. Exploration −0.02. This is the only thing that increments `tracks_played`. |
-| **Skip `[N]`** | Keypress | Taste −0.05. Exploration +0.05. Session vector repelled from the consecutive-skip-run centroid by a magnitude **solved for a pool-turnover target that escalates with the run length** (5% → 85%), then projected back onto the manifold. Lookahead replaced, advance. *[Currently: fixed 0.15 nudge, queue not rebuilt — H4, H9.]* |
+| **Skip `[N]`** | Keypress | Taste −0.05. Exploration +0.05. Session vector repelled from the consecutive-skip-run centroid by a magnitude **solved for a pool-turnover target that escalates with the run length** (5% → 85%), projected back onto the manifold from the second consecutive press. Lookahead replaced, then exactly one advance. The measured turnover is reported to the console. |
 | ~~Vibe skip `[V]`~~ | — | **Deleted (D8/H9).** It turned over less of the candidate pool than `[N]`×5 while pointing off-manifold. Its role is covered by `[N]`'s escalation. |
 | **Like `[L]`** | Keypress | Taste +0.10. Taste file saved immediately. |
 
 ### What persists
 
-`user_taste.npz` (on every like and at exit), `exploration_state.json`, `feedback_history.json`, and
-— newly — `play_history` for anti-repetition (M6b). The session vector is intentionally ephemeral.
-State is checkpointed periodically, not only at exit (H3).
+`user_taste.npz` (on every like and at exit), `exploration_state.json`, `feedback_history.json` and
+`play_history.json` — the last carrying `play_history`, `current_index` and `recent_history`, so
+anti-repetition survives a restart (M6b). The session vector is intentionally ephemeral. All of it is
+checkpointed every `config.checkpoint_every_n_tracks` full listens, not only at exit (H3).
 
 ### Current state on disk
 
@@ -481,9 +636,9 @@ descriptors.npz        49 descriptors × 512 d, with per-descriptor mean/std    
 failed.txt             16 files, all one corrupt album, each with its exception
 ```
 
-`data/state/` is still empty of learned state — the 15-update taste model, exploration state and
-16-event feedback history were deleted in Stage 0 per D3, and nothing has replaced them because the
-player has not been run for a real session yet.
+`data/state/` now fills during a session: `user_taste.npz`, `exploration_state.json`,
+`feedback_history.json` and `play_history.json`. None of it is committed (D3, and
+`tests/test_deletions.py` fails if any of it is).
 
 ---
 
@@ -493,7 +648,22 @@ player has not been run for a real session yet.
 
 ---
 
-### C1 · The queue never refills. Playback stops dead after 10 tracks. `OPEN — fix simplified`
+### C1 · The queue never refills. Playback stops dead after 10 tracks. `DONE — Stage 2`
+
+> **Status.** `config.queue_lookahead = 1`, `consume on` forced, and `QueueManager` reduced to
+> `ensure_one_ahead()` / `replace_next()` / `get_next_track()`. The refill condition is
+> `len(mpc playlist) < 2`, which holds because consume makes MPD pop each finished track itself.
+> Everything the depth existed to support is deleted — `planned_queue`, `currently_queued_in_mpd`,
+> `_sync_to_mpd`, `_generate_tracks`, `recalculate`, `initialize_queue`, `on_track_started`, the 5%
+> trajectory blend, `queue_buffer_size` and `queue_low_threshold`.
+>
+> Live: a 30-track unattended run with **0 stalls** and a queue depth of exactly 2 in all 30
+> mid-track samples. `tests/test_queue_manager.py` drives the real manager against `FakeMPD` and
+> plays 40 tracks through, so C1's own scenario is now a regression test. One case the original code
+> only pretended to handle is now real and tested: if the queue does run dry and MPD stops, adding
+> alone will not restart it, so the refill explicitly plays — but only when the queue was empty on
+> entry and playback had already begun, which is what keeps it clear of C4's skip path.
+
 
 **What.** `QueueManager.check_and_refill()` decides whether to top up the queue by comparing
 `len(mpd_controller.get_queue())` against `queue_low_threshold` (3). But `get_queue()` runs
@@ -528,7 +698,17 @@ roughly ten tracks.
 
 ---
 
-### C2 · MPD's random mode silently discards every ordering decision the DJ makes. `OPEN — scope expanded`
+### C2 · MPD's random mode silently discards every ordering decision the DJ makes. `DONE — Stage 2`
+
+> **Status.** `start_session()` reads the modes, forces `random`/`repeat`/`single` off and `consume`
+> on, and logs exactly what it changed (`random on → off, consume off → on`) with a note that they
+> are restored on exit. The restore is wired into `_shutdown()`, the signal handler **and** an
+> `atexit` hook, guarded by a lock and a flag so running three times is harmless.
+>
+> Modes are carried as raw strings, not booleans: `single` is `off`/`on`/`oneshot` in modern MPD, and
+> restoring a user's `oneshot` as `off` would be a silent change of their setting. Verified live —
+> after `kill -TERM` the machine's original `random on / consume off` was back byte-identically.
+
 
 **What.** The application never asserts MPD's playback modes. If `random` is on, MPD picks an
 arbitrary queue entry on auto-advance and on `mpc next` — so the ordering `QueueManager` computes is
@@ -659,13 +839,20 @@ Built: all 16 failures are one album of corrupt FLACs — the same 16 the origin
 
 ---
 
-### C4 · Pressing `[V]` always throws away the first track of the new vibe. `DISSOLVED by D8 — constraint retained`
+### C4 · Pressing `[V]` always throws away the first track of the new vibe. `DISSOLVED by D8 — constraint enforced and tested in Stage 2`
 
-> **Status.** `[V]`, `_skip_vibe()`, `process_vibe_skip()` and `recalculate()` are all deleted (D8/H9),
-> so this code path ceases to exist. The finding is retained because the *constraint* it establishes
-> governs the replacement skip path, and because the reasoning below corrects a fix the original audit
-> got wrong. **The constraint: exactly one advance per keypress, and no `play()` call anywhere in a
-> skip path.** Verify it against the new unified `[N]` in Stage 2.
+> **Status.** `DISSOLVED — constraint now enforced and tested (Stage 2).` `[V]`, `_skip_vibe()`,
+> `process_vibe_skip()` and `recalculate()` are all deleted (D8/H9), so this code path no longer
+> exists. The constraint it established governs the replacement skip path and is asserted directly:
+> `tests/test_skip_path.py` drives the real `AdaptiveDJWithTUI.skip_current_track` and checks the
+> **call log** — exactly one `next`, no `play` anywhere, and every `add` before the advance.
+>
+> **One correction from the live MPD.** The fix direction below says the paused case "resolves
+> itself" because a paused player would not advance. It does: `mpc next` while paused consumes the
+> track *and resumes playback*. Skipping the advance would therefore have replayed the very track
+> being rejected. The shipped path advances and then re-pauses, which is safe because `mpc pause` is
+> idempotent rather than a toggle — both verified. A stopped player is guarded instead, since
+> `mpc next` there is an error that changes nothing.
 
 **What.** A double-advance. `TUI._skip_vibe()` calls `process_vibe_skip()`, which calls
 `QueueManager.recalculate()`. That method clears the MPD queue, generates fresh tracks, syncs them,
@@ -790,6 +977,15 @@ replacement.
 > and reports its size. The prompt template was chosen by measurement (§10), and the variance gate
 > ran and dropped nothing.
 >
+> **One thing Stage 2 changed underneath this finding.** The session vector now starts at **zero**
+> (L7), a state that did not exist when H1 was specified — and z-scoring a zero vector does not fail
+> loudly. Every `sim` is exactly 0, so `z = −mean_d / std_d`: a finite, deterministic, plausible-
+> looking readout determined entirely by the bank's own baselines. On the real bank it reads
+> `shimmering · orchestral · serene`, about nothing at all. **That is H1's original defect in a new
+> costume**, and the bank cannot defend against it — the readout must be gated on
+> `SessionState.is_seeded()`. Pinned by
+> `tests/test_descriptor_bank.py::test_z_scoring_a_zero_vector_produces_a_confident_looking_readout`.
+>
 > **What remains is display**: the vibe readout (H1b), the Session panel (H1c) and the `[I]` extension
 > (H1d) are all Stage 3. Until then the words are reachable only from the command line —
 > `python3 generate_embeddings.py --describe "Arctic Monkeys"`. The spot-check the acceptance step
@@ -902,7 +1098,7 @@ is doing. The layout changes accordingly:
 
 ---
 
-### H2 · The "Upcoming Queue" panel lists tracks that already played. `DISSOLVED by D1`
+### H2 · The "Upcoming Queue" panel lists tracks that already played. `DONE — panel removed in Stage 2`
 
 **What.** Same root cause as C1. `QueueManager.get_upcoming_tracks()` returns the whole MPD playlist,
 so the panel shows the session's history above the current track, numbered as if it were the future.
@@ -910,13 +1106,27 @@ The numbering counts from the top of the queue rather than from the current song
 plus `ENTER`-to-play index into that same list — so selecting "1." plays the first track of the
 session again.
 
-**Status.** The panel is being removed (H1, TUI consequences). `get_upcoming_tracks()` is deleted
-along with it. No fix required — but the `ENTER` misbehaviour is a reminder to re-derive the new
-history panel's indices from scratch rather than porting the old ones.
+**Status.** `DONE — Stage 2.` `get_upcoming_tracks()`, `_queue_navigate()` and
+`_queue_play_selected()` are deleted, along with the ↑↓/ENTER bindings and their footer entries. The
+panel is now a one-line `↓ next:` readout titled "Up Next"; its geometry is deliberately unchanged
+because the album art is still pinned to hand-counted row constants and **H8 must land before the
+layout moves**. Stage 3 replaces it with the session-history panel — **re-derive those indices from
+scratch rather than porting these**, which is the whole lesson of the `ENTER` misbehaviour.
 
 ---
 
-### H3 · Ctrl-C and SIGTERM neither exit nor save. `OPEN — now also affects MPD state`
+### H3 · Ctrl-C and SIGTERM neither exit nor save. `DONE — Stage 2`
+
+> **Status.** The handler sets both flags, restores the MPD modes directly — the one thing that
+> alters state outside this process, so it must happen even if urwid never yields — and unblocks the
+> main loop through a **self-pipe** (`loop.watch_pipe`) rather than raising `ExitMainLoop` from a
+> signal context, which urwid cannot receive from an arbitrary point. An `atexit` hook covers paths
+> the handler misses, including an unhandled exception. State is additionally checkpointed every
+> `config.checkpoint_every_n_tracks` full listens rather than only at exit.
+>
+> Verified live: `kill -TERM` mid-session exited cleanly, wrote all four state files, and left the
+> user's MPD exactly as it was found.
+
 
 **What.** `AdaptiveDJWithTUI._signal_handler` sets `self.running = False` and nothing else. That stops
 the background thread, but the urwid `MainLoop` is unaware of it — `_periodic_update` reschedules on
@@ -954,8 +1164,9 @@ weights, so adaptation is audible on the *very next song*. The original audit's 
 tail after N consecutive skips" — was a workaround for a problem that only existed because the queue
 was deep, and is not needed.
 
-`ExplorationController.consecutive_skips` remains tracked and is now genuinely unused. Either delete
-it or keep it purely for the `[I]` inspector; do not invent a use for it.
+`ExplorationController.consecutive_skips` turned out to have the opposite fate: H9 makes it the
+*evidence* driving the skip escalation, so it is now load-bearing rather than unused. It is also
+reported in `[I]`, alongside the turnover the next press will target.
 
 ---
 
@@ -976,7 +1187,20 @@ explanatory comment.
 
 ---
 
-### H6 · Selection is strictly greedy — "exploration" never actually explores. `OPEN — ELEVATED to blocker`
+### H6 · Selection is strictly greedy — "exploration" never actually explores. `DONE — Stage 2`
+
+> **Status.** `p(i) ∝ exp(−i/τ)` over rank, with τ mapped linearly from the exploration scalar and
+> floored at `config.tau_min`. The shipped map reproduces the table below exactly — a test recomputes
+> p(rank 0) from the code and requires 63% / 12% / 6% at exploration 0.1 / 0.4 / 0.7 — and another
+> samples 40,000 draws and compares the empirical distribution against `exp(−i/τ)`. Below
+> `config.minimum_sampled_pool` candidates it falls back to a uniform draw, per the guard below.
+>
+> The generator is injectable, so sampling did not cost reproducibility: one test asserts the same
+> seed gives the identical session, which is what makes the *different*-seeds assertion meaningful.
+>
+> **τ_max = 15 remains uncalibrated by listening.** It is the one genuinely new constant and it is
+> still a starting point, not a finding.
+
 
 **What.** `TrackSelector.select_track()` sorts the candidates and takes index 0. There is no
 epsilon-greedy step, no softmax sampling, no temperature, no tie-breaking jitter. The exploration
@@ -1112,7 +1336,21 @@ rework, not after.
 
 ---
 
-### H9 · Neither `[V]` nor `[N]` changes much of what you hear, and `[V]` aims off the manifold. `NEW — resolved by deletion`
+### H9 · Neither `[V]` nor `[N]` changes much of what you hear, and `[V]` aims off the manifold. `DONE — Stage 2`
+
+> **Status.** `[V]` and everything that served it are deleted. `[N]` repels from the skip-run
+> centroid by a λ **solved** for the turnover schedule, snapping onto the manifold from the second
+> consecutive press. Live: 5% → 20% → 70% → 100% across four presses, each meeting its target, moving
+> from Björk to Watain.
+>
+> **One correction to the design, found by running it.** The plan says "solve λ for the target, then
+> `snap()`". Built that way the offline medians looked right, but the first live session printed
+> `Skip #2: … 1% … (target 20%)` — the second press *undid* the first, because `snap()` relocates to
+> a 25-track centroid that after a modest λ is largely the neighbourhood the vector started in. The
+> snap now lives **inside** the objective (`solve_repulsion(..., snap_result=True)`), so λ is chosen
+> against the turnover of the vector that actually selects. After the change, **0 of 160 simulated
+> presses moved backwards**. Full account in §0b, item 2, and the numbers in §10c.
+
 
 **What.** `SessionState.force_shift()` blends the session vector 50% toward a **random 512-dimensional
 direction** (`session_state.py:107–127`). The stated purpose of `[V]` is a decisive change of
@@ -1254,7 +1492,7 @@ needed, which is why §7's schema does not carry them.
 
 ---
 
-### M1 · The test suite is green theatre, and it is not in the repository. `M1a DONE — M1b/M1c OPEN`
+### M1 · The test suite is green theatre, and it is not in the repository. `M1a/M1b DONE — M1c OPEN`
 
 > **Status (M1a, Stage 0).** `test_*.py` is out of `.gitignore`, the three phase-test files are
 > deleted, and `tests/` is tracked: 9 files, 67 tests, green. They cover what Stage 0 changed — the
@@ -1263,9 +1501,20 @@ needed, which is why §7's schema does not carry them.
 > pool falling back to session-only, `add_track` reporting refusals, the log tee surviving
 > `tui_active`, and every deleted symbol staying deleted.
 >
-> **Still open.** **M1b** — the `FakeMPD` modelling real semantics including consume mode, and the
-> behavioural tests for refill, skip and mode restore — is Stage 2 and has not started. **M1c** is
-> Stage 4. Nothing in the current suite exercises MPD, so "green" still means less than it will.
+> **Status (M1b, Stage 2).** `DONE.` `FakeMPD` lives in `tests/conftest.py`, built to the verified
+> table below, and `tests/test_fake_mpd.py` asserts the double against it row by row — the harness is
+> itself under test, because a double written from the assumptions that produced C1 would reproduce
+> C1 and pass. That paid immediately: a fixture defaulting to `consume off` silently put every
+> component back in C1's world, and the replay-gap test caught it.
+>
+> Behavioural suites landed for refill (`test_queue_manager.py`), the skip path
+> (`test_skip_path.py`, driving the *real* orchestrator method and asserting on the call log), mode
+> force/restore and the signal path (`test_mpd_modes.py`), rank sampling
+> (`test_selection_sampling.py`), skip escalation against the real library
+> (`test_skip_escalation.py`), the geometry (`test_manifold.py`), the β ramp (`test_taste_ramp.py`)
+> and anti-repetition persistence (`test_play_history_persistence.py`). 179 → **310 tests**.
+>
+> **Still open: M1c** (Stage 4) — broadening beyond what Stage 2 touched.
 
 **What.** `test_phase2.py` reports "Passed: 66". Roughly thirty of those are a literal list of
 hardcoded pass tuples:
@@ -1305,7 +1554,10 @@ clone has zero tests.
 
 C1 exists because nobody checked how the queue actually behaves. A `FakeMPD` built on the same
 assumptions would reproduce the bug and pass. So these were run against the live MPD (23 July 2026,
-mpc 0.35, consume on, random/repeat/single off) and are the specification:
+mpc 0.35, consume on, random/repeat/single off) and are the specification.
+
+**Re-verified in Stage 2** against MPD 0.24.0 before `FakeMPD` was written. All seven rows below
+reproduced exactly; four further behaviours were measured and are in the second table.
 
 | Behaviour | Verified result |
 |---|---|
@@ -1326,8 +1578,18 @@ The last two rows are one trap and they are worth stating as a rule, because the
 > queue. At depth 1 this is not a nicety; it is the difference between a working skip and a dead
 > session.
 
+#### Four more, measured in Stage 2 — three of them new, one contradicting the audit
+
+| Behaviour | Verified result |
+|---|---|
+| **`mpc next` while *paused* consumes and resumes *playing*** | It does **not** stay paused. C4's fix direction assumed it did, and following that would have made a paused skip replay the rejected track. The shipped path advances and re-pauses. |
+| `mpc pause` is idempotent, not a toggle | Which is what makes the re-pause above safe. |
+| `mpc next` on a stopped player | `MPD error: Not playing`; the queue is unchanged. The skip path guards on state. |
+| `mpc del N` past the end of the queue | Exits 1 (`song number does not exist`). `replace_next()` relies on this when the queue holds only the current track. |
+
 The refill condition follows directly: during playback `len(playlist)` is **2** (current + lookahead),
-so refill when it is `< 2`. That is D2's claim, and it holds.
+so refill when it is `< 2`. That is D2's claim, and it holds — measured at depth 2 in 30 of 30
+mid-track samples during a live 30-track run.
 
 ---
 
@@ -1474,15 +1736,19 @@ warning.
 
 ---
 
-### M6 · State file misnamed; anti-repetition history never persisted despite a comment claiming it is. `M6a DONE — M6b OPEN`
+### M6 · State file misnamed; anti-repetition history never persisted despite a comment claiming it is. `M6a/M6b DONE`
 
 **(a) `DONE — deleted in Stage 0 (D6).`** `config.context_file` was named `time_context.npz`, but `TimeContext.save()`
 writes JSON. Loading it as an npz raises `UnpicklingError: invalid load key, '{'` — verified against
 the live file. Resolved by deleting the time-context subsystem; delete the file and the config key
 rather than renaming.
 
-**(b) `OPEN — now user-visible.`** *(`clear_history()` and its misleading comment were deleted in
-Stage 0 per L8. The persistence half — the actual defect — is untouched and remains Stage 2 work.)*
+**(b) `DONE — Stage 2.`** *(`clear_history()` and its misleading comment were deleted in Stage 0 per
+L8.)* `TrackSelector.save()` / `load()` write `data/state/play_history.json`, wired into `Persistence`
+and the periodic checkpoint. `recent_history` is persisted alongside `play_history` and
+`current_index`, because it is the half that actually does the excluding — `play_history` only shapes
+the score. `tests/test_play_history_persistence.py` asserts the behavioural version: a track played
+just before a restart is still excluded after it.
 The method carried the comment *"Don't clear
 play_history to maintain long-term anti-repetition"* — but nothing ever saves or loads `play_history`,
 and `clear_history()` itself was never called. Both `recent_history` and `play_history` are rebuilt
@@ -1669,15 +1935,21 @@ not seconds — so this stays low priority. `main_tui.py:185–243`; `tui.py:487
 
 ---
 
-### L7 · Cold start injects a random direction at 30% weight. `PARTIALLY DONE — seed deleted in Stage 0; β ramp outstanding`
+### L7 · Cold start injects a random direction at 30% weight. `DONE — Stage 0 + Stage 2 (one guard deliberately kept)`
 
-> **Status.** `UserTaste._initialize_taste_vector()` returns zeros (Stage 0, D4). Two guards were
-> needed to make that safe before the β ramp exists — negative updates are a no-op while unseeded, and
-> the candidate pool skips its taste half while the vector is zero. See §0b, item 1, for why each is
-> required and which of them should survive Stage 2.
+> **Status.** `DONE — Stage 2.` β now ramps from 0 to its configured value over the first
+> `config.taste_ramp_updates` (20) updates, with the unearned weight going to the session term. The
+> ramp is applied *after* the exploration shift and its `max(0.1, …)` floors, which would otherwise
+> stop the taste term reaching the zero it should hold with no evidence.
 >
-> **Outstanding:** the β ramp itself, and `SessionState._initialize_session_vector()`, which still
-> seeds from `randn` at every startup.
+> `SessionState` no longer seeds from `randn` at all: it starts at zero, adopts the first track that
+> actually plays, and `get_candidate_pool` guards **both** halves — so a fresh session's first pick is
+> a uniform draw, which is the honest answer to "no information".
+>
+> **One deviation.** The plan says to retire the "negative updates are a no-op while unseeded" guard
+> once the ramp lands. It was kept. β gates the *score*, never *retrieval*, and the pool opens its
+> taste half on `np.any(taste_vector)` — so retiring it would let one skip hand half the candidate
+> pool, at full strength, to "the tracks least like the one song you rejected". Reasoning in §0b.
 
 `UserTaste._initialize_taste_vector()` returns a normalised `randn` vector. The taste term carries
 β = 0.3 from the very first track, so a brand-new user's "long-term taste" is a random direction in
@@ -1727,9 +1999,9 @@ taste model from the UI.
 
 ### L9 · Assorted small traps.
 
-- **`select_track` mutates its caller's set.** `exclude_tracks.update(self.recent_history)` modifies
-  the set `QueueManager._generate_tracks` passes in. Harmless today, a trap later.
-  `track_selector.py:44–47` — `OPEN`
+- **`select_track` mutates its caller's set.** `exclude_tracks.update(self.recent_history)` modified
+  the set its caller passed in. — `DONE` (Stage 2): it copies first, and
+  `tests/test_selection_sampling.py` passes a set in and requires it unchanged.
 - **`config.validate()` is all `assert`.** Under `python -O` every check vanishes, including the
   weight-sum-to-1.0 invariant. — `DONE` (Stage 0): raises `ValueError` naming the offending key;
   `tests/test_config.py` asserts the exception type, so a regression to `assert` fails the suite.
@@ -1755,34 +2027,34 @@ taste model from the UI.
 
 ## 6 · Findings status
 
-*As of Stage 1 complete, 23 July 2026. `Done` means the code is in the tree and, where the
-behaviour is testable without MPD, a test guards it.*
+*As of Stage 2 complete, 23 July 2026. `Done` means the code is in the tree and a test guards it —
+which now includes the MPD path, via the `FakeMPD` built to verified semantics (M1b).*
 
 | ID | Finding | Status | Stage |
 |---|---|---|---|
-| **C1** | Queue never refills | **Open** — fix simplified by D1/D2 (consume mode, no position parsing) | 2 |
-| **C2** | MPD random mode discards ordering | **Open** — expanded to also force `consume on`; restore depends on H3 | 2 |
+| **C1** | Queue never refills | **Done** — depth 1 + `consume on`; 30-track live run, 0 stalls, depth 2 in 30/30 samples | ~~2~~ |
+| **C2** | MPD random mode discards ordering | **Done** — forced, logged, restored on `_shutdown` / signal / `atexit`; modes carried as raw strings | ~~2~~ |
 | **C3** | Non-deterministic 10 s crop embeddings | **Done** — full coverage, bit-reproducible, window matrix persisted, failures listed. One stated cause corrected (§0b) | ~~1~~ |
-| **C4** | `[V]` double-advance | **Dissolved** by D8 — code path deleted in Stage 2. Its constraint (one advance per keypress, no `play()` in a skip path) is retained and tested | 2 |
+| **C4** | `[V]` double-advance | **Dissolved** by D8 — code path deleted. Constraint retained and asserted on the call log of the real skip method. Its paused-case reasoning was corrected against the live MPD | ~~2~~ |
 | **C5** | Compressed similarity scale (anisotropy) | **Done** — centroid stored and applied on load; random pairs 0.670 → 0.011 | ~~1~~ |
 | **H1** | Mood word pinned to "eclectic" | **Partially done** — heuristic deleted (Stage 0), 49-descriptor bank built and gated (Stage 1); display outstanding | ~~0~~ / ~~1~~ / 3 |
-| **H2** | Queue panel shows history as future | **Dissolved** by D1 — panel removed | 3 |
-| **H3** | Ctrl-C/SIGTERM neither exit nor save | **Open** — will also leave MPD in consume mode once C2 lands | 2 |
-| **H4** | Skipping doesn't change what plays next | **Dissolved** by D1 — one lookahead track, dropped and re-picked | 2 |
+| **H2** | Queue panel shows history as future | **Done** — panel, bindings and `get_upcoming_tracks()` removed in Stage 2; replaced by a one-line `↓ next:`. Session-history panel is Stage 3 | ~~2~~ / 3 |
+| **H3** | Ctrl-C/SIGTERM neither exit nor save | **Done** — self-pipe unblocks urwid, `atexit` covers the mode restore, state checkpointed every N tracks | ~~2~~ |
+| **H4** | Skipping doesn't change what plays next | **Dissolved** by D1 — one lookahead track, dropped and re-picked. `consecutive_skips` became load-bearing rather than unused | ~~2~~ |
 | **H5** | Day-of-week modifier is dead code | **Done** — deleted (D6) | ~~0~~ |
-| **H6** | Strictly greedy selection | **Open — blocker,** more so after C5: the session vector now sits at cos 0.971 to its next pick, so argmax is near-deterministic. Rank-Boltzmann, not score-softmax | 2 |
+| **H6** | Strictly greedy selection | **Done** — rank-Boltzmann; the shipped τ map reproduces the published p(rank 0) table, and 40k draws are checked against `exp(−i/τ)`. τ_max = 15 still uncalibrated by listening | ~~2~~ |
 | **H7** | Eight duplicate methods; `add_track` swallows failures | **Done** — duplicates removed, return code checked, `ast` test guards it | ~~0~~ |
 | **H8** | Album-art geometry hardcoded | **Open** — elevated from L3; blocks the TUI rework | 3 |
-| **H9** | Neither `[V]` nor `[N]` changes direction; `[V]` aims off-manifold | **Open** — `[V]` still exists; deletion and `[N]` escalation are Stage 2. Re-measured against the Stage 1 library (§10b) | 2 |
+| **H9** | Neither `[V]` nor `[N]` changes direction; `[V]` aims off-manifold | **Done** — `[V]` deleted, `[N]` escalates on a solved λ. The design needed one correction found only by running it: the snap must be *inside* the solve (§0b) | ~~2~~ |
 | **M1a** | Tests untracked; phase files are theatre | **Done** — `.gitignore` fixed, phase files deleted, `tests/` tracked (67 green) | ~~0~~ |
-| **M1b/c** | No behavioural suite, no `FakeMPD` | **Open** — nothing yet exercises MPD. Stage 1 added 112 tests, all of them off the MPD path | 2 / 4 |
+| **M1b/c** | No behavioural suite, no `FakeMPD` | **M1b done** — `FakeMPD` built to re-verified semantics and itself under test; +131 behavioural tests (179 → 310). **M1c** still Stage 4 | ~~2~~ / 4 |
 | **M2** | Two divergent orchestrators | **Done** — both deleted, plus the dummy-embedding paths | ~~0~~ |
 | **M3** | `mpd_music_directory` unvalidated | **Done** — read from MPD's config, source reported, probes resolved; fatal for generation, a warning at startup | ~~1~~ |
 | **M4** | Two sources of truth for track keys | **Done** — `mpc listall` only; coverage logged and enforced on load | ~~1~~ |
 | **M5** | No embedding-dimension validation | **Done** — full schema validation, file dimension wins, model checked by equality | ~~1~~ |
 | **M6a** | `time_context.npz` is JSON | **Done** — deleted (D6) | ~~0~~ |
-| **M6b** | `play_history` never persisted | **Open** — `clear_history()` removed, persistence not built | 2 |
-| **M7** | Contradictory setup docs; macOS unsupported | **Open** — `${VAR,,}` fixed and falsified claims removed; the rewrite remains | 4 |
+| **M6b** | `play_history` never persisted | **Done** — `play_history.json` carries `play_history`, `current_index` and `recent_history`, checkpointed with the rest | ~~2~~ |
+| **M7** | Contradictory setup docs; macOS unsupported | **Open** — Stage 2 removed what it falsified (`[V]`, queue depth 10, queue navigation) and added the skip-escalation and rank-sampling sections. The download sizes, the runtime estimate and the macOS claim remain | 4 |
 | **M8** | `--batch-size` ignored | **Done** — batching plus a decode/mel worker pool, which is where the cost actually was (§0b) | ~~1~~ |
 | **L1** | SIGWINCH handler never invoked | Open | 4 |
 | **L2** | Kitty/sixel art fights urwid | Open | 4 |
@@ -1790,9 +2062,9 @@ behaviour is testable without MPD, a test guards it.*
 | **L4** | Hearts vanish on restart | Open — folded into H1's history panel | 3 |
 | **L5** | No log file; stderr swallowed | **Done** — teed to `data/dj.log`, 5 tests | ~~0~~ |
 | **L6** | Polling instead of `mpc idle` | Open — still low priority at depth 1 | 4 (optional) |
-| **L7** | Random cold-start taste vector at β=0.3 | **Partially done** — seed zeroed with two guards (§0b); β ramp outstanding | ~~0~~ / 2 |
+| **L7** | Random cold-start taste vector at β=0.3 | **Done** — β ramps over 20 updates; session vector starts at zero and seeds from the first real track. One guard deliberately *kept* against the plan (§0b) | ~~0~~ / ~~2~~ |
 | **L8** | Dead API surface | **Done** — deleted except the two the plan defers | ~~0~~ |
-| **L9** | Assorted small traps | **Mixed** — `validate()` off `assert`, the weight invariant and the dead `[I]` are done; `select_track` set mutation, `.gitkeep` scaffolding, ueberzugpp child and the keybinding docs remain | ~~0~~ / 3 / 4 |
+| **L9** | Assorted small traps | **Mixed** — `validate()` off `assert`, the weight invariant, the dead `[I]` and `select_track`'s set mutation are done; `.gitkeep` scaffolding, the ueberzugpp child and the keybinding docs remain | ~~0~~ / ~~2~~ / 3 / 4 |
 
 ---
 
@@ -1970,7 +2242,14 @@ assertions and all three belong in the test suite.
 
 ---
 
-### Stage 2 — Play continuously, one track ahead *(a few hours)*
+### Stage 2 — Play continuously, one track ahead *(a few hours)* · ✅ **COMPLETE 23 July 2026**
+
+*Every row landed. Full account, including four things this table did not anticipate and one design correction that only a live run exposed, in §0b.*
+
+> **Historical.** This block briefed Stage 2 before it was written and is kept as provenance. Two of
+> its warnings proved decisive — H6 really was the blocker it says, and τ_max = 15 really is still
+> uncalibrated. One number in it is wrong: `[N]`×1 does not turn over 0.3% of the pool, it turns over
+> about 2.9% on a settled session vector. See §10c.
 
 > **Read this before writing anything.** Stage 1 changed the ground these items stand on, and the
 > shortest path through Stage 2 is knowing what is now settled and what is now different.
@@ -2024,12 +2303,78 @@ identical ones — see H6). One `[N]` visibly changes the next track; four conse
 audibly change the *kind* of music, and the reported turnover exceeds 80%. `mpc status` after a
 `kill -TERM` shows the user's original modes restored.
 
+> **Met, 23 July 2026**, in a pty against the live MPD with the user's queue, modes and volume
+> snapshotted and restored:
+>
+> | Criterion | Result |
+> |---|---|
+> | 30+ tracks, no stall | **36 distinct tracks, 0 stalls** |
+> | no repeat inside the replay gap | **0 violations** |
+> | queue holds one ahead | **depth 2 in 30 of 30 mid-track samples** |
+> | different track sets from one state | 5/5 distinct runs, ≤ 95% overlap (unit-tested) |
+> | one `[N]` changes the next track | yes |
+> | four `[N]` exceed 80% turnover | **5% → 20% → 70% → 100%**, each meeting its target |
+> | …and change the *kind* of music | Björk / Arcane OST → Watain |
+> | modes restored after `kill -TERM` | byte-identical |
+>
+> 310 pytest tests pass, and `data/dj.log` from the run contains no error, no refusal and no dry-queue
+> recovery.
+
 ---
 
 ### Stage 3 — Make it legible *(half a day)*
 
 The stage where the queue's original purpose finally gets served. All display; the data it reads was
-built in Stage 1.
+built in Stage 1 and has been sitting unused since.
+
+> **Read this before writing anything.**
+>
+> **Settled — do not re-derive.** The player works and is not in scope. The embeddings, the centring
+> and the 49-word descriptor bank are final; the bank already loads as `self.descriptor_bank` on the
+> orchestrator and `DescriptorBank` will z-score a vector against it and return the top *n* — that is
+> the entire API H1b and H1d need. Selection, the queue, the skip path and MPD mode handling are all
+> closed and tested; if a display change requires touching `queue_manager.py`, `track_selector.py`,
+> `session_state.py` or `manifold.py`, stop and check why.
+>
+> **Do H8 first, and actually first.** The album art is pinned to hand-counted constants
+> (`RIGHT_COL_ROWS = 10`, `x=2`, `y=3`) that encode the exact current row layout. Every other item in
+> this stage moves that layout. Stage 2 deliberately left the panel geometry untouched for this
+> reason, so the constants are still correct *right now* — which is the last moment they will be.
+>
+> **What Stage 2 left you.** The `Up Next` panel is a one-line `↓ next:` readout where the queue list
+> used to be; replace it with the session panel (H1c) rather than adding beside it. `↑↓` and `ENTER`
+> are unbound and absent from the footer, so H1d is rebinding free keys, not repurposing live ones —
+> and **re-derive the history indices from scratch**, since the old ones counted from the top of the
+> MPD playlist and made `ENTER` replay the session's first track (H2).
+>
+> **`[I]` already exists and already reports the Stage 2 machinery** — τ and "choosing from ~top N",
+> the drawn rank, β earned, the next skip's turnover target. H1d *adds* the session and taste
+> descriptors to it. Note that the overlay is now sized to its content and will need to **scroll**
+> once those rows land; it is already close to a 40-row terminal's height.
+>
+> **Four traps, three of which Stage 2 created.**
+>
+> 1. **A zero session vector produces a confident-looking readout.** Nothing has played yet is now a
+>    real state (L7), and `bank.top(zeros)` answers `shimmering · orchestral · serene` rather than
+>    refusing. Gate the vibe line on `SessionState.is_seeded()`. See H1's status block; there is a
+>    test pinning the hazard.
+> 2. **The history panel cannot get its tags the way the queue panel did.** `get_playlist_metadata()`
+>    is built from `mpc playlist`, and under `consume on` a played track is *gone from the playlist* —
+>    so the one existing metadata path covers exactly the tracks the history panel does not show. Use
+>    `MPDController._fetch_track_tags()`, which is per-track, cached, and falls back mutagen → `mpc
+>    search` → filename; promote it to public rather than reaching into a private.
+> 3. **Nothing stores what H1's consistency word compares against.** "Cosine between the session's
+>    descriptor z-vector now and five tracks ago" needs a rolling store of past z-vectors, and none
+>    exists — `SessionState.recent_tracks` holds the last five *track embeddings*, not session-vector
+>    z-vectors. Either add the store or derive the word from `recent_tracks` and say which.
+> 4. **The consistency word is the only item in this stage that invents a threshold.** Calibrate it
+>    against observed drift on a real session, or ship the cosine as a number, or leave it out. Do not
+>    pick 0.85/0.7/0.5 the way the deleted momentum words did (D4).
+>
+> **You are starting with no coverage in your own area.** 311 tests pass and not one constructs the
+> widget tree — the suite covers everything *behind* the display. That is not an argument for leaving
+> it that way: H8's geometry is arithmetic and testable, and the readout's gating condition above is
+> exactly the kind of thing that ships broken under a green suite (H1, C1 and C4 all did).
 
 | ID | Change | Notes |
 |---|---|---|
@@ -2074,13 +2419,20 @@ for later.
 | **Force `consume on` (D2)** | Makes the refill condition `len(queue) < 2` with no position parsing. Guarded by log-on-change and restore-on-every-exit-path. | Moderate. The alternative is parsing `#N/M` from `mpc status` and leaving consume alone — more code, no side effects. |
 | **Delete `[V]` (D8)** | Measured: it lands the session vector at 0.450 on-manifold quality against 0.641 for an ordinary one — halfway to noise — for 9.3% pool turnover. Its queue-clearing job no longer exists. | Low, but do not restore `force_shift`. If a distinct "change subject" gesture is wanted later, build it as a named-descriptor jump, not a random rotation. |
 | **Rank-Boltzmann sampling (H6)** | Argmax reproduces the byte-identical session from a given state. Score-softmax needs recalibration every time the score scale moves. Rank is scale-invariant. | Trivial — one function. |
+| **The snap is solved *through*, not applied after (Stage 2)** | λ chosen against the un-snapped vector and snapped afterwards let a second consecutive skip land back where the run started — measured live at 1% turnover against a 20% target. Solving against the post-snap vector is the same principle the schedule already rests on: state the target on the thing that actually selects. | Trivial — one keyword argument — but it reintroduces a defect that offline medians do not show. |
+| **Turnover is reported against the skip run's start, not the previous press (Stage 2)** | "How much has changed since I started skipping" is the question a listener is actually asking; per-press deltas understate an escalation by construction. | Trivial — one stored anchor vector. |
 | **`ENTER` on history requeues (H1d)** | Replaces the removed queue navigation with something useful, reusing existing plumbing. | Trivial. If unwanted, `↑↓` becomes pure scrolling and `ENTER` unbinds. |
 | **Zero taste vector is inert in *retrieval*, not just scoring (Stage 0)** | An all-zero query to `find_similar` returns an arbitrary slice of the library, so half the candidate pool would be noise presented as preference. Skipping the taste half is what L7's own reasoning implies. | Trivial — one `if np.any(...)`. Do **not** reverse it when β ramps in; β gates the score, not the pool. |
-| **A skip cannot seed the taste model (Stage 0)** | From zero, one negative update normalises to `−track` at unit length: a full-strength claim from a single rejection, stronger than the random seed it replaced. | Trivial, and expected to become redundant once the β ramp exists. Retire it then, not before. |
+| **A skip cannot seed the taste model (Stage 0, reaffirmed Stage 2)** | From zero, one negative update normalises to `−track` at unit length: a full-strength claim from a single rejection, stronger than the random seed it replaced. **It did *not* become redundant when the β ramp landed** — β gates the score, never retrieval, and the candidate pool opens its taste half on `np.any(taste_vector)`. Retiring it would hand half the pool to "the tracks least like the one song you rejected". | Trivial to reverse, but do not: the reason is about the magnitude of a claim from one event, which no weight can damp. |
 | **`[I]` became a model inspector in Stage 0 rather than Stage 3** | D6 emptied the overlay while the key, the footer, the README and `start.sh` all still advertised it. A key that silently does nothing is the same dishonesty Stage 0 exists to remove. | None — Stage 3 extends the same overlay rather than building one. |
 | **Batches are filled per track, not per window (Stage 1)** | Cross-track packing makes a track's embedding depend on which tracks sat next to it in the run, so a library could not be extended without every existing vector shifting under the taste model. Costs one partial batch per track. | Trivial, but it forfeits the bit-reproduction guarantee and the test that asserts it. |
 | **`RMS_GATE = 0.01` (Stage 1)** | Not chosen: the window-RMS distribution over 40 tracks is bimodal, 1.8% at ~4 × 10⁻⁵ and real content from ~0.04. Every threshold in between drops the same windows to within half a percent. The gate sits in the empty band. | Trivial, and re-measurable — the distribution is printed by the run and stored in the artifact's metadata. |
 | **`STD_FLOOR_FRACTION = 0.5` for the descriptor gate (Stage 1)** | Relative to the library's own median std, so it needs no recalibration when the model, template or collection changes — the same move as rank-Boltzmann and z-scoring. | Trivial. If it ever drops something you wanted, the run prints every descriptor's std, so the decision is inspectable rather than mysterious. |
+| **`skip_turnover_schedule = (0.05, 0.20, 0.50, 0.85)` (Stage 2)** | The only *input* to the escalation — λ is solved for it at every press, so this is the one place a number is chosen. It is stated in units the listener can verify ("85% of what I would have heard is now different") rather than in vector-space magnitudes nobody can reason about, which is why it survived the embedding space changing underneath it. | Trivial, and it is the right knob: if three consecutive skips feel too close to a full reset, add a row rather than fudging λ. The console prints what each press *measured*, so the effect of a change is observable. |
+| **`skip_snap_from_run_length = 2` (Stage 2)** | Both directions are measured, not assumed. Below it, `snap()` overshoots — it is a move with a turnover floor of ~8% against a 5% target. At and above it, `snap()` is required: an unguarded λ solved for the 85% target lands below the library's 1st-percentile on-manifold quality **100% of the time**. Gating at 3 instead leaves press 2 at 0.42, worse than the deleted `[V]`. | Low, but re-measure before moving it — §10c has the table, and both failure modes are silent. |
+| **`taste_ramp_updates = 20` (Stage 2)** | How long β takes to earn its configured weight. A control constant: it shapes how fast the taste model starts counting, and asserts nothing to the user. | Trivial. Shorter makes a new listener's first few likes dominate sooner; longer keeps them on session-only for longer. `[I]` reports "β earned" as a percentage, so the effect is visible. |
+| **`minimum_sampled_pool = 4` (Stage 2)** | Below it the rank distribution is replaced by a uniform draw, because with two or three candidates τ decides the outcome and the "choice" is a formality. | Trivial. Only reachable on a tiny library or under heavy exclusion. |
+| **`checkpoint_every_n_tracks = 5` (Stage 2)** | How often learned state is written during a session (H3). Four small files, so the cost is negligible; the number only trades write frequency against how much a hard kill can lose. | Trivial. |
 | **`minimum_mpd_coverage = 0.5` (Stage 1)** | A control constant, not a truth claim: it decides when to refuse rather than what to tell the user. The actual coverage is always logged, so the number the user reads is measured. | Trivial — one config key. |
 
 ### Deferred, with the door left open
@@ -2097,17 +2449,25 @@ for later.
    judge it against.
 
 3. **Re-tuning the control constants.** Exploration step sizes and the taste update rates were chosen
-   against the compressed similarity scale and behave differently now that it is centred — measurably
-   so for one of them: `penalize_similar`'s fixed 0.15 nudge moves 0.3% of the candidate pool per
-   press, against 3.9% before (§10b). H9 replaces that one with a solved λ. The rest are left
-   deliberately: listen first, then tune once with real data rather than guess new numbers now. The
-   constants that made *claims* are already deleted (D4); these only shape behaviour.
+   against the compressed similarity scale and behave differently now that it is centred. H9 replaced
+   the worst of them — `penalize_similar`'s fixed 0.15, which moved about 2.9% of the candidate pool
+   per press (§10c) — with a solved λ. The rest are left deliberately: listen first, then tune once
+   with real data rather than guess new numbers now. The constants that made *claims* are already
+   deleted (D4); these only shape behaviour.
 
-4. **τ_max ≈ 15.** The one genuinely new constant. Documented in H6 with the measurement that motivated
-   it and an explicit note that it is a starting point requiring calibration in use, so it does not
-   become the next uncalibrated threshold.
+4. **τ_max = 15.** The one genuinely new constant, now shipped and still uncalibrated by listening.
+   It is documented in H6 with the measurement that motivated it and an explicit note that it is a
+   starting point, so it does not quietly become the next uncalibrated threshold. Raise it until
+   unattended sessions start feeling incoherent, then back off. `[I]` reports the τ in force, so the
+   effect of a change is observable rather than guessed at.
 
-5. **`previous_track`.** Impossible via MPD under `consume on`; would need re-adding from the app's own
+5. **The turnover schedule's middle rows overshoot.** Post-snap turnover is a set-overlap count and
+   moves in jumps, so the smallest λ meeting the 50% target typically delivers ~70–83%. The schedule
+   is a floor and the *measured* value is what the console reports, so nothing dishonest is shown —
+   but three consecutive skips are closer to a reset than the table's "wrong direction" suggests. If
+   that proves too steep in use, the fix is another row in the schedule, not a fudged λ.
+
+6. **`previous_track`.** Impossible via MPD under `consume on`; would need re-adding from the app's own
    history. No binding exists today, so nothing regresses.
 
 ---
@@ -2284,6 +2644,11 @@ $ python3 -m pytest tests -q         → 179 passed
 supersede the pre-C3 figures above wherever they overlap; the originals are kept because they are what
 the fix was designed against.*
 
+> **The H9 and H6 tables at the end of this section were re-measured in Stage 2 with the shipped
+> code, and several figures did not reproduce — see §10c, which is the live record for anything
+> about skips or selection.** The generation, determinism, centring, silence-gate, template and
+> descriptor measurements above are unaffected and remain current.
+
 ### The generation run
 
 ```
@@ -2401,9 +2766,14 @@ Six of the seven are recognisable descriptions — Bathory's track is a reverber
 on the record. The Arabic pop entry is the weak one: `joyful` fits, the rhythm words do not obviously.
 The rhythm axis carries the four weakest descriptors in the bank, which is consistent.
 
-### Re-measured for Stage 2 — H9's skip mechanics
+### Re-measured for Stage 2 — H9's skip mechanics `SUPERSEDED by §10c`
 
-*The numbers Stage 2's `[N]` rebuild is specified against. §10's versions were taken on the 616
+> **Provenance only.** These came from a simulation written alongside the audit, before the code
+> existed. §10c re-took them by driving the shipped `manifold.py` and `SessionState`, and four
+> figures did not reproduce — including the `[N]`×1 turnover quoted below as 0.3%, which is about
+> 2.9% and varies tenfold with how settled the session vector is. **Use §10c.**
+
+*The numbers Stage 2's `[N]` rebuild was specified against. §10's versions were taken on the 616
 crop-based embeddings; these are the space the code now runs in.*
 
 **Method.** 40 sessions per row on the 674-track centred library. Each session starts from a random
@@ -2455,7 +2825,10 @@ Two things to carry into the implementation:
   λ did. At 50% and 85% it is roughly neutral. H9's "*n* ≥ 2 only" is therefore load-bearing, not a
   nicety — applying it to a single skip would overshoot the schedule badly.
 
-### Re-measured for Stage 2 — H6's selection rule
+### Re-measured for Stage 2 — H6's selection rule `SUPERSEDED by §10c`
+
+> **Provenance only** — a pre-implementation simulation. §10c checks the *shipped* τ map against
+> H6's own published p(rank 0) table instead, and the run-to-run variety claim is now a unit test.
 
 30-track sessions from one fixed start state on the 674-track centred library, with the 20-track
 anti-repetition gap applied:
@@ -2496,6 +2869,142 @@ actual:     674 tracks × 36.3 windows =  24,494 forward passes, 45.5 MB, 5m 23s
 
 ---
 
+## 10c · Stage 2 measurements
+
+*Taken 23 July 2026 by driving the **shipped** `manifold.py`, `SessionState` and `TrackSelector`
+over the built 674-track centred library, plus one end-to-end session against the live MPD. Where
+these overlap §10b's "Re-measured for Stage 2" tables — which were produced by a simulation written
+alongside the audit rather than by the code — **this section is the live one**.*
+
+### What did not reproduce from §10b
+
+```
+                                        §10b said    measured with shipped code
+  [N] x1, fixed 0.15 nudge                  0.3%              2.9%
+  on-manifold quality, session vector       0.641             0.787
+  on-manifold quality, after [V]            0.450             0.561
+  [V] x1 pool turnover                      9.3%              6.6%
+```
+
+None of these changes a conclusion, and two of them strengthen one. `[V]` still lands far below a real
+track and is still beaten by two escalated `[N]` presses, so D8 holds — and it holds for the
+structural reason H9 always rested on rather than for the numeric one. The fixed 0.15 nudge at 2.9%
+per press is still nowhere near a change of direction, which is H9's case for solving λ.
+
+**One figure in §10b was materially misleading and is the reason to re-measure rather than inherit:**
+`[N]`×1 turnover depends almost entirely on how settled the session vector is, which no earlier table
+records.
+
+```
+  tracks played before the skip    mean turnover    cos(new, old)
+             1                         25.8%            0.989
+             3                          7.3%            0.990
+             6                          4.6%            0.992
+            12                          2.9%            0.996
+            24                          2.7%            0.997
+```
+
+A skip early in a session moves nearly ten times as much of the pool as the same skip an hour in. Any
+single number for "what does `[N]` do" is a statement about one point on this curve.
+
+### Stage 2 — turnover and λ vs the repulsion magnitude
+
+40 simulated sessions, each settled over 12 tracks, repelled from the 3-track skip-run centroid.
+`raw` is the plain repulsion; `snapped` replaces it with the centroid of its 25 nearest real tracks.
+
+```
+  lambda   turnover raw   turnover snapped   quality raw   quality snapped
+   0.05        0.9%             8.9%            0.793          0.861
+   0.20        3.2%             8.4%            0.774          0.859
+   0.40        8.9%             8.1%            0.727          0.855
+   0.60       19.6%            11.4%            0.629          0.848
+   0.80       44.0%            29.3%            0.448          0.816
+   1.00       88.8%            88.1%            0.304          0.762
+   1.20       98.5%            98.7%            0.397          0.818
+   2.00      100.0%           100.0%            0.552          0.837
+
+  reference — mean similarity to the 25 nearest real tracks
+    a real track (median of all 674)   0.748       [V], force_shift 0.5   0.561
+    an ordinary session vector         0.787       a random direction     0.090
+```
+
+Two things this settles, both of which the plan asserted on weaker evidence:
+
+- **The snap is what keeps large λ usable.** Unguarded quality falls off a cliff past λ ≈ 0.5 and
+  bottoms at 0.30 — *below* the deleted `[V]*. Snapped, it never leaves 0.76–0.86.
+- **The snap has a turnover floor of its own,** about 8%, against a 5% target for a single skip. That
+  is the audit's stated reason for gating it at n ≥ 2, and it is correct.
+
+### Stage 2 — on-manifold quality has no fixed threshold, only a distribution
+
+```
+  on-manifold quality across all 674 real tracks
+    p0 0.427   p1 0.463   p5 0.541   p25 0.667   p50 0.752   p75 0.883   p100 0.961
+```
+
+A real track in a sparse corner scores 0.43. So "still music" cannot mean "above some number" — the
+assertion that means something is *no worse than the least typical real track*, and that is what the
+suite checks. Measured against it:
+
+```
+  solved for target    unguarded quality    below the p1 floor    snapped quality
+        5%                   0.731                  0%                0.820
+       20%                   0.579                 13%                0.860
+       50%                   0.335                 87%                0.777
+       85%                   0.279                100%                0.771
+```
+
+The 85% row is why `snap()` is not optional above the first press, and the 5% row is why it is not
+applied *to* the first press.
+
+### Stage 2 — the escalation as it actually runs
+
+Solving λ against the **post-snap** vector (§0b, item 2). 40 sessions, five consecutive presses each,
+turnover measured against the session vector as it stood when the run began:
+
+```
+  press   target   median λ    turnover p10 / median / p90    min quality
+    1       5%       0.28         5.0%    5.0%    7.0%           0.588
+    2      20%       0.75        23.9%   29.0%   64.8%           0.576
+    3      50%       0.90        72.0%   83.0%  100.0%           0.534
+    4      85%       1.28       100.0%  100.0%  100.0%           0.563
+    5      85%       1.83       100.0%  100.0%  100.0%           0.619
+
+  presses that moved BACKWARDS vs the press before: 0 of 160
+  library p1 on-manifold floor: 0.463 — no press went below it
+```
+
+Before the correction, the same measurement had presses that *reduced* turnover relative to the one
+before, and a live session printed `Skip #2: … 1% … (target 20%)` immediately after Skip #1 achieved
+5%. The medians looked acceptable throughout; only the live run and the per-press monotonicity check
+exposed it.
+
+Live, from `data/dj.log` of the accepted run:
+
+```
+Skip #1: λ=0.40, 5% of what you would have heard is now different (target 5%)
+Skip #2: λ=0.80 + snap, 20% ... (target 20%)
+Skip #3: λ=0.85 + snap, 70% ... (target 50%)
+Skip #4: λ=1.45 + snap, 100% ... (target 85%)
+Skip #5: λ=1.95 + snap, 100% ... (target 85%)
+```
+
+### Stage 2 — the τ map, checked against H6's own table
+
+τ is linear in the exploration scalar over `[exploration_min, exploration_max]`, floored at `tau_min`:
+
+```
+  exploration    τ      p(rank 0)     H6's published claim
+     0.1        1.0        63%              63%
+     0.4        7.5        12%              13%
+     0.7       15.0         6%               6%
+```
+
+The shipped map reproduces the table H6 was written around, so the behaviour a reader was promised is
+the behaviour that ships. A test recomputes these from the code rather than restating them.
+
+---
+
 *All line references in §2–§5 are against `HEAD 8dc4275` plus the then-uncommitted `tui.py` change
 (footer key-hint rewording, +10/−10, cosmetic). They predate Stage 0 and are stale for every file it
 touched — see §0b. Measurements were taken on the machine described in the header; the
@@ -2506,3 +3015,10 @@ embedding-determinism figures use the project's own code path against the cached
 distributions it records were measured on those 616 embeddings; **§10b is the re-measurement** Stage 1
 owed, taken on the 674 embeddings C3 and C5 produced. Where the two disagree, §10b is the live
 library and §10 is the record of what the fix was designed against.*
+
+*§10b's two "Re-measured for Stage 2" tables were produced by a simulation written alongside the
+audit, before the code existed. **§10c re-took them by driving the shipped modules**, and four
+figures did not reproduce — most consequentially `[N]`×1's pool turnover, which is not a constant at
+all but a function of how settled the session vector is. For anything concerning skips, selection or
+the manifold, §10c is the live record. This is the third stage in a row where re-measuring rather
+than inheriting a number changed something material, which is the argument for the habit.*

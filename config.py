@@ -46,16 +46,82 @@ class Config:
         # Session State Parameters
         self.session_decay_factor = 0.85       # Exponential decay for session vector updates
         self.session_influence_window = 5      # Number of recent tracks influencing session
-        self.vibe_shift_magnitude = 0.5        # How strongly to shift on vibe skip (0-1)
+
+        # Skip escalation (audit H9).  Consecutive rejections are the system
+        # observing that the neighbourhood is wrong, so [N] escalates on its own
+        # rather than waiting for a second key.  The schedule is written in
+        # *candidate-pool turnover* — the fraction of what you would have heard
+        # next that is now different — and the repulsion magnitude λ is solved
+        # for it at every press.  That is the point: turnover is a quantity the
+        # listener experiences and that re-derives itself when the embedding
+        # space moves, which a λ expressed in cosines does not.  The old fixed
+        # λ = 0.15 moved 2.9% of the pool per press, which is why twenty presses
+        # were needed before anything changed.
+        self.skip_turnover_schedule = (0.05, 0.20, 0.50, 0.85)
+
+        # Snapping the session vector back onto the manifold — replacing it with
+        # the centroid of its 25 nearest real tracks — applies from the second
+        # consecutive skip onward.  Both halves of that gate are measured:
+        #   • Below it snap() overshoots.  It is a move in its own right, with a
+        #     turnover floor of ~8%, against a 5% target for a single skip.
+        #   • At and above it snap() is *required*.  An unguarded λ ≈ 0.65
+        #     repulsion lands at 0.42 on-manifold quality and λ = 1.0 at 0.30 —
+        #     below even the deleted [V]'s 0.56, against 0.73 for a real track.
+        #     With the snap, quality never drops below 0.74.
+        self.skip_snap_from_run_length = 2
         
         # User Taste Update Parameters
         self.taste_update_like = 0.1           # Weight for explicit likes
         self.taste_update_full_listen = 0.02   # Weight for passive full listens
         self.taste_update_skip_penalty = -0.05  # Penalty for skips
+
+        # How many taste updates it takes for β to reach its configured value
+        # (audit L7).  A brand-new taste vector carries no evidence, so the taste
+        # term claims no weight at all and the freed weight goes to the session
+        # term; a new listener is driven purely by what they are playing right
+        # now, which is the only thing known about them.  The handover is a ramp
+        # rather than a cliff at the first update.
+        self.taste_ramp_updates = 20
         
-        # Queue Management
-        self.queue_buffer_size = 10            # Number of tracks to maintain in queue
-        self.queue_low_threshold = 3           # Generate more tracks when below this
+        # Queue Management.  Exactly one track sits in MPD ahead of the current
+        # one (audit D1), so `len(mpc playlist)` is 2 during normal playback and
+        # the refill condition is `< 2`.  That holds only because `consume` is
+        # forced on (D2), which makes MPD pop each finished track itself.
+        #
+        # Depth 1 is the shallowest depth that still gives gapless playback — at
+        # depth 0 MPD reaches `stopped` at every track boundary and waits for the
+        # 2 Hz poller to notice.  It is deliberately not a display concern; its
+        # only job is keeping MPD from stalling between tracks.  The previous
+        # depth of 10 meant every queued track had been scored under the weights
+        # that existed ten songs earlier, so no feedback was audible until they
+        # drained — the single largest obstacle to the app being adaptive.
+        self.queue_lookahead = 1
+
+        # Selection temperature (audit H6).  One track is drawn by Boltzmann
+        # sampling over *rank*, p(i) ∝ exp(−i/τ), not over score.  Rank is
+        # scale-invariant: it does not care how wide the score distribution is,
+        # so τ never needs recalibrating when the weights move, when β ramps in,
+        # or when the embedding space is re-centred.  A score-softmax would need
+        # re-tuning on every one of those.
+        #
+        # τ is mapped linearly from the exploration scalar and reads as "the
+        # effective number of candidates in play": τ ≈ 1 at the exploration
+        # floor (63% chance of the top track), ≈ 7.5 at 0.4 (12%), 15 at the
+        # ceiling (6%).
+        #
+        # τ_max is the one genuinely new constant in the rewrite and it has
+        # never been calibrated by listening.  Raise it until unattended
+        # sessions start feeling incoherent, then back off.
+        self.tau_max = 15.0
+        self.tau_min = 1.0
+
+        # Below this many candidates, sample uniformly instead.  τ would
+        # otherwise dominate a two-element list and make the "choice" a formality.
+        self.minimum_sampled_pool = 4
+
+        # How often to checkpoint learned state, in tracks played (audit H3).
+        # Saving only at exit meant a SIGTERM discarded the whole session.
+        self.checkpoint_every_n_tracks = 5
         
         # Candidate Pool Parameters
         self.candidate_pool_size = 100         # Number of candidates to retrieve for scoring
@@ -73,6 +139,11 @@ class Config:
         self.taste_file = self.data_dir / 'state' / 'user_taste.npz'
         self.exploration_file = self.data_dir / 'state' / 'exploration_state.json'
         self.feedback_history_file = self.data_dir / 'state' / 'feedback_history.json'
+        # Anti-repetition state (audit M6b).  A comment used to claim this was
+        # kept "to maintain long-term anti-repetition" while nothing ever wrote
+        # it, so the README's "excluded for at least 20 songs" reset on every
+        # launch.  Now it round-trips.
+        self.play_history_file = self.data_dir / 'state' / 'play_history.json'
         self.log_file = self.data_dir / 'dj.log'
 
         # System Parameters
@@ -132,11 +203,25 @@ class Config:
         _require(0 <= self.exploration_min <= self.exploration_max <= 1,
                  "require 0 <= exploration_min <= exploration_max <= 1, got "
                  f"{self.exploration_min} / {self.exploration_max}")
-        _require(self.queue_buffer_size >= self.queue_low_threshold,
-                 f"queue_buffer_size ({self.queue_buffer_size}) must be >= "
-                 f"queue_low_threshold ({self.queue_low_threshold})")
+        _require(self.queue_lookahead >= 1,
+                 f"queue_lookahead must be at least 1, got {self.queue_lookahead}")
         _require(0 <= self.minimum_mpd_coverage <= 1,
                  f"minimum_mpd_coverage must be in [0, 1], got {self.minimum_mpd_coverage}")
+        _require(0 < self.tau_min <= self.tau_max,
+                 f"require 0 < tau_min <= tau_max, got {self.tau_min} / {self.tau_max}")
+        _require(self.taste_ramp_updates >= 1,
+                 f"taste_ramp_updates must be at least 1, got {self.taste_ramp_updates}")
+
+        # The skip schedule is the only input to the λ solver, so a schedule that
+        # does not escalate would silently make [N] a no-op at every run length.
+        schedule = self.skip_turnover_schedule
+        _require(len(schedule) >= 1, "skip_turnover_schedule must not be empty")
+        _require(all(0 < t <= 1 for t in schedule),
+                 f"every skip_turnover_schedule entry must be in (0, 1], got {schedule}")
+        _require(list(schedule) == sorted(schedule),
+                 f"skip_turnover_schedule must be non-decreasing, got {schedule}")
+        _require(self.skip_snap_from_run_length >= 1,
+                 "skip_snap_from_run_length must be at least 1")
 
         return True
 

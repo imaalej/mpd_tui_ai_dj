@@ -18,14 +18,11 @@ A terminal-based DJ that learns your taste in real time and curates a continuous
 ║  System Console                                                    ║
 ║  [14:32:01] Exploration decreased to 0.18 (6 consecutive listens)  ║
 ╠════════════════════════════════════════════════════════════════════╣
-║  Upcoming Queue  [↑↓ navigate · ENTER play]                        ║
-║    ▶ Floating Points – Promises – LesAlpx                          ║
-║    1. Pharoah Sanders – Karma – The Creator Has a Master Plan      ║
-║  » 2. Nils Frahm – Spaces – Said and Done                          ║
-║    3. ❤ Jon Hopkins – Immunity – Open Eye Signal                   ║
-║    4. Four Tet – There Is Love In You – Love Cry                   ║
+║  Up Next                                                           ║
+║    ↓ next:  Pharoah Sanders – Karma – The Creator Has a Master Plan ║
+║                                                                    ║
 ╠════════════════════════════════════════════════════════════════════╣
-║ SPACE=Play/Pause  N=Next  V=Vibe  L=Like  <,>=Vol  ←→=Seek  Q=Quit ║
+║ SPACE=Play/Pause  N=Next  L=Like  <,>=Vol  ←→=Seek  I=Info  Q=Quit ║
 ╚════════════════════════════════════════════════════════════════════╝
 ```
 
@@ -80,14 +77,11 @@ mpc status   # should show your track count
 | Key | Action |
 |-----|--------|
 | `Space` | Play / Pause |
-| `N` | Skip track (stays in current vibe) |
-| `V` | Skip vibe (hard shift to a new direction) |
+| `N` | Skip track — escalates if you keep pressing it (see below) |
 | `L` | Like current track |
 | `,` / `.` | Volume down / up |
 | `←` / `→` | Seek backward / forward 10s |
-| `↑` / `↓` | Navigate the queue |
-| `Enter` | Play selected queue item immediately |
-| `I` | Show model state (taste, exploration, current scoring weights) |
+| `I` | Show model state (sampling, taste, exploration, scoring weights) |
 | `Q` | Quit |
 
 ---
@@ -106,13 +100,13 @@ One more step matters more than it looks. CLAP's vectors occupy a narrow cone ra
 
 The system keeps two separate models of what you like, operating on different timescales:
 
-**Session state** is short-term and lives only for the current listening session. It's a single vector that shifts with every track you hear — pulled toward songs you listen through and nudged away from songs you skip. It represents the *vibe right now*: where the session has been and the direction it's heading. When you press `V` (skip vibe), the session vector is rotated by a large random angle, immediately breaking from the current trajectory and forcing the queue to recalculate from a new starting point.
+**Session state** is short-term and lives only for the current listening session. It's a single vector that shifts with every track you hear — pulled toward songs you listen through and nudged away from songs you skip. It represents the *vibe right now*: where the session has been and the direction it's heading. It starts empty — before anything has played there is nothing to know, so the first track is drawn at random rather than from a direction the system invented.
 
 **User taste** is long-term and persists between sessions. It accumulates slowly from everything you've heard across all sessions — strong pull toward explicit likes (`L`), weaker pull from full listens, and gentle pushback from skips. It doesn't reflect what you want *today*, it reflects what you've consistently come back to *across time*. New sessions start from a fresh vibe but are still anchored to your taste history.
 
 ### Track Selection
 
-For each slot in the queue, the system scores every candidate track across four factors, then picks the best:
+To choose the next track, the system scores a pool of candidates across four factors:
 
 ```
 score = α · session_similarity
@@ -121,7 +115,28 @@ score = α · session_similarity
       + δ · anti_repetition_penalty
 ```
 
-The weights (α, β, γ, δ) shift dynamically based on your behavior. Skip a few songs and the system increases `γ` (novelty) to try something different. Listen through several tracks and it lowers `γ`, leaning harder on what it already knows you like. Press `V` and it sets novelty to near-maximum and rebuilds the queue from scratch.
+The weights (α, β, γ, δ) shift dynamically based on your behavior. Skip a few songs and the system increases `γ` (novelty) to try something different. Listen through several tracks and it lowers `γ`, leaning harder on what it already knows you like.
+
+`β` is also *earned*. A new listener has no taste history, so the taste term starts at zero weight and ramps up over the first 20 updates, with the unearned weight going to the session term. Until then you are driven purely by what you are playing right now, which is the only thing known about you.
+
+### Skipping, and what it means
+
+`N` is the only steering key. A single press says "not this song" — the session vector is nudged away from it and the queued track behind it is dropped and re-picked immediately.
+
+Keep pressing and it escalates, because *n* consecutive rejections is the system observing that the neighbourhood is wrong — better evidence than a separate key you would have to reach for after diagnosing your own dissatisfaction. Each press targets a fraction of the candidate pool that must come out different:
+
+| consecutive skips | turns over | reads as |
+|---|---|---|
+| 1 | 5% | "not this song" |
+| 2 | 20% | "not this corner either" |
+| 3 | 50% | "this is the wrong direction" |
+| 4+ | 85% | full reset |
+
+The important part is that those are *targets*, and the magnitude of the move is solved for them at each press rather than being a constant someone picked. "85% of what I would have heard is now different" is something you can check; a rotation of 0.15 radians is not. The console reports what each press actually achieved.
+
+From the second press onward the session vector is projected back onto your library — replaced with the centre of its 25 nearest real tracks — so however hard you push, it cannot drift into a region no music occupies. A full listen ends the run and the escalation resets.
+
+*(An earlier `V` key existed for this. It blended the session vector halfway toward a random direction, which measurably landed it outside the music and turned over less than two presses of `N` do. It is gone.)*
 
 ### Exploration vs Exploitation
 
@@ -141,7 +156,9 @@ python3 generate_embeddings.py --describe "Arctic Monkeys"
 
 Wiring it to the session line is the next piece of work. See `PROJECT_AUDIT.md` §H1.
 
-The queue is kept at 10 tracks and refilled dynamically so playback never stops. Each candidate is drawn from a pool of 100 nearest-neighbor tracks in embedding space, then re-ranked by the full scoring function. Recently played tracks are excluded for at least 20 songs to prevent repetition.
+Exactly **one** track sits in the queue ahead of the current one, refilled as each song ends so playback never stops. That depth is deliberate: with ten queued tracks, every one of them had been scored under the weights that existed ten songs ago, so a skip or a like was inaudible until they drained. At depth one, feedback changes what plays *next*.
+
+Candidates are drawn from a pool of 100 nearest neighbours in embedding space and re-ranked by the full scoring function. The winner is not simply the top-scoring track — one is drawn by Boltzmann sampling over **rank**, `p(i) ∝ exp(−i/τ)`, with `τ` set by the exploration value and readable in `[I]` as "choosing from ~top 8". A strict argmax would replay the identical evening from the same starting state every time, which for a system built around an evolving session is the failure mode. Recently played tracks are excluded for at least 20 songs, and that exclusion now survives a restart.
 
 ### What Persists Between Sessions
 
@@ -170,7 +187,17 @@ exploration_max = 0.7   # ceiling — never fully random
 
 # Session evolution speed
 session_decay_factor  = 0.85   # how quickly old tracks fade from session context
-vibe_shift_magnitude  = 0.5    # how hard V rotates the session vector
+
+# Selection temperature — the effective number of candidates in play
+tau_max = 15.0   # at the exploration ceiling; ~1 at the floor
+
+# Skip escalation: the fraction of the candidate pool each consecutive
+# press of N must turn over.  The repulsion magnitude is solved for these,
+# not declared, so they need no recalibration if the library changes.
+skip_turnover_schedule = (0.05, 0.20, 0.50, 0.85)
+
+# Queue depth ahead of the current track
+queue_lookahead = 1
 
 # Taste update rates
 taste_update_like         =  0.10   # explicit like

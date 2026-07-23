@@ -58,23 +58,38 @@ class ExplorationController:
         if self.consecutive_listens % 3 == 0:
             print(f"Exploration decreased to {self.exploration:.2f} ({self.consecutive_listens} consecutive listens)", file=__import__("sys").stderr)
     
-    def set_high_exploration(self):
+    # NOTE: set_high_exploration() is gone (audit D8/H9).  It existed only for
+    # the deleted [V] key, and it did something the rest of the controller is
+    # built to avoid: it discarded the accumulated evidence, resetting both
+    # consecutive counters and jumping the scalar to 90% of its ceiling because
+    # a key had been pressed.  [N]'s escalation reads the same intent off
+    # `consecutive_skips`, which is evidence rather than an assertion.
+
+    def taste_ramp(self, taste_updates: int) -> float:
         """
-        Force high exploration mode (after vibe skip).
-        User wants something completely different.
+        How much of the configured taste weight β has been earned, in [0, 1].
+
+        β used to apply at full strength from the very first track, so a
+        brand-new user's "long-term taste" carried 0.3 of every scoring decision
+        while being a random direction (audit L7).  The seed is now zero, and
+        this ramps the weight in as updates accumulate so the handover is
+        gradual rather than a cliff at the first like.
         """
-        self.exploration = self.max_exploration * 0.9
-        self.consecutive_skips = 0
-        self.consecutive_listens = 0
-        print(f"High exploration mode activated: {self.exploration:.2f}", file=__import__("sys").stderr)
-    
-    def get_weights(self) -> dict:
+        return min(1.0, max(0, taste_updates) / config.taste_ramp_updates)
+
+    def get_weights(self, taste_updates: int = 0) -> dict:
         """
-        Get current scoring weights adjusted for exploration.
-        
+        Get current scoring weights adjusted for exploration and taste evidence.
+
+        Args:
+            taste_updates: how many updates the taste model has accumulated.
+                Defaults to 0, i.e. "no evidence" — the conservative reading, so
+                a caller that forgets to pass it under-weights taste rather than
+                over-weighting it.
+
         Returns dict with:
             - session_weight: How much to weight session similarity
-            - taste_weight: How much to weight taste similarity  
+            - taste_weight: How much to weight taste similarity
             - novelty_weight: How much to weight novelty
             - anti_repetition_weight: How much to weight anti-repetition
         """
@@ -83,22 +98,33 @@ class ExplorationController:
         base_taste = config.weight_taste_similarity
         base_novelty = config.weight_novelty
         base_repetition = config.weight_anti_repetition
-        
+
         # Adjust based on exploration tendency
         # High exploration: increase novelty, decrease session/taste similarity
         exploration_factor = self.exploration
-        
+
         # Shift weight from session/taste to novelty
         novelty_boost = (exploration_factor - config.exploration_initial) * 0.5
-        
+
         session_weight = max(0.1, base_session - novelty_boost * 0.5)
         taste_weight = max(0.1, base_taste - novelty_boost * 0.5)
         novelty_weight = min(0.6, base_novelty + novelty_boost)
         repetition_weight = base_repetition
-        
+
+        # L7's ramp, applied after the exploration shift and its floors — the
+        # `max(0.1, …)` above would otherwise stop the taste term from reaching
+        # zero, which is precisely the value it should hold when there is no
+        # taste model.  The weight the taste term has not earned goes to the
+        # session term, because "what you are listening to right now" is the only
+        # other thing known about a new listener.
+        ramp = self.taste_ramp(taste_updates)
+        unearned = taste_weight * (1.0 - ramp)
+        taste_weight -= unearned
+        session_weight += unearned
+
         # Normalize to sum to 1.0
         total = session_weight + taste_weight + novelty_weight + repetition_weight
-        
+
         return {
             'session_weight': session_weight / total,
             'taste_weight': taste_weight / total,

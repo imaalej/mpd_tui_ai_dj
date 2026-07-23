@@ -241,15 +241,25 @@ class TrackLibrary:
         
         return results
     
-    def get_random_track(self, exclude_tracks: Set[str] = None) -> Optional[str]:
-        """Get a random track from the library."""
+    def get_random_track(self, exclude_tracks: Set[str] = None,
+                         rng: Optional[np.random.Generator] = None) -> Optional[str]:
+        """
+        Draw a track uniformly at random.
+
+        This is the honest answer to "no evidence yet" — it is what the selector
+        falls back to before anything has played (audit L7).  The generator is
+        injectable so that path is reproducible under test; drawing from numpy's
+        global state would make the first pick of every session untestable for
+        reasons that have nothing to do with selection.
+        """
         exclude_tracks = exclude_tracks or set()
         available = [t for t in self.track_list if t not in exclude_tracks]
-        
+
         if not available:
             return None
-        
-        return np.random.choice(available)
+
+        chooser = rng if rng is not None else np.random.default_rng()
+        return str(chooser.choice(available))
     
     def get_candidate_pool(self, 
                           session_vector: np.ndarray,
@@ -277,19 +287,26 @@ class TrackLibrary:
         # Get more candidates to account for potential overlap
         search_k = int(pool_size * 1.5)
 
-        # Get candidates from both session and taste
-        session_candidates = self.find_similar(
-            session_vector,
-            k=search_k,
-            exclude_tracks=exclude_tracks
-        )
+        # An all-zero query vector means "no evidence yet".  Querying with one
+        # returns an arbitrary slice of the library — every dot product is 0, so
+        # the ordering is whatever argpartition happens to produce — and that
+        # slice would be presented as a preference.  Both halves are guarded, so
+        # a fresh session with neither a taste model nor a played track yields an
+        # *empty* pool, and the selector answers "no information" with a uniform
+        # draw instead (audit L7).
+        #
+        # This guard belongs here and not in the scoring weights: β gates how
+        # much the taste term counts, but it never gates which candidates are
+        # *retrieved*.  Do not remove it when the β ramp is in play.
+        if np.any(session_vector):
+            session_candidates = self.find_similar(
+                session_vector,
+                k=search_k,
+                exclude_tracks=exclude_tracks
+            )
+        else:
+            session_candidates = []
 
-        # An all-zero taste vector means "no taste model yet" (see
-        # UserTaste._initialize_taste_vector).  Querying with it would return an
-        # arbitrary slice of the library — every dot product is 0, so the
-        # ordering is whatever argpartition happens to produce — and half the
-        # pool would be noise dressed as preference.  Fill the pool from the
-        # session vector alone until there is evidence to blend in.
         if np.any(taste_vector):
             taste_candidates = self.find_similar(
                 taste_vector,

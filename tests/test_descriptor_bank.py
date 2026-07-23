@@ -291,3 +291,51 @@ def test_separation_metrics_survive_a_constant_descriptor(rng):
     metrics = db.separation_metrics(scores)
     assert np.isfinite(metrics['effective_rank'])
     assert metrics['min_std'] == 0.0
+
+
+# ── The Stage 2 / Stage 3 seam ───────────────────────────────────────────────
+#
+# Stage 2 made the session vector start at **zero** rather than at a random
+# direction (audit L7), which created a state H1 was never written against:
+# "nothing has played yet".  H1's readout is Stage 3 work, and this is the trap
+# waiting for it.
+
+def test_z_scoring_a_zero_vector_produces_a_confident_looking_readout(bank_inputs, rng):
+    """
+    An unseeded session vector does **not** fail loudly. It produces three
+    plausible words.
+
+    `z(d, v) = (sim(d, v) − mean_d) / std_d`, and with `v = 0` every `sim` is
+    exactly 0 — so the result is `−mean_d / std_d`, a fixed vector determined
+    entirely by the bank's own baselines. It is finite, it is deterministic, it
+    ranks, and it is about nothing at all. On the real 49-word bank it reads
+    `shimmering · orchestral · serene`.
+
+    This is H1's original defect in a new costume: a display asserting something
+    the system cannot back up. **The vibe readout must be gated on
+    `SessionState.is_seeded()`** (or on the descriptor magnitudes, which are an
+    order of magnitude smaller than a real track's) rather than on the bank
+    defending itself — it cannot.
+    """
+    library, dimension = bank_inputs
+    labels = [f"w{i}" for i in range(8)]
+    text = rng.standard_normal((len(labels), dimension)).astype(np.float32)
+    payload, _ = _bank_from(text, labels, library)
+    bank = db.DescriptorBank(payload['labels'], payload['text_embeddings'],
+                             payload['mean'], payload['std'])
+
+    zero_readout = bank.top(np.zeros(dimension), n=3)
+
+    # It answers, rather than refusing or returning NaN — which is the hazard.
+    assert len(zero_readout) == 3
+    assert all(np.isfinite(score) for _, score in zero_readout)
+
+    # And it answers the *same* thing every time, because it is a property of
+    # the bank rather than of anything that was played.
+    assert bank.top(np.zeros(dimension), n=3) == zero_readout
+
+    # The only honest signal available to a caller: the scores are far weaker
+    # than a real track's. A gate on is_seeded() is still the right one.
+    real_track_best = max(score for _, score in bank.top(library[0], n=3))
+    zero_best = max(score for _, score in zero_readout)
+    assert zero_best < real_track_best

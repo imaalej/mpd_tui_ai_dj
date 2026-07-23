@@ -12,7 +12,8 @@ for an in-progress rewrite. Before changing anything:
 - **§0b** — the implementation log: what has shipped, and where doing the work contradicted the plan.
 - **§8** — the ordered work plan, with a definition of done per stage.
 - **§7** — the `.npz` schemas. Both artifacts now exist and are validated on load; build to these.
-- **§10b** — the Stage 1 re-measurement. Supersedes §10 wherever they overlap.
+- **§10c** — the Stage 2 measurements, taken by driving the shipped code. Supersedes §10b's two
+  "Re-measured for Stage 2" tables, which were simulations written before the code existed.
 
 Findings are tagged `OPEN` / `NEW` / `ELEVATED` (work required), `DONE` / `PARTIALLY DONE` (shipped),
 or `DISSOLVED` / `SUPERSEDED` (no work — the design change removed them). Don't fix a dissolved
@@ -20,34 +21,58 @@ finding. §6 is the current status table.
 
 ## Project state
 
-**Stages 0 and 1 are complete. Stage 2 is next.** Line references in the audit's §2–§5 predate
+**Stages 0, 1 and 2 are complete. Stage 3 is next.** Line references in the audit's §2–§5 predate
 Stage 0 and are stale for every file those stages touched.
 
-**The application starts and reports a clean library load.** It does not yet play continuously — the
-queue is ten deep and never refills (C1), MPD's `random on` still discards the ordering (C2), and
-selection is a strict argmax (H6). That is Stage 2, and D1 + H6 must land together.
+**The application plays.** It runs continuously one track ahead, adapts on the very next song,
+forces and restores MPD's playback modes on every exit path, and escalates `[N]` by a magnitude
+solved for a measured pool-turnover target. Verified live: 36 tracks, no stall, no repeat inside the
+replay gap, modes restored byte-identically after `kill -TERM`. Every critical finding is closed.
 
-**Starting Stage 2:** read §8's Stage 2 section first — it opens with what Stage 1 settled, what moved
-and by how much, and the numbers not to trust. Then M1's verified MPD semantics table, because the
-`FakeMPD` is the first thing to build and the assumptions that produced C1 would reproduce it. The
-files in scope are `queue_manager.py` (mostly deleted and rewritten), `feedback_handler.py`,
-`session_state.py`, `exploration_controller.py`, `track_selector.py`, `main_tui.py`, `persistence.py`
-and the key bindings in `tui.py`. Nothing under `data/embeddings/`, `embeddings_io.py`,
-`embedding_generator.py`, `descriptor_bank.py` or `music_directory.py` should need to change; the
-descriptor bank loads as `self.descriptor_bank` on the orchestrator and stays unused until Stage 3.
+**Stage 3 is display only.** Read §8's Stage 3 section first — it opens with what is settled, what
+Stage 2 left in place for it, and the one item in the stage that risks inventing a threshold. The
+short version:
 
-The vector space is now trustworthy and should be treated as settled: 674 tracks, full-coverage
-deterministic windows, centred on load, plus a 49-word CLAP descriptor bank. §10b is the
-re-measurement; use those numbers, not §10's pre-C3 ones.
+- **Do H8 first.** The album art is pinned to hand-counted row constants (`RIGHT_COL_ROWS = 10`,
+  `x=2`, `y=3`). Stage 2 deliberately left the panel geometry untouched so those constants are still
+  correct — and every other Stage 3 item moves the layout out from under them.
+- The files in scope are `tui.py` and `album_art.py`, plus `descriptor_bank.py` as a *reader*. If a
+  display change seems to need `queue_manager.py`, `track_selector.py`, `session_state.py` or
+  `manifold.py`, stop and work out why — the player is closed and tested.
+- `DescriptorBank` already loads as `self.descriptor_bank` on the orchestrator; `z_scores(vector)`
+  and `top(vector, n)` are the whole API H1b and H1d need. It has been sitting unused since Stage 1.
+- **Gate the vibe readout on `session_state.is_seeded()`.** Stage 2 made the session vector start at
+  zero, and `bank.top(zeros)` does not refuse — every similarity is 0, so it returns
+  `−mean_d / std_d`, which reads as `shimmering · orchestral · serene` about nothing at all. This is
+  H1's original defect in a new costume and the bank cannot defend against it. A test pins the
+  hazard.
+- **The history panel needs a different metadata path.** `get_playlist_metadata()` reads
+  `mpc playlist`, and under `consume on` played tracks are gone from it — so it covers exactly the
+  tracks the history panel does not show. `MPDController._fetch_track_tags()` is the per-track,
+  cached one (mutagen → `mpc search` → filename).
+- **Nothing stores what H1's consistency word compares against.** `recent_tracks` holds the last five
+  *track embeddings*, not past session-vector z-vectors.
+- `↑↓` and `ENTER` are unbound and absent from the footer, so H1d rebinds free keys. **Re-derive the
+  history indices from scratch** — the old ones counted from the top of the MPD playlist, which is
+  why `ENTER` used to replay the session's first track.
+- `[I]` already reports τ, the drawn rank, β earned and the next skip's turnover target. H1d adds the
+  descriptor rows; the overlay is sized to its content and will need to **scroll** once they land.
+- **Nothing in the suite constructs the widget tree.** 311 tests cover everything *behind* the
+  display, so Stage 3 starts with no coverage in its own area — which is how H1, C1 and C4 all shipped
+  under a green suite. H8's geometry is arithmetic and testable.
+
+The vector space is settled: 674 tracks, full-coverage deterministic windows, centred on load, plus a
+49-word CLAP descriptor bank. So is the player. Use §10c's numbers for anything about skips,
+selection or the manifold; §10b for the embeddings and the descriptor bank.
 
 Where the code and the audit disagree, the audit wins. Several of the audit's own empirical claims
 turned out to be wrong when the work was done; those findings have been **rewritten to carry the
 correct claim**, so you can read any finding as current rather than hunting for a later correction.
 §0b records only what did not belong inside a finding.
 
-**Nothing in `data/state/` is worth preserving.** The taste vector, exploration state and feedback
-history are discarded (§0, D3). Do not write migration code, backward-compat shims, or "reset
-carefully" logic for any of it. `data/embeddings/` is different now — it is a five-minute rebuild, not
+**Nothing in `data/state/` is worth preserving.** The taste vector, exploration state, feedback
+history and play history are all regenerated by listening (§0, D3), and none of it is committed. Do
+not write migration code, backward-compat shims, or "reset carefully" logic for any of it. `data/embeddings/` is different now — it is a five-minute rebuild, not
 a throwaway, and regenerating it is `python3 generate_embeddings.py --force`.
 
 **Significant refactoring is in scope** (§0, D7). Where a finding's fix is "patch this" but the honest
@@ -68,10 +93,12 @@ Concretely, prefer scale-invariant formulations (rank-based sampling over score-
 raw similarities; measured pool-turnover over a declared magnitude) so nothing needs recalibration when
 the weights or the embedding space move.
 
-The audit's empirical claims are reproducible — **§10b** gives the live measurements and the
-conditions they were taken under (§10 is the pre-Stage-1 record, kept as provenance). If you change a
-formula that a number in there depends on, re-measure rather than assuming. Stage 1 did exactly that
-and found that a skip nudge which used to move 3.9% of the candidate pool now moves 0.3%.
+The audit's empirical claims are reproducible — **§10c** is the live record for skips, selection and
+the manifold, **§10b** for the embeddings and the descriptor bank, §10 the pre-Stage-1 provenance. If
+you change a formula that a number in there depends on, re-measure rather than assuming. Each of the
+last three stages did that and each time it changed something material — most recently, a skip
+turnover the audit reported as a constant 0.3% turned out to be **2.9%**, and to vary tenfold with
+how settled the session vector is.
 
 ## Running it
 
@@ -88,6 +115,12 @@ rewrites the artifact every downstream number depends on.
 
 `main_tui.py` is the only orchestrator; `main.py` and `setup_check.py` were deleted in Stage 0 (M2).
 There is no demo/random-embedding path anywhere — it was removed on purpose (M2/M4).
+
+**Driving it for real.** urwid needs a tty, so end-to-end verification runs it under `pty.fork()` —
+and the pty needs an explicit `TIOCSWINSZ`, or it reports 0×0, urwid draws nothing, and the run looks
+like it worked while every captured frame is empty. Playback can be accelerated with `mpc seek 99%`
+per track. **Always snapshot the user's MPD queue, modes and volume first and restore them after**;
+the app itself only restores the modes.
 
 ## Environment
 
@@ -112,19 +145,28 @@ There is no demo/random-embedding path anywhere — it was removed on purpose (M
   off the last remaining track empties the queue and stops, and a subsequent `mpc add` does *not*
   restart it. Advance-then-add therefore kills the session silently, and the only recovery is a
   `play()` call that C4 forbids in a skip path. The full verified consume-mode semantics table is in
-  the audit under M1 — build `FakeMPD` to it, not to intuition.
+  the audit under M1, including four rows measured in Stage 2 — notably that **`mpc next` while
+  paused advances *and resumes playing***, contrary to what C4 originally assumed. `FakeMPD` is built
+  to that table; extend it there rather than reasoning from the protocol.
 - **Never blend an audio-space vector toward a text embedding, or toward a random direction.** CLAP's
   towers don't share a cone, and a random 512-d direction is 0.085-similar to real music where a
-  session vector is 0.641 and a real track is 0.729. After any large session-vector manipulation,
-  project back onto the manifold: `normalise(mean(top-25 library embeddings by dot(E, v)))` (H9) —
-  but only for displacements large enough to warrant it; `snap()` is itself a move, and applied to a
-  small nudge it overshoots (§10b).
+  session vector is 0.787 and a real track is 0.748. `manifold.py` owns this: any large displacement
+  is projected back with `snap()` = `normalise(mean(top-25 library embeddings by dot(E, v)))`. Three
+  things about it that were learned the hard way and are easy to undo:
+  - **`snap()` is a move, not a projection.** It has a turnover floor of its own (~8%), so applying
+    it to a single small skip overshoots the schedule. It is gated at run length ≥ 2.
+  - **Solve *through* the snap, not before it.** λ chosen against the un-snapped vector and snapped
+    afterwards let a second consecutive skip land back where the run started — measured live at 1%
+    turnover against a 20% target. `solve_repulsion(..., snap_result=True)` is not an optimisation.
+  - **"Still music" has no fixed threshold**, only the library's own distribution: real tracks span
+    0.427 to 0.961 on this measure. The assertion that means something is "no worse than the least
+    typical real track" (p1 = 0.463).
 - **stderr is swallowed while the TUI runs.** `data/dj.log` is the durable copy (L5, shipped in
   Stage 0) — read it, not the 5-line console panel.
 
 ## Testing
 
-`python3 -m pytest tests` — 179 tests, green, about 11 seconds. The three `test_phase*.py` files were
+`python3 -m pytest tests` — 311 tests, green, about 17 seconds. The three `test_phase*.py` files were
 deleted rather than repaired (M1a); roughly thirty of their 66 "passing" checks were hardcoded `True`
 literals.
 
@@ -132,14 +174,23 @@ literals.
 HF cache — a test that silently downloads 700 MB is not a test anyone can run. It also skips the
 library assertions if `data/embeddings/` is empty.
 
-The suite covers Stages 0 and 1 and **nothing in it touches MPD**. The `FakeMPD` that models real
-semantics including consume mode is Stage 2 (M1b) and has not been written. Behavioural tests, not
-existence checks: C1 and C4 both survived under a green suite.
+The suite is behavioural, not existence checks — C1 and C4 both survived under a green suite of the
+latter. What that means in practice, and what to preserve:
 
-Stage 1's three acceptance properties are asserted and stay asserted: embedding is bit-deterministic
-(for a fixed batch size — §0b), self-similarity is exactly 1.0, and the post-centring random-pair
-distribution sits at +0.011.
+- **`FakeMPD` is itself under test.** `tests/test_fake_mpd.py` asserts the double against the
+  verified semantics table row by row, because a double built on the assumptions that produced C1
+  would reproduce C1 and pass. It has already earned that: a fixture defaulting to `consume off`
+  silently put every component back in C1's world, and the replay-gap test caught it.
+- **Tests drive the real methods.** `test_skip_path.py` calls the actual
+  `AdaptiveDJWithTUI.skip_current_track` against a stand-in and asserts on FakeMPD's **call log** —
+  one `next`, no `play`, every `add` before the advance. A test that mirrors the ordering it is
+  checking proves only that the mirror is self-consistent.
+- **Claims about the library are tested against the library.** `test_skip_escalation.py` skips if
+  `data/embeddings/` is absent, because whether a turnover target is reachable at all is a property
+  of the collection's structure, not of the solver.
+- Stage 1's three acceptance properties stay asserted: bit-deterministic embedding (for a fixed batch
+  size), self-similarity exactly 1.0, post-centring random pairs at +0.011.
 
 Fixtures live in `tests/conftest.py`: `rng` (seeded), `library` (in-memory `TrackLibrary`),
-`make_artifact` (writes a schema-correct `.npz` with any field overridable, for testing the loader's
-refusals). `FakeMPD` belongs beside them.
+`make_artifact` (schema-correct `.npz` with any field overridable), `fake_mpd` (**consume on**, the
+state the DJ forces) and `dj_parts` (the real selection stack wired to `FakeMPD`).
