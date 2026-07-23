@@ -4,7 +4,7 @@ Maintains rolling buffer of upcoming tracks.
 """
 
 import sys
-from typing import List, Set, Optional
+from typing import List
 from config import config
 
 
@@ -90,10 +90,7 @@ class QueueManager:
         session_vector = self.session_state.get_session_vector()
         taste_vector = self.user_taste.get_taste_vector()
         weights = self.exploration_controller.get_weights()
-        
-        # Get time context if available (Phase 3)
-        time_context = getattr(self.session_state, 'time_context', None)
-        
+
         # Build exclusion set
         exclude_tracks = set(self.planned_queue)
         exclude_tracks.update(self.currently_queued_in_mpd)
@@ -105,8 +102,7 @@ class QueueManager:
                 session_vector=session_vector,
                 taste_vector=taste_vector,
                 weights=weights,
-                exclude_tracks=exclude_tracks,
-                time_context=time_context
+                exclude_tracks=exclude_tracks
             )
             
             if track is None:

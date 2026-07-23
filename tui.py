@@ -45,13 +45,20 @@ class _ConsoleCapture(io.TextIOBase):
     """
     Drop-in replacement for sys.stderr that:
       • Stores the last N lines in a ring-buffer for the TUI console widget.
+      • Tees every line to config.log_file, so nothing is lost when the TUI
+        scrolls it off the 5-line console panel or swallows it entirely.
       • Passes everything through to the real stderr ONLY when the TUI is not
         active, so messages never bleed through the urwid layout.
+
+    The log tee is the point of this class existing (audit L5).  Without it a
+    traceback from the background thread flashes through a five-line ring buffer
+    and is then unrecoverable, which is the single biggest obstacle to
+    diagnosing anything that happens during a real session.
     """
 
     MAX_LINES = 200
 
-    def __init__(self, real_stderr):
+    def __init__(self, real_stderr, log_path: Optional[Path] = None):
         super().__init__()
         self._real = real_stderr
         self._buf = deque(maxlen=self.MAX_LINES)
@@ -61,6 +68,25 @@ class _ConsoleCapture(io.TextIOBase):
         # When True, writes are captured only — never forwarded to the raw
         # terminal, which would bleed through the urwid layout.
         self.tui_active: bool = False
+        self._log = self._open_log(log_path)
+
+    def _open_log(self, log_path: Optional[Path]):
+        """
+        Open the session log in append mode.  Failure here must never take the
+        application down — a missing log is a degraded session, not a dead one.
+        """
+        if log_path is None:
+            return None
+        try:
+            log_path.parent.mkdir(parents=True, exist_ok=True)
+            handle = open(log_path, "a", encoding="utf-8", buffering=1)
+            stamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            handle.write(f"\n===== session started {stamp} =====\n")
+            return handle
+        except Exception as e:
+            self._real.write(f"Warning: could not open log file {log_path}: {e}\n")
+            self._real.flush()
+            return None
 
     def write(self, text: str) -> int:
         # Only forward to the real terminal when the TUI is NOT running.
@@ -75,13 +101,32 @@ class _ConsoleCapture(io.TextIOBase):
             line = line.rstrip()
             if line:
                 ts = datetime.now().strftime("%H:%M:%S")
+                stamped = f"[{ts}] {line}"
                 with self._lock:
-                    self._buf.append(f"[{ts}] {line}")
+                    self._buf.append(stamped)
+                    self._write_log(stamped)
         return len(text)
+
+    def _write_log(self, line: str):
+        """Append one already-stamped line to the log. Caller holds the lock."""
+        if self._log is None:
+            return
+        try:
+            self._log.write(line + "\n")
+        except Exception:
+            # A broken log must not turn into an infinite recursion through
+            # stderr.  Drop the handle and carry on silently.
+            self._log = None
 
     def flush(self):
         if not self.tui_active:
             self._real.flush()
+        with self._lock:
+            if self._log is not None:
+                try:
+                    self._log.flush()
+                except Exception:
+                    self._log = None
 
     def get_lines(self) -> List[str]:
         with self._lock:
@@ -99,7 +144,7 @@ _console_capture: Optional[_ConsoleCapture] = None
 def _install_console_capture():
     global _console_capture
     if _console_capture is None:
-        _console_capture = _ConsoleCapture(sys.__stderr__)
+        _console_capture = _ConsoleCapture(sys.__stderr__, config.log_file)
         sys.stderr = _console_capture
 
 
@@ -191,7 +236,12 @@ class AdaptiveDJTUI:
         self.artist_text = urwid.Text("Artist: ---")
         self.album_text = urwid.Text("Album: ---")
         self.track_text = urwid.Text("Track: ---")
-        self.vibe_text = urwid.Text(("vibe", "Vibe: Starting session…"))
+        # The vibe line carries the track count and nothing else until the CLAP
+        # descriptor bank lands (audit H1/D5, Stage 1 data + Stage 3 display).
+        # The mood/momentum/stage words that used to live here were invented
+        # against thresholds the data never occupied — a blank line is honest,
+        # a counter is a fact, and the old string was neither.
+        self.vibe_text = urwid.Text(("vibe", "Session: —"))
 
         self.seek_bar_progress = urwid.ProgressBar(
             "seek_bar", "seek_progress", current=0, done=100
@@ -275,16 +325,16 @@ class AdaptiveDJTUI:
         # ── Footer ──
         footer_text = urwid.Text(
             [
-                " SPACE=Play/Pause  ",
-                "N=Next  ",
-                "V=Vibe  ",
-                "L=Like  ",
-                "<,>=Vol  ",
-                "←→=Seek  ",
-                "↑↓=Queue  ",
-                "ENTER=Play  ",
-                "I=Info  ",
-                "Q=Quit",
+                "Toggle Pause - [SPACE]  ",
+                "Skip Song - [N]  ",
+                "Skip Playlist - [V]  ",
+                "Like Song - [L]  ",
+                "Vol - [<,>]  ",
+                "Seek - [←,→]  ",
+                "Scroll Queue - [↑,↓]  ",
+                "Play - [ENTER]  ",
+                "Model Info - [I]  ",
+                "Quit - [Q]",
             ],
             align="center",
         )
@@ -328,7 +378,7 @@ class AdaptiveDJTUI:
         elif key_lower == "l":
             self._like_track()
         elif key_lower == "i":
-            self._show_context_info()
+            self._show_model_info()
         elif key == "up":
             self._queue_navigate(-1)
         elif key == "down":
@@ -424,32 +474,52 @@ class AdaptiveDJTUI:
         if self.use_urwid:
             raise urwid.ExitMainLoop()
 
-    def _show_context_info(self):
-        if not config.enable_time_context or not hasattr(
-            self.dj.session_state, "time_context"
-        ):
-            return
+    def _show_model_info(self):
+        """
+        Model inspector: what the machine currently believes, in measured
+        quantities only.
 
-        stats = self.dj.session_state.time_context.get_stats()
+        This replaces the time-context overlay, which had no content left after
+        that subsystem was removed (audit D6/L9).  Stage 3 (H1d) extends it with
+        the top descriptors for the session and taste vectors and the effective
+        sampling temperature; everything shown here is already a real number, so
+        nothing needs to be invented in the meantime.
+        """
+        session = self.dj.session_state.get_stats()
+        taste = self.dj.user_taste.get_stats()
+        exploration = self.dj.exploration_controller.get_stats()
+        selector = self.dj.track_selector.get_stats()
+        weights = self.dj.exploration_controller.get_weights()
+
         lines = [
-            "TIME CONTEXT STATISTICS",
+            "MODEL STATE",
             "",
-            f"Period:    {stats['current_period'].upper()}",
-            f"Day type:  {stats['current_day_type'].upper()}",
-            f"Modifier:  {stats['day_modifier']:.2f}× exploration",
+            f"Library            {self.dj.track_library.get_track_count()} tracks",
+            f"Session started    {'yes' if session['session_started'] else 'no'}",
+            f"Tracks this session {session['tracks_played']}",
+            f"Unique tracks seen  {selector['unique_tracks_played']}",
             "",
             "─" * 50,
-        ]
-        for period, d in stats["periods"].items():
-            status = "✓" if d["has_data"] else "○"
-            last = d["last_update"] or "never"
-            lines.append(
-                f"{status} {period.capitalize():12} "
-                f"{d['updates']:4d} updates   last: {last}"
-            )
-        lines += [
+            "TASTE MODEL",
+            f"  seeded           {'yes' if taste['is_seeded'] else 'no (no positive signal yet)'}",
+            f"  updates          {taste['total_updates']}",
+            f"  likes            {taste['like_count']}",
+            f"  full listens     {taste['full_listen_count']}",
+            f"  skips            {taste['skip_count']}",
+            "",
             "─" * 50,
-            f"Total updates: {stats['total_updates']}",
+            "EXPLORATION",
+            f"  value            {exploration['exploration']:.2f}"
+            f"   (bounds {config.exploration_min:.2f}–{config.exploration_max:.2f})",
+            f"  consecutive skips   {exploration['consecutive_skips']}",
+            f"  consecutive listens {exploration['consecutive_listens']}",
+            "",
+            "─" * 50,
+            "CURRENT SCORING WEIGHTS",
+            f"  session          {weights['session_weight']:.3f}",
+            f"  taste            {weights['taste_weight']:.3f}",
+            f"  novelty          {weights['novelty_weight']:.3f}",
+            f"  anti-repetition  {weights['anti_repetition_weight']:.3f}",
             "",
             "Press any key to close…",
         ]
@@ -457,7 +527,7 @@ class AdaptiveDJTUI:
         if self.use_urwid:
             overlay_text = urwid.Text("\n".join(lines))
             overlay_fill = urwid.Filler(overlay_text, valign="top")
-            overlay_box = urwid.LineBox(overlay_fill, title="Context Info")
+            overlay_box = urwid.LineBox(overlay_fill, title="Model Info")
             overlay = urwid.Overlay(
                 overlay_box,
                 self.frame,
@@ -535,9 +605,8 @@ class AdaptiveDJTUI:
             self.seek_bar_progress.set_completion(0)
             self.seek_time_text.set_text("0:00 / 0:00")
 
-        # Vibe
-        vibe = self.dj.session_state.get_vibe_description()
-        self.vibe_text.set_text(("vibe", f"Vibe:    {vibe}"))
+        # Session line (see the widget's construction for why this is a counter)
+        self.vibe_text.set_text(("vibe", f"Session: {self._session_line()}"))
 
         # Console
         self._update_console()
@@ -701,8 +770,7 @@ class AdaptiveDJTUI:
             print(f"\n[{bar}]")
             print(f"{self._fmt(pos)} / {self._fmt(dur)}")
 
-        vibe = self.dj.session_state.get_vibe_description()
-        print(f"\nVibe: {vibe}")
+        print(f"\nSession: {self._session_line()}")
 
         print("\n" + "─" * 60)
         print("Upcoming Queue:")
@@ -721,6 +789,17 @@ class AdaptiveDJTUI:
         m = seconds // 60
         s = seconds % 60
         return f"{m}:{s:02d}"
+
+    def _session_line(self) -> str:
+        """
+        The one honest thing the session vector can say about itself right now:
+        how many tracks it has been fed.  Stage 3 replaces this with the top-3
+        CLAP descriptors by z-score plus a measured drift word (audit H1).
+        """
+        n = self.dj.session_state.tracks_played
+        if not self.dj.session_state.session_started:
+            return "—"
+        return f"{n} track{'' if n == 1 else 's'} played"
 
     # ── Run ───────────────────────────────────────────────────────────────────
 

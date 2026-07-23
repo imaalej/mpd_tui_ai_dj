@@ -13,7 +13,7 @@ A terminal-based DJ that learns your taste in real time and curates a continuous
 ║  │             │   Album:   Promises                               ║
 ║  │             │   Track:   ❤ LesAlpx                              ║
 ║  └─────────────┘   [████████████░░░░░░░░░░░░]  3:12 / 8:44         ║
-║                    Vibe: focused cohesive vibe, deep in the zone   ║
+║                    Session: 14 tracks played                       ║
 ╠════════════════════════════════════════════════════════════════════╣
 ║  System Console                                                    ║
 ║  [14:32:01] Exploration decreased to 0.18 (6 consecutive listens)  ║
@@ -51,10 +51,9 @@ bash start.sh
 
 `start.sh` will check your Python version, install pip dependencies, verify MPD is reachable, and walk you through generating embeddings if this is your first run. After that it launches the TUI automatically.
 
-**First run only — embeddings:** The DJ needs audio fingerprints of your library to find musically similar tracks. You'll be offered two options:
+**First run only — embeddings:** The DJ needs audio fingerprints of your library to find musically similar tracks. These come from [CLAP](https://github.com/LAION-AI/CLAP) and take a while to generate on first run (a model download plus one pass over your library).
 
-- **Real embeddings** via [CLAP](https://github.com/LAION-AI/CLAP) — audio-based, best quality, slow (~1–60 min depending on library size, requires ~1 GB model download)
-- **Demo embeddings** — random vectors, instant, good enough to try the interface
+There is no "demo mode" with random vectors. Random embeddings make every similarity, every novelty score and every learned preference meaningless while the interface keeps presenting them as insight — it looks like it works, and none of it does.
 
 You only ever run this once. The result is saved to `data/embeddings/`.
 
@@ -84,7 +83,7 @@ mpc status   # should show your track count
 | `←` / `→` | Seek backward / forward 10s |
 | `↑` / `↓` | Navigate the queue |
 | `Enter` | Play selected queue item immediately |
-| `I` | Show time-context stats |
+| `I` | Show model state (taste, exploration, current scoring weights) |
 | `Q` | Quit |
 
 ---
@@ -120,23 +119,20 @@ The weights (α, β, γ, δ) shift dynamically based on your behavior. Skip a fe
 
 A single **exploration value** (0.1–0.7) controls how adventurous the DJ is. It increases with every skip and decreases with every full listen, meaning it self-calibrates to your engagement. If you're in a zone and letting tracks run, it narrows in. If you're skipping around, it opens up and reaches further from your established taste.
 
-The exploration level also picks up a **day-of-week modifier**: slightly more conservative on weekdays, slightly more adventurous on weekends.
+### Describing the session
 
-### Mood & Narrative
+The session line currently shows a track count and nothing else.
 
-The session vector's trajectory is tracked over time and used to generate the vibe description you see on screen. If recent tracks have been highly similar to each other (cosine similarity > 0.85), the vibe reads as *focused*. More varied and it shifts to *flowing*, *drifting*, or *exploring*. The description also reflects how deep you are into the session (*warming up → building → deep in the zone*) and whether the overall spread of your session is *cohesive*, *diverse*, or *eclectic*.
+It used to show a mood phrase — *"focused cohesive vibe, deep in the zone"* — assembled from three heuristics. All three were invented against scales nobody measured: the mood word came from an entropy-like quantity that is always ≈ 55 for a 512-dimensional unit vector, so it returned *eclectic* every time and its other two branches were unreachable; the *warming up → building → deep in the zone* stage word was a track counter in a costume. A blank line is honest and a counter is a fact; the phrase was neither.
+
+The replacement is real and specified: a bank of descriptor prompts embedded with CLAP's *text* encoder, scored against the session vector as a z-score relative to this library's own distribution, so *"hypnotic"* means "unusually hypnotic **for your collection**". See `PROJECT_AUDIT.md` §H1.
 
 The queue is kept at 10 tracks and refilled dynamically so playback never stops. Each candidate is drawn from a pool of 100 nearest-neighbor tracks in embedding space, then re-ranked by the full scoring function. Recently played tracks are excluded for at least 20 songs to prevent repetition.
-
-### Time Context
-
-The system tracks which kinds of music you tend to listen to at different times of day — morning, midday, afternoon, evening, night — and adds a small time-similarity bonus to tracks that fit the current period based on your history. This builds up passively over many sessions and has a gentle influence (weighted at 15%) so it never overrides your explicit preferences.
 
 ### What Persists Between Sessions
 
 - Your **taste vector** — accumulated from all your likes, listens, and skips
 - Your **exploration level** — picks up roughly where you left off
-- Your **time context** — which music you listen to at which hours
 - Your **feedback history** — a log of every like, skip, and listen event
 
 The session vector itself resets each time. Every session begins fresh but informed by everything before it.

@@ -6,11 +6,12 @@ decisions taken since the first audit, and where to pick the work back up.
 
 | | |
 |---|---|
-| **Repository** | `/home/gumibo/misc/programming/projects/mpd_tui_ai_dj` · branch `master` · HEAD `8dc4275` |
+| **Repository** | `/home/gumibo/misc/programming/projects/mpd_tui_ai_dj` · audited at `master` HEAD `8dc4275` |
 | **Scope** | 23 tracked files, ~6,200 lines Python + Bash. All source read in full; claims verified by execution where possible. |
 | **Environment tested** | Fedora (Linux 7.1.3), Python 3.14.6, numpy 1.26.4, urwid 3.0.5, MPD/MPC present, ueberzugpp present, 616 CLAP embeddings on disk. |
 | **Audit date** | 22 July 2026 |
 | **Revision date** | 22 July 2026 — design decisions folded in, see §0 |
+| **Progress** | **Stage 0 complete** (22 July 2026). Stages 1–4 outstanding. See §0b for what landed and where it deviated from the plan. |
 
 ---
 
@@ -21,8 +22,10 @@ conversation in context.
 
 - **§0** is the decision record. Read it first — it changes the meaning of roughly half the findings
   below, and several findings' "fix direction" blocks were rewritten because of it.
+- **§0b** is the implementation log. It records what has actually shipped, and — more usefully — the
+  four places where doing the work turned up something the plan had not anticipated.
 - **§2–§5** are the findings, each tagged with a status: `OPEN`, `NEW`, `DISSOLVED`, `RESOLVED by
-  deletion`, `SUPERSEDED`, `ELEVATED`. Only `OPEN`, `NEW` and `ELEVATED` require work.
+  deletion`, `SUPERSEDED`, `ELEVATED`, `DONE`. Only `OPEN`, `NEW` and `ELEVATED` require work.
 - **§6** is the status table — the fastest way to see what is still live.
 - **§7** specifies the target data artifacts (the `.npz` schemas). Build to these.
 - **§8** is the ordered plan. Each stage has a definition of done. **Each stage leaves the
@@ -30,8 +33,10 @@ conversation in context.
 - **§9** lists what is still undecided.
 - **§10** is the evidence appendix — raw measurements behind every empirical claim.
 
-Where this document and the code disagree, the document describes the target and the code describes
-`HEAD 8dc4275`. Line references are to the current code.
+Where this document and the code disagree, the document describes the target. **Line references
+throughout §2–§5 are to `HEAD 8dc4275`, the pre-Stage-0 tree**, and are now stale for every file
+Stage 0 touched — they are kept as provenance for the finding, not as navigation. §0b lists what
+moved.
 
 ---
 
@@ -61,6 +66,11 @@ distribution, or delete them.
 
 None of this is architectural. The reason it survived is that the test suite reports 66 passing checks
 while roughly half of them are hardcoded `True` literals.
+
+**Where it stands now.** Stage 0 is done: the ground is cleared, the invented vocabulary is gone, the
+duplicate and dead code is gone, and there is a real (if narrow) tracked test suite plus a log file to
+debug the rest through. Every one of the four original critical defects is still open — they are
+Stages 1 and 2, and they are the work that makes the thing play.
 
 ---
 
@@ -203,6 +213,96 @@ dead API surface in L8.
 
 ---
 
+## 0b · Implementation log
+
+### Stage 0 — complete, 22 July 2026
+
+Net effect: **−1,462 lines of application code, +734 lines of tests**. Three whole files deleted
+(`main.py`, `setup_check.py`, `time_context.py`) plus in-file removals across nine modules.
+
+| Plan item | Landed as |
+|---|---|
+| **L5** | `_ConsoleCapture` tees every completed line to `config.log_file` (`data/dj.log`), append mode with a per-session banner. Opening the log is failure-tolerant — an unwritable path degrades to no log rather than killing the app, and a write error drops the handle instead of recursing through `stderr`. |
+| **D6 / H5 / M6a** | `time_context.py` deleted. Ten config keys removed. `get_exploration_factor()` removed. The `time_context=` parameters removed from `TrackSelector.select_track` / `_calculate_score` / `QueueManager._generate_tracks`, the update hooks removed from `FeedbackHandler`, and the save/load hooks removed from `Persistence` (which no longer takes `session_state` at all). |
+| **D4** | `get_vibe_description()`, `_update_vibe_trajectory()` and `vibe_trajectory` deleted, with a comment in their place recording *why* so it cannot be reintroduced by someone who thinks it was an oversight. `UserTaste._initialize_taste_vector()` now returns zeros. |
+| **M2 / D7** | `main.py` and `setup_check.py` deleted. `start.sh`'s demo-embeddings branch deleted; `generate_dummy_embeddings()` deleted from `track_library.py`; `main_tui.py`'s "generate dummy embeddings now? (y/n)" prompt replaced with a hard exit pointing at `generate_embeddings.py`. |
+| **H7** | All eight duplicate method bodies removed, bool-returning versions kept. `add_track` checks `returncode` and logs MPD's `stderr` on refusal. A test parses the class with `ast` and fails on any duplicate `FunctionDef` name, so the condition cannot silently return. |
+| **L8** | Deleted: `MPDController.toggle` / `seek` / `get_all_tracks` / `get_track_metadata`, `TrackLibrary.has_track`, `SessionState.get_recent_average` / `get_similarity` / `reset`, `UserTaste.get_similarity` / `reset`, `TrackSelector.clear_history`, `Persistence.reset_all`. Retained per the plan: `previous_track` (with the consume-mode caveat written into its docstring), `save_embeddings`. |
+| **M1a** | `test_*.py` removed from `.gitignore`; the three phase-test files deleted; `tests/` created and tracked — 9 files, 67 tests, green. |
+| **cfg** | `validate()` raises `ValueError` with a message naming the offending key. Nine orphaned config keys removed; `log_file` added. |
+| **D3** | `data/embeddings/*` and `data/state/*` deleted. Only the three `.gitkeep` files remain. |
+
+**Verification.** 67 pytest tests pass. The application was additionally driven end to end against
+the live MPD in a pty — launch, `[SPACE]` play, `[N]` skip, `[L]` like, `[I]` overlay, `[N]` skip,
+`[Q]` quit — exiting 0, with the rendered frames captured and read. `data/dj.log` filled correctly,
+feedback history and taste model round-tripped, and the taste vector was seeded by the like and
+moved away by the skip. The user's MPD queue, playback modes and volume were snapshotted before the
+run and restored after.
+
+### Four things the plan did not anticipate
+
+**1 · Zero taste vector needs two guards, not one.** D4 says "delete the random taste seed" and L7
+defers the β ramp to Stage 2. Doing only that produces two new defects, both worse than what was
+removed:
+
+- `TrackLibrary.get_candidate_pool()` queries `find_similar(taste_vector)` for half the pool. With an
+  all-zero vector every dot product is 0, so the ordering is whatever `argpartition` happens to
+  produce — half the candidate pool becomes an arbitrary slice of the library, presented as
+  preference. **Fix:** skip the taste half entirely while the vector is zero and fill from the
+  session vector alone. This is exactly what L7 argues for in prose ("driven purely by what they are
+  listening to right now"); it just also has to be true of the *pool*, not only the score.
+- `UserTaste._update()` with a negative weight subtracts from zero and re-normalises, so the *first
+  skip of a new user's life* sets the taste vector to `−track` at unit length — a full-strength claim
+  from a single rejection, and a stronger one than the random seed ever made. **Fix:** negative
+  updates are a no-op while unseeded. The counters still move; the vector does not. The first
+  positive signal establishes it.
+
+Both guards become redundant once L7's β ramp lands in Stage 2, but the pool guard should stay
+regardless — β never gates which candidates are *retrieved*.
+
+**2 · `[I]` could not wait for Stage 3.** D6 empties the time-context overlay, but the key stays
+bound and the footer, the README and `start.sh` all advertise it. Leaving a key that silently does
+nothing is the same class of dishonesty the rest of Stage 0 removes. It is now a minimal model
+inspector — library size, session/taste/exploration/selector counters, and the live scoring weights —
+which asserts nothing that is not measured. **H1d still stands**: Stage 3 adds the session and taste
+top-descriptors and the effective τ ("choosing from ~top 7") to the same overlay.
+
+**3 · Stage 0's definition of done contradicts D3.** "The app launches, plays" is not reachable after
+"delete `data/embeddings/*`" — there is nothing to select from until Stage 1 regenerates. Verified
+instead with a throwaway random-vector file, created outside the repo, used for one scripted session,
+and deleted immediately. **This is not a licence to keep such a file around**; it proves the plumbing,
+and nothing about selection quality. For Stages 1–4 the criterion should read "launches and reports a
+clean library load"; playback verification belongs to Stage 2's 30-track unattended run.
+
+**4 · One new finding, folded into M5.** `TrackLibrary.load_embeddings()` decides a file is CLAP with
+`'clap' in model_name.lower()` — a substring match on an arbitrary metadata string. The smoke-test
+file was named `SMOKE-TEST-RANDOM-NOT-CLAP` and was greeted with `✓ Loading CLAP embeddings`. M5
+already calls for `schema_version` and dimension validation on load; add "model identity is checked
+by equality against the expected checkpoint, not by substring."
+
+### Deviations from the plan's letter
+
+- **The vibe line shows `Session: N tracks played`, not a blank.** D4's own text says the stage word
+  "is a `tracks_played` counter wearing a costume — show the counter," so the counter is what it
+  shows. Same widget, same row count, so H8's geometry problem is unchanged and still Stage 3's.
+- **`ExplorationController.reset()` was deleted too.** L8 did not list it because `Persistence.reset_all()`
+  called it; deleting `reset_all` orphaned it. D7 covers this.
+- **README surgery, not the M7 rewrite.** Only the claims Stage 0 falsified were touched: the
+  day-of-week modifier, the Time Context section, the "Mood & Narrative" description, the demo-embeddings
+  option, the `[I]` row, and the screenshot's vibe line. `[V]`, queue depth 10 and the contradictory
+  model-size numbers still describe the current code and stay for Stages 2 and 4.
+- **One M7 item taken early.** `start.sh`'s embeddings prompt was being rewritten anyway, so
+  `${EMB_CHOICE,,}` — the bash 4+ expansion that is a hard syntax error on macOS's bash 3.2 — became
+  `tr '[:upper:]' '[:lower:]'` in the same edit. The rest of M7 is untouched.
+
+### What Stage 0 did **not** do
+
+`[V]` and `force_shift()` still exist, the queue is still ten deep and still never refills, selection
+is still strict argmax, MPD modes are still unasserted, and SIGTERM still neither exits nor saves.
+Those are Stages 1–2 and are unchanged by anything above.
+
+---
+
 ## 1 · How the system actually works
 
 *Read this first if you are picking the project up cold. This section describes the system **as it will
@@ -265,11 +365,13 @@ State is checkpointed periodically, not only at exit (H3).
 
 ### Current state on disk
 
-616 real CLAP embeddings (`laion/clap-htsat-unfused`, generated 2026-02-17 on an RTX 3070, 632 files
-attempted, 16 failed silently). Taste model has 15 updates. Exploration sits at 0.59. Feedback history
-holds 16 events spanning 19:02–19:40 on a single evening.
+**Nothing.** `data/` holds three `.gitkeep` files. The 616 CLAP embeddings, the 15-update taste
+model, the exploration state and the 16-event feedback history were deleted in Stage 0 per D3 — one
+38-minute session's worth of learning, in a vector space C3 and C5 are replacing. The 38-minute span
+was itself a symptom; see C1.
 
-**All of this is being deleted (D3).** The 38-minute span is itself a symptom — see C1.
+**Stage 1 regenerates the embeddings. Until it does, the application will not start** — it exits with
+a message pointing at `generate_embeddings.py` rather than offering the random vectors it used to.
 
 ---
 
@@ -534,7 +636,13 @@ replacement.
 
 ---
 
-### H1 · The mood word in every vibe description is mathematically pinned to "eclectic". `OPEN — fix superseded`
+### H1 · The mood word in every vibe description is mathematically pinned to "eclectic". `PARTIALLY DONE — heuristic deleted in Stage 0; replacement outstanding`
+
+> **Status.** The defective code is gone (Stage 0, D4): `get_vibe_description()`,
+> `_update_vibe_trajectory()` and `vibe_trajectory` are deleted, and the UI shows
+> `Session: N tracks played`. Nothing false is displayed any more. **The replacement below — the CLAP
+> descriptor bank — is entirely outstanding**, and remains the largest single piece of Stage 1 (data,
+> D5a/D5b) plus Stage 3 (display, H1b–H1d).
 
 **What.** `SessionState.get_vibe_description()` derives its mood word from the entropy-like quantity
 `−Σ|v|·log(|v|)` over the session vector, then branches on `> 5.0 → "eclectic"`, `> 4.0 → "diverse"`,
@@ -696,7 +804,7 @@ it or keep it purely for the `[I]` inspector; do not invent a use for it.
 
 ---
 
-### H5 · The day-of-week exploration modifier is dead code. `RESOLVED by deletion (D6)`
+### H5 · The day-of-week exploration modifier is dead code. `DONE — deleted in Stage 0 (D6)`
 
 **What.** `ExplorationController.get_exploration_factor()` is the only place the weekday/weekend
 modifier is applied. Nothing in the running application ever calls it — a grep across all source finds
@@ -707,8 +815,9 @@ references only inside test files. `get_weights()`, the method actually used for
 **Where.** `exploration_controller.py:71–90` (uncalled), `exploration_controller.py:92–128` (used);
 `config.py:89–91`
 
-**Status.** Resolved by removing the time-context subsystem (D6). Delete
-`get_exploration_factor()`, the two config keys, and the README paragraph.
+**Status.** Done in Stage 0. `time_context.py`, `get_exploration_factor()`, the config keys and the
+README paragraph are all gone; `tests/test_deletions.py` fails if any of the names reappear outside an
+explanatory comment.
 
 ---
 
@@ -802,7 +911,12 @@ quietly become another uncalibrated threshold of the kind C5 and H1 document.
 
 ---
 
-### H7 · `mpd_controller.py` defines eight methods twice; the surviving `add_track` swallows failures. `OPEN`
+### H7 · `mpd_controller.py` defines eight methods twice; the surviving `add_track` swallows failures. `DONE — Stage 0`
+
+> **Status.** All eight duplicates removed, bool-returning versions kept, `add_track` checks
+> `returncode` and logs MPD's `stderr` on refusal. `tests/test_mpd_controller.py` parses the class
+> with `ast` and fails on any repeated method name, and monkeypatches `subprocess.run` to assert the
+> refusal path returns `False`. The original text follows for provenance.
 
 **What.** Eight methods are defined twice in the same class. Python keeps the second; the first is
 unreachable but still reads as live code.
@@ -961,7 +1075,18 @@ needed, which is why §7's schema does not carry them.
 
 ---
 
-### M1 · The test suite is green theatre, and it is not in the repository. `OPEN`
+### M1 · The test suite is green theatre, and it is not in the repository. `M1a DONE — M1b/M1c OPEN`
+
+> **Status (M1a, Stage 0).** `test_*.py` is out of `.gitignore`, the three phase-test files are
+> deleted, and `tests/` is tracked: 9 files, 67 tests, green. They cover what Stage 0 changed — the
+> weight-sum invariant raising `ValueError` rather than `AssertionError`, the score being exactly the
+> four weighted terms, the zero taste vector being inert and unmovable by a lone skip, the candidate
+> pool falling back to session-only, `add_track` reporting refusals, the log tee surviving
+> `tui_active`, and every deleted symbol staying deleted.
+>
+> **Still open.** **M1b** — the `FakeMPD` modelling real semantics including consume mode, and the
+> behavioural tests for refill, skip and mode restore — is Stage 2 and has not started. **M1c** is
+> Stage 4. Nothing in the current suite exercises MPD, so "green" still means less than it will.
 
 **What.** `test_phase2.py` reports "Passed: 66". Roughly thirty of those are a literal list of
 hardcoded pass tuples:
@@ -999,7 +1124,11 @@ clone has zero tests.
 
 ---
 
-### M2 · Two divergent orchestrators; the stale one is what the setup helper tells you to run. `OPEN — resolution changed to deletion`
+### M2 · Two divergent orchestrators; the stale one is what the setup helper tells you to run. `DONE — Stage 0`
+
+> **Status.** Both files deleted, along with `generate_dummy_embeddings()` and `start.sh`'s demo
+> branch. `main_tui.py` now exits with a message pointing at `generate_embeddings.py` rather than
+> offering random vectors.
 
 **What.** `main.py` ("Phase 1, headless") and `main_tui.py` ("Phase 2") duplicate about 120 lines of
 identical component wiring. They have already drifted apart:
@@ -1094,24 +1223,33 @@ embeddings" by the loader's own warning logic on the next run.
 
 **Where.** `track_library.py:26–82`, `track_library.py:231–247`; `config.py:64`
 
+**Also (found during Stage 0).** The CLAP check is `'clap' in metadata['model'].lower()` — a substring
+match on an arbitrary string. A throwaway smoke-test file named `SMOKE-TEST-RANDOM-NOT-CLAP` was
+greeted with `✓ Loading CLAP embeddings`. Any file whose model string happens to contain those four
+letters passes, and any legitimately-CLAP file whose string does not gets the "placeholder embeddings"
+warning.
+
 > **Fix direction.** Validate shape on load and adopt the file's dimension rather than the config's —
 > the embeddings are the authority. **The `.npz` schema is changing** (C3 adds the per-window matrix,
 > C5 adds the centroid), so add a `schema_version` key and refuse to load anything that lacks the
-> centroid rather than silently scoring on an uncentred space. Carry metadata through
-> `save_embeddings` — or delete `save_embeddings`, which nothing calls (L8).
+> centroid rather than silently scoring on an uncentred space. Check model identity by **equality**
+> against the expected checkpoint name, not by substring. Carry metadata through `save_embeddings` —
+> or delete `save_embeddings`, which nothing calls (L8).
 
 ---
 
-### M6 · State file misnamed; anti-repetition history never persisted despite a comment claiming it is. `PARTIALLY RESOLVED`
+### M6 · State file misnamed; anti-repetition history never persisted despite a comment claiming it is. `M6a DONE — M6b OPEN`
 
-**(a) `RESOLVED by D6.`** `config.context_file` is named `time_context.npz`, but `TimeContext.save()`
+**(a) `DONE — deleted in Stage 0 (D6).`** `config.context_file` was named `time_context.npz`, but `TimeContext.save()`
 writes JSON. Loading it as an npz raises `UnpicklingError: invalid load key, '{'` — verified against
 the live file. Resolved by deleting the time-context subsystem; delete the file and the config key
 rather than renaming.
 
-**(b) `OPEN — now user-visible.`** `TrackSelector.clear_history()` carries the comment *"Don't clear
+**(b) `OPEN — now user-visible.`** *(`clear_history()` and its misleading comment were deleted in
+Stage 0 per L8. The persistence half — the actual defect — is untouched and remains Stage 2 work.)*
+The method carried the comment *"Don't clear
 play_history to maintain long-term anti-repetition"* — but nothing ever saves or loads `play_history`,
-and `clear_history()` itself is never called. Both `recent_history` and `play_history` are rebuilt
+and `clear_history()` itself was never called. Both `recent_history` and `play_history` are rebuilt
 empty on every launch, so the README's "Recently played tracks are excluded for at least 20 songs"
 resets each time you start the program.
 
@@ -1126,7 +1264,15 @@ minutes ago.
 
 ---
 
-### M7 · Setup documentation contradicts itself on every number, and macOS is claimed but unsupported. `OPEN — scope widened`
+### M7 · Setup documentation contradicts itself on every number, and macOS is claimed but unsupported. `OPEN — one item taken early`
+
+> **Done in Stage 0, opportunistically.** `${EMB_CHOICE,,}` is now
+> `tr '[:upper:]' '[:lower:]'` — that block was being rewritten to remove the demo-embeddings option
+> anyway, so the bash 3.2 syntax error went with it. The README's claims about time context, the
+> day-of-week modifier, the mood description and demo embeddings were also removed, because Stage 0
+> made them false. **Everything else stands**: the three contradictory download sizes, the runtime
+> estimate, the missing CPU figure, the untested macOS claim, and the full rewrite the queue and vibe
+> changes will require.
 
 **What.** The CLAP model download size is stated three different ways:
 
@@ -1230,7 +1376,15 @@ from `feedback_history.json` becomes part of building it rather than a separate 
 
 ---
 
-### L5 · No log file, and stderr is swallowed while the TUI runs. `OPEN — ELEVATED to M`
+### L5 · No log file, and stderr is swallowed while the TUI runs. `DONE — Stage 0, first item`
+
+> **Status.** `_ConsoleCapture` tees every completed line to `data/dj.log` (append mode, per-session
+> banner, `config.log_file`). Failure-tolerant in both directions: an unwritable path degrades to no
+> log rather than aborting startup, and a write error drops the handle rather than recursing back
+> through `stderr`. Five tests in `tests/test_console_log.py`, including the case that matters — a
+> line written while `tui_active` reaches the log and does **not** reach the terminal.
+>
+> The 5-line console panel and the 200-line ring buffer are unchanged; the log is the durable copy.
 
 `_ConsoleCapture` replaces `sys.stderr` at import and, once `tui_active` is set, stops forwarding to
 the real terminal. It keeps the last 200 lines in a ring buffer that is never written to disk, and the
@@ -1257,7 +1411,15 @@ not seconds — so this stays low priority. `main_tui.py:185–243`; `tui.py:487
 
 ---
 
-### L7 · Cold start injects a random direction at 30% weight. `OPEN — fix changed by C5`
+### L7 · Cold start injects a random direction at 30% weight. `PARTIALLY DONE — seed deleted in Stage 0; β ramp outstanding`
+
+> **Status.** `UserTaste._initialize_taste_vector()` returns zeros (Stage 0, D4). Two guards were
+> needed to make that safe before the β ramp exists — negative updates are a no-op while unseeded, and
+> the candidate pool skips its taste half while the vector is zero. See §0b, item 1, for why each is
+> required and which of them should survive Stage 2.
+>
+> **Outstanding:** the β ramp itself, and `SessionState._initialize_session_vector()`, which still
+> seeds from `randn` at every startup.
 
 `UserTaste._initialize_taste_vector()` returns a normalised `randn` vector. The taste term carries
 β = 0.3 from the very first track, so a brand-new user's "long-term taste" is a random direction in
@@ -1281,7 +1443,12 @@ the space is centred — the centroid *is* the zero vector, which has no directi
 
 ---
 
-### L8 · Dead API surface across most modules. `OPEN`
+### L8 · Dead API surface across most modules. `DONE — Stage 0 (two exceptions deferred by design)`
+
+> **Status.** All of the below deleted except `previous_track` and `save_embeddings`, which the plan
+> says to keep for now. `ExplorationController.reset()` went too — it was not on the list only because
+> `Persistence.reset_all()` called it, and that is gone. Un-like (`[L]` as a toggle) is Stage 3;
+> taste-model inspection landed early as the `[I]` overlay (§0b, item 2).
 
 Never called anywhere in the running system: `MPDController.toggle` / `previous_track` / `seek` /
 `get_all_tracks` / `get_track_metadata`, `TrackLibrary.has_track` / `save_embeddings`,
@@ -1306,16 +1473,19 @@ taste model from the UI.
   the set `QueueManager._generate_tracks` passes in. Harmless today, a trap later.
   `track_selector.py:44–47` — `OPEN`
 - **`config.validate()` is all `assert`.** Under `python -O` every check vanishes, including the
-  weight-sum-to-1.0 invariant. `config.py:101–117` — `OPEN`
+  weight-sum-to-1.0 invariant. — `DONE` (Stage 0): raises `ValueError` naming the offending key;
+  `tests/test_config.py` asserts the exception type, so a regression to `assert` fails the suite.
 - **`.gitignore` intent not achieved.** It excludes `data/state/` and `data/embeddings/` as
   directories, then tries to re-include `!data/state/.gitkeep` — which git cannot do inside an
   excluded directory. `git ls-files data` returns only `data/.gitkeep`. Harmless because
   `Config.__init__` mkdirs them, but the scaffolding does not ship. — `OPEN`
 - **Time-context bonus breaks the weight invariant.** `config.validate()` enforces that the four
-  weights sum to 1.0, then `_calculate_score` adds `0.15·time_sim` on top. — `RESOLVED by D6`; the
-  invariant becomes true again, so it is worth actually enforcing outside `assert`.
-- **`[I]` silently does nothing when `enable_time_context` is false.** `tui.py:427–432` —
-  `RESOLVED by D6/H1`; `[I]` is repurposed and always has content.
+  weights sum to 1.0, then `_calculate_score` adds `0.15·time_sim` on top. — `DONE` (Stage 0): the
+  bonus is gone, the invariant is true again and is now enforced outside `assert`.
+  `tests/test_scoring.py` recomputes the formula by hand and requires an exact match, so a fifth term
+  cannot be added silently.
+- **`[I]` silently does nothing when `enable_time_context` is false.** —
+  `DONE` (Stage 0): `[I]` is a model inspector and always has content. Extended in Stage 3 (H1d).
 - **Orphaned ueberzugpp process.** `_shutdown` calls `clear()` but never terminates the child; cleanup
   relies on `__del__` firing at interpreter exit, which is not guaranteed. `album_art.py:118–124` —
   `OPEN`, and it shares a root cause with H3: `_shutdown` is unreachable on SIGTERM. Fix both together.
@@ -1325,42 +1495,46 @@ taste model from the UI.
 
 ---
 
-## 6 · Findings status after the revision
+## 6 · Findings status
 
-| ID | Finding | Status |
-|---|---|---|
-| **C1** | Queue never refills | **Open** — fix simplified by D1/D2 (consume mode, no position parsing) |
-| **C2** | MPD random mode discards ordering | **Open** — expanded to also force `consume on`; restore now depends on H3 |
-| **C3** | Non-deterministic 10 s crop embeddings | **Open** — fix now fully specified (full-coverage windows, persisted matrix) |
-| **C4** | `[V]` double-advance | **Dissolved** by D8 — the code path is deleted. Its constraint (one advance per keypress, no `play()` in a skip path) is retained and tested |
-| **C5** | Compressed similarity scale (anisotropy) | **New** — added in revision; blocks meaningful tuning of everything else |
-| **H1** | Mood word pinned to "eclectic" | **Open** — original fix superseded by the CLAP descriptor bank; drives the TUI rework |
-| **H2** | Queue panel shows history as future | **Dissolved** by D1 — panel removed |
-| **H3** | Ctrl-C/SIGTERM neither exit nor save | **Open** — now also leaves MPD in consume mode |
-| **H4** | Skipping doesn't change what plays next | **Dissolved** by D1 — one lookahead track, dropped and re-picked |
-| **H5** | Day-of-week modifier is dead code | **Resolved by deletion** (D6) |
-| **H6** | Strictly greedy selection | **Open — elevated to blocker.** D1 cannot ship without it. Fix changed: rank-Boltzmann, not score-softmax |
-| **H7** | Eight duplicate methods; `add_track` swallows failures | **Open** — load-bearing for D1 |
-| **H8** | Album-art geometry hardcoded | **Elevated from L3** — blocks the TUI rework |
-| **H9** | `[V]` turns over less pool than `[N]`×5, pointing off-manifold | **New — resolved by deletion.** `[V]` goes; `[N]` escalates on consecutive skips instead |
-| **M1** | Test suite is green theatre, untracked | **Open** — phase tests to be deleted, not repaired |
-| **M2** | Two divergent orchestrators | **Open** — resolution changed to deletion (D7) |
-| **M3** | `mpd_music_directory` unvalidated | **Open** — must land before the C3 regeneration run |
-| **M4** | Two sources of truth for track keys | **Open** — `mpc listall` becomes the single source |
-| **M5** | No embedding-dimension validation | **Open** — widened: the `.npz` schema is changing |
-| **M6a** | `time_context.npz` is JSON | **Resolved by deletion** (D6) |
-| **M6b** | `play_history` never persisted | **Open** — becomes user-visible with the history panel |
-| **M7** | Contradictory setup docs; macOS unsupported | **Open** — README needs a rewrite regardless |
-| **M8** | `--batch-size` ignored | **Open — elevated to prerequisite** for C3 |
-| **L1** | SIGWINCH handler never invoked | Open |
-| **L2** | Kitty/sixel art fights urwid | Open |
-| **L3** | Album-art geometry hardcoded | **Elevated → H8** |
-| **L4** | Hearts vanish on restart | Open — folded into H1's history panel |
-| **L5** | No log file; stderr swallowed | **Elevated to M** — do it first |
-| **L6** | Polling instead of `mpc idle` | Open — still low priority at depth 1 |
-| **L7** | Random cold-start taste vector at β=0.3 | Open — fix changed by C5 (ramp β from 0) |
-| **L8** | Dead API surface | Open — delete, except three items worth wiring |
-| **L9** | Assorted small traps | Mixed — two resolved by D6, rest open |
+*As of Stage 0 complete, 22 July 2026. `Done` means the code is in the tree and, where the
+behaviour is testable without MPD, a test guards it.*
+
+| ID | Finding | Status | Stage |
+|---|---|---|---|
+| **C1** | Queue never refills | **Open** — fix simplified by D1/D2 (consume mode, no position parsing) | 2 |
+| **C2** | MPD random mode discards ordering | **Open** — expanded to also force `consume on`; restore depends on H3 | 2 |
+| **C3** | Non-deterministic 10 s crop embeddings | **Open** — fix fully specified (full-coverage windows, persisted matrix) | 1 |
+| **C4** | `[V]` double-advance | **Dissolved** by D8 — code path deleted in Stage 2. Its constraint (one advance per keypress, no `play()` in a skip path) is retained and tested | 2 |
+| **C5** | Compressed similarity scale (anisotropy) | **Open** — blocks meaningful tuning of everything else | 1 |
+| **H1** | Mood word pinned to "eclectic" | **Partially done** — heuristic deleted (Stage 0); descriptor-bank replacement outstanding | ~~0~~ / 1 + 3 |
+| **H2** | Queue panel shows history as future | **Dissolved** by D1 — panel removed | 3 |
+| **H3** | Ctrl-C/SIGTERM neither exit nor save | **Open** — will also leave MPD in consume mode once C2 lands | 2 |
+| **H4** | Skipping doesn't change what plays next | **Dissolved** by D1 — one lookahead track, dropped and re-picked | 2 |
+| **H5** | Day-of-week modifier is dead code | **Done** — deleted (D6) | ~~0~~ |
+| **H6** | Strictly greedy selection | **Open — blocker.** D1 cannot ship without it. Rank-Boltzmann, not score-softmax | 2 |
+| **H7** | Eight duplicate methods; `add_track` swallows failures | **Done** — duplicates removed, return code checked, `ast` test guards it | ~~0~~ |
+| **H8** | Album-art geometry hardcoded | **Open** — elevated from L3; blocks the TUI rework | 3 |
+| **H9** | `[V]` turns over less pool than `[N]`×5, pointing off-manifold | **Open** — `[V]` still exists; deletion and `[N]` escalation are Stage 2 | 2 |
+| **M1a** | Tests untracked; phase files are theatre | **Done** — `.gitignore` fixed, phase files deleted, `tests/` tracked (67 green) | ~~0~~ |
+| **M1b/c** | No behavioural suite, no `FakeMPD` | **Open** — nothing yet exercises MPD | 2 / 4 |
+| **M2** | Two divergent orchestrators | **Done** — both deleted, plus the dummy-embedding paths | ~~0~~ |
+| **M3** | `mpd_music_directory` unvalidated | **Open** — must land before the C3 regeneration run | 1 |
+| **M4** | Two sources of truth for track keys | **Open** — `mpc listall` becomes the single source | 1 |
+| **M5** | No embedding-dimension validation | **Open** — widened: schema is changing, and the CLAP check is a substring match (§0b) | 1 |
+| **M6a** | `time_context.npz` is JSON | **Done** — deleted (D6) | ~~0~~ |
+| **M6b** | `play_history` never persisted | **Open** — `clear_history()` removed, persistence not built | 2 |
+| **M7** | Contradictory setup docs; macOS unsupported | **Open** — `${VAR,,}` fixed and falsified claims removed; the rewrite remains | 4 |
+| **M8** | `--batch-size` ignored | **Open — prerequisite** for C3 | 1 |
+| **L1** | SIGWINCH handler never invoked | Open | 4 |
+| **L2** | Kitty/sixel art fights urwid | Open | 4 |
+| **L3** | Album-art geometry hardcoded | **Elevated → H8** | 3 |
+| **L4** | Hearts vanish on restart | Open — folded into H1's history panel | 3 |
+| **L5** | No log file; stderr swallowed | **Done** — teed to `data/dj.log`, 5 tests | ~~0~~ |
+| **L6** | Polling instead of `mpc idle` | Open — still low priority at depth 1 | 4 (optional) |
+| **L7** | Random cold-start taste vector at β=0.3 | **Partially done** — seed zeroed with two guards (§0b); β ramp outstanding | ~~0~~ / 2 |
+| **L8** | Dead API surface | **Done** — deleted except the two the plan defers | ~~0~~ |
+| **L9** | Assorted small traps | **Mixed** — `validate()` off `assert`, the weight invariant and the dead `[I]` are done; `select_track` set mutation, `.gitkeep` scaffolding, ueberzugpp child and the keybinding docs remain | ~~0~~ / 3 / 4 |
 
 ---
 
@@ -1424,24 +1598,41 @@ Restructured around the revision. Two governing changes from the original orderi
 Stage 1 it runs with honest embeddings but still stalls at ten tracks. After Stage 2 it genuinely
 works. Stages 3–4 are polish and durability.
 
+> **One caveat discovered in Stage 0:** "runnable" is not literally true *between* Stage 0 and
+> Stage 1, because D3 deletes the embeddings Stage 1 regenerates. That is the one gap in the sequence,
+> and it is intentional — the alternative is regenerating twice with a generator C3 is about to
+> replace. **Stage 1 is not optional homework; the app does not play until it lands.**
+
 ---
 
-### Stage 0 — Clear the ground *(an hour, mostly mechanical)*
+### Stage 0 — Clear the ground *(an hour, mostly mechanical)* · ✅ **COMPLETE 22 July 2026**
 
-| ID | Change | Why first |
-|---|---|---|
-| **L5** | Tee the console ring buffer to `data/dj.log` | Ten minutes, and everything after this is a refactor you will need to debug through a 5-line panel otherwise. |
-| **D6 / H5 / M6a** | Delete `time_context.py`, `enable_time_context`, `time_context_weight`, the weekday/weekend modifiers, `get_exploration_factor()`, `time_context.npz` | Removes four findings and restores the weight-sum-to-1.0 invariant. |
-| **D4** | Delete `get_vibe_description()`'s entropy mood word, momentum thresholds and stage word; delete the random taste seed | Nothing after this should be built on them. Leave the vibe line blank until Stage 3 — a blank line is honest, the current string is not. |
-| **M2 / D7** | Delete `main.py`, `setup_check.py`, and `start.sh`'s demo-embedding path | Stops every later fix from needing to be applied twice. |
-| **H7** | Delete the eight duplicate methods in `mpd_controller.py`; restore the `add_track` return-code check | Makes MPD failures visible — load-bearing for Stage 2, where a swallowed `add_track` means silent stall. |
-| **L8** | Delete the dead API surface | Smaller surface to refactor. Keep `previous_track` and `save_embeddings` for now — see L8's exceptions. |
-| **M1a** | Remove `test_*.py` from `.gitignore`; delete the three phase test files | They test a structure being replaced. Green currently means nothing; delete rather than repair. |
-| **cfg** | Prune `config.py` of every key the above orphans; convert `validate()` off bare `assert` (L9) | Dead config keys are how H5 hid for months. |
-| **D3** | Delete `data/embeddings/*` and `data/state/*` | No value to preserve; removes the "reset state carefully" caveat from every later step. |
+*Every row landed. Full account, including four things this table did not anticipate, in §0b.*
 
-**Done when:** the app launches, plays, and shows an empty vibe line; `git ls-files` includes a tests
-directory; `grep -ri time_context` returns nothing; `data/dj.log` fills during a session.
+| ID | Change | Why first | |
+|---|---|---|---|
+| **L5** | Tee the console ring buffer to `data/dj.log` | Ten minutes, and everything after this is a refactor you will need to debug through a 5-line panel otherwise. | ✅ |
+| **D6 / H5 / M6a** | Delete `time_context.py`, `enable_time_context`, `time_context_weight`, the weekday/weekend modifiers, `get_exploration_factor()`, `time_context.npz` | Removes four findings and restores the weight-sum-to-1.0 invariant. | ✅ |
+| **D4** | Delete `get_vibe_description()`'s entropy mood word, momentum thresholds and stage word; delete the random taste seed | Nothing after this should be built on them. Leave the vibe line blank until Stage 3 — a blank line is honest, the current string is not. | ✅ *(shows the track count, per D4's own "show the counter")* |
+| **M2 / D7** | Delete `main.py`, `setup_check.py`, and `start.sh`'s demo-embedding path | Stops every later fix from needing to be applied twice. | ✅ |
+| **H7** | Delete the eight duplicate methods in `mpd_controller.py`; restore the `add_track` return-code check | Makes MPD failures visible — load-bearing for Stage 2, where a swallowed `add_track` means silent stall. | ✅ |
+| **L8** | Delete the dead API surface | Smaller surface to refactor. Keep `previous_track` and `save_embeddings` for now — see L8's exceptions. | ✅ |
+| **M1a** | Remove `test_*.py` from `.gitignore`; delete the three phase test files | They test a structure being replaced. Green currently means nothing; delete rather than repair. | ✅ |
+| **cfg** | Prune `config.py` of every key the above orphans; convert `validate()` off bare `assert` (L9) | Dead config keys are how H5 hid for months. | ✅ |
+| **D3** | Delete `data/embeddings/*` and `data/state/*` | No value to preserve; removes the "reset state carefully" caveat from every later step. | ✅ |
+
+**Done when:** ~~the app launches, plays,~~ and shows an empty vibe line; `git ls-files` includes a
+tests directory; `grep -ri time_context` returns nothing; `data/dj.log` fills during a session.
+
+> **Correction to this criterion.** "The app launches, plays" is unreachable once D3 deletes the
+> embeddings — there is nothing to select from until Stage 1 regenerates. It was verified with a
+> throwaway random-vector file created outside the repo, used for one scripted end-to-end session
+> against the live MPD, and deleted (§0b). **For Stage 1 the criterion is "launches and reports a
+> clean library load"; the playback criterion belongs to Stage 2's 30-track unattended run.**
+
+**Actual result:** −1,462 lines of application code, +734 lines of tests. `git ls-files tests` lists
+9 files; 67 tests pass. `grep -ril time_context` matches only this document, `CLAUDE.md` and the
+tests that assert the deletion.
 
 ---
 
@@ -1497,7 +1688,7 @@ where the original audit's four critical defects lived, all under a green suite.
 
 | ID | Change | Notes |
 |---|---|---|
-| **M1b** | pytest scaffold + a `FakeMPD` modelling real semantics **including consume mode** | First, not last. Every item below gets a behavioural test as it lands. |
+| **M1b** | `FakeMPD` modelling real semantics **including consume mode**, on the pytest scaffold Stage 0 created | First, not last. Every item below gets a behavioural test as it lands. |
 | **C2** | Force `random`/`repeat`/`single` off and `consume` **on**; log each change to the console panel; restore originals on exit | Enables the simplified C1. |
 | **H3** | Signal handling that exits, saves, and restores MPD modes; `atexit` hook for the mode restore; periodic state checkpoint | Must land **with** C2 — otherwise an abnormal exit strands the user's MPD in consume mode. |
 | **C1 / D1** | `lookahead = 1`; rewrite `QueueManager` to `ensure_one_ahead()` / `replace_next()` | Delete `planned_queue`, `currently_queued_in_mpd`, `_sync_to_mpd`, `get_upcoming_tracks`, `recalculate`, `initialize_queue`, the 5% trajectory blend, and `queue_low_threshold`. |
@@ -1505,7 +1696,7 @@ where the original audit's four critical defects lived, all under a green suite.
 | **C4** | Delete `recalculate()`; one skip path: *adjust vector → replace lookahead → advance once* | No `play()` call anywhere in it, so the double-advance cannot recur by construction. |
 | **H9 / D8** | Delete `[V]`, `force_shift()`, `process_vibe_skip()`, `set_high_exploration()`, `vibe_shift_magnitude`. Rebuild `[N]`: repel from the skip-run centroid, λ **solved** for an escalating turnover target (5/20/50/85% by run length), then `snap()` to the 25-NN centroid for n≥2 | Measured: `[V]` turned over less pool than `[N]`×5. The `snap()` guard makes leaving the manifold structurally impossible. |
 | **H4-repl** | `[N]` drops and re-picks the lookahead under the new weights | Falls out of D1 — skips become audible on the very next song. |
-| **L7** | Ramp β from 0 over the first ~20 taste updates; delete the random taste seed; make the random session seed the explicit "nothing playing yet" case | Same theme as C5: stop injecting noise as if it were signal. |
+| **L7** | Ramp β from 0 over the first ~20 taste updates; make the random session seed the explicit "nothing playing yet" case | Same theme as C5: stop injecting noise as if it were signal. The taste seed itself was zeroed in Stage 0; when the ramp lands, retire the "negative updates are a no-op while unseeded" guard but **keep the candidate-pool guard** — β gates scoring, not retrieval (§0b). |
 | **M6b** | Persist `play_history` / `current_index`; checkpoint with the rest of the state | Anti-repetition finally survives a restart. |
 
 **Done when:** a 30+ track unattended run completes with no stall and no repeat inside the replay gap.
@@ -1527,7 +1718,7 @@ built in Stage 1.
 | **H1b** | Vibe readout = top-3 descriptors by z-score; consistency word = cosine between the session's descriptor z-vector now and five tracks ago | Replaces the deleted heuristics with something measured against a real distribution. |
 | **H1c** | Replace the queue panel with a **Session** panel: `↓ next:` line, divider, history newest-first with `♥` / `⏭` / `✓` marks | The actual answer to "what is being played". |
 | **L4** | Rehydrate `liked_tracks` from `feedback_history.json` at startup | Falls out of building the history panel. |
-| **H1d** | Rebind `↑↓` to scroll history and `ENTER` to requeue a history entry as `next`; repurpose `[I]` as the model inspector | `[I]` shows session **and** taste top descriptors, exploration value, effective τ ("choosing from ~top 7"), tracks played, taste update count. |
+| **H1d** | Rebind `↑↓` to scroll history and `ENTER` to requeue a history entry as `next`; **extend** `[I]` | `[I]` already exists as a model inspector (Stage 0, §0b item 2) showing library size, taste/exploration/selector counters and the live weights. Add: session **and** taste top descriptors, and the effective τ ("choosing from ~top 7"). |
 | **L9** | Reconcile the footer, the README keybinding table, and the fallback-mode bindings | They already disagree three ways; do it while the bindings are open. |
 
 **Done when:** the vibe line names three descriptors that a listener would recognise as accurate, and
@@ -1565,6 +1756,9 @@ for later.
 | **Delete `[V]` (D8)** | Measured: 7.4% pool turnover versus 11.9% for `[N]`×5, in a direction 0.105-similar to real music. Its queue-clearing job no longer exists. | Low, but do not restore `force_shift`. If a distinct "change subject" gesture is wanted later, build it as a named-descriptor jump, not a random rotation. |
 | **Rank-Boltzmann sampling (H6)** | Argmax reproduces the byte-identical session from a given state. Score-softmax needs recalibration every time the score scale moves. Rank is scale-invariant. | Trivial — one function. |
 | **`ENTER` on history requeues (H1d)** | Replaces the removed queue navigation with something useful, reusing existing plumbing. | Trivial. If unwanted, `↑↓` becomes pure scrolling and `ENTER` unbinds. |
+| **Zero taste vector is inert in *retrieval*, not just scoring (Stage 0)** | An all-zero query to `find_similar` returns an arbitrary slice of the library, so half the candidate pool would be noise presented as preference. Skipping the taste half is what L7's own reasoning implies. | Trivial — one `if np.any(...)`. Do **not** reverse it when β ramps in; β gates the score, not the pool. |
+| **A skip cannot seed the taste model (Stage 0)** | From zero, one negative update normalises to `−track` at unit length: a full-strength claim from a single rejection, stronger than the random seed it replaced. | Trivial, and expected to become redundant once the β ramp exists. Retire it then, not before. |
+| **`[I]` became a model inspector in Stage 0 rather than Stage 3** | D6 emptied the overlay while the key, the footer, the README and `start.sh` all still advertised it. A key that silently does nothing is the same dishonesty Stage 0 exists to remove. | None — Stage 3 extends the same overlay rather than building one. |
 
 ### Deferred, with the door left open
 
@@ -1762,7 +1956,12 @@ expected wall clock, batched, RTX 3070: low single-digit minutes
 
 ---
 
-*All line references are against `HEAD 8dc4275` plus the uncommitted `tui.py` change (footer key-hint
-rewording, +10/−10, cosmetic). Measurements were taken on the machine described in the header; the
+*All line references in §2–§5 are against `HEAD 8dc4275` plus the then-uncommitted `tui.py` change
+(footer key-hint rewording, +10/−10, cosmetic). They predate Stage 0 and are stale for every file it
+touched — see §0b. Measurements were taken on the machine described in the header; the
 embedding-determinism figures use the project's own code path against the cached
 `laion/clap-htsat-unfused` weights.*
+
+*The library inventory in §10 describes state that has since been deleted (D3). The similarity
+distributions it records were measured on those 616 embeddings and are the numbers Stage 1 must
+re-measure after C3 and C5 change how the vectors are built.*

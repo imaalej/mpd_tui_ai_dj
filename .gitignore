@@ -17,7 +17,6 @@ env/
 data/state/user_taste.npz
 data/state/exploration_state.json
 data/state/feedback_history.json
-data/state/time_context.npz
 data/state/
 
 # Embeddings (large files generated from user's own music library)
@@ -42,8 +41,9 @@ Thumbs.db
 *.sublime-project
 *.sublime-workspace
 
-# Test scripts
-test_*.py
+# NOTE: tests/ is deliberately NOT ignored.  This file used to carry
+# `test_*.py`, which meant a fresh clone had zero tests while the three
+# untracked phase-test files reported "66 passing" locally (audit M1).
 
 # Logs
 *.log

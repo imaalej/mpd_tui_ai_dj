@@ -7,7 +7,6 @@ import sys
 import numpy as np
 from typing import List, Tuple, Optional, Set
 from pathlib import Path
-import pickle
 from config import config
 
 
@@ -100,11 +99,7 @@ class TrackLibrary:
         """Get embedding for a specific track."""
         return self.track_to_embedding.get(track_file)
     
-    def has_track(self, track_file: str) -> bool:
-        """Check if track exists in library."""
-        return track_file in self.track_to_embedding
-    
-    def find_similar(self, 
+    def find_similar(self,
                     query_vector: np.ndarray, 
                     k: int = None,
                     exclude_tracks: Set[str] = None) -> List[Tuple[str, float]]:
@@ -187,23 +182,32 @@ class TrackLibrary:
             pool_size = config.candidate_pool_size
         
         exclude_tracks = exclude_tracks or set()
-        
+
         # Get more candidates to account for potential overlap
         search_k = int(pool_size * 1.5)
-        
+
         # Get candidates from both session and taste
         session_candidates = self.find_similar(
-            session_vector, 
+            session_vector,
             k=search_k,
             exclude_tracks=exclude_tracks
         )
-        
-        taste_candidates = self.find_similar(
-            taste_vector,
-            k=search_k,
-            exclude_tracks=exclude_tracks
-        )
-        
+
+        # An all-zero taste vector means "no taste model yet" (see
+        # UserTaste._initialize_taste_vector).  Querying with it would return an
+        # arbitrary slice of the library — every dot product is 0, so the
+        # ordering is whatever argpartition happens to produce — and half the
+        # pool would be noise dressed as preference.  Fill the pool from the
+        # session vector alone until there is evidence to blend in.
+        if np.any(taste_vector):
+            taste_candidates = self.find_similar(
+                taste_vector,
+                k=search_k,
+                exclude_tracks=exclude_tracks
+            )
+        else:
+            taste_candidates = []
+
         # Combine and deduplicate by interleaving
         candidate_set = set()
         max_len = max(len(session_candidates), len(taste_candidates))
@@ -246,31 +250,9 @@ class TrackLibrary:
         
         print(f"Saved {len(track_files)} embeddings to {output_file}", file=sys.stderr)
 
-
-def generate_dummy_embeddings(mpd_tracks: List[str], output_file: Path):
-    """
-    Generate random embeddings for testing when real embeddings aren't available.
-    THIS IS FOR TESTING ONLY - real embeddings should come from an audio model.
-    """
-    print(f"Generating dummy embeddings for {len(mpd_tracks)} tracks...", file=sys.stderr)
-    
-    dimension = config.embedding_dimension
-    embeddings = []
-    
-    for track in mpd_tracks:
-        # Generate random embedding
-        embedding = np.random.randn(dimension)
-        # Normalize
-        embedding = embedding / np.linalg.norm(embedding)
-        embeddings.append(embedding)
-    
-    embeddings = np.array(embeddings)
-    
-    output_file.parent.mkdir(parents=True, exist_ok=True)
-    np.savez_compressed(
-        output_file,
-        track_files=mpd_tracks,
-        embeddings=embeddings
-    )
-    
-    print(f"Saved dummy embeddings to {output_file}", file=sys.stderr)
+# NOTE: generate_dummy_embeddings() is gone (audit M2/M4).  It filled the
+# library with random 512-d vectors so the app would "run" without CLAP, which
+# meant every similarity, every novelty score and every learned vector was
+# noise while the UI reported them as insight.  Real generation is one command
+# — `python3 generate_embeddings.py` — and after C3 it is deterministic and
+# fast, so there is nothing left for a fake to buy.

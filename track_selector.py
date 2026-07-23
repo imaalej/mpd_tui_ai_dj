@@ -5,7 +5,7 @@ Combines session similarity, taste similarity, novelty, and anti-repetition.
 
 import sys
 import numpy as np
-from typing import List, Set, Optional, Tuple
+from typing import List, Set, Optional
 from collections import deque
 from config import config
 
@@ -26,18 +26,16 @@ class TrackSelector:
                     session_vector: np.ndarray,
                     taste_vector: np.ndarray,
                     weights: dict,
-                    exclude_tracks: Set[str] = None,
-                    time_context=None) -> Optional[str]:
+                    exclude_tracks: Set[str] = None) -> Optional[str]:
         """
         Select next track using multi-factor scoring.
-        
+
         Args:
             session_vector: Current session state vector
             taste_vector: User taste vector
             weights: Dict with session_weight, taste_weight, novelty_weight, anti_repetition_weight
             exclude_tracks: Tracks to exclude from selection
-            time_context: Optional TimeContext for time-aware scoring
-        
+
         Returns:
             Selected track file path, or None if no suitable track found
         """
@@ -70,10 +68,9 @@ class TrackSelector:
                 track_file=track_file,
                 session_vector=session_vector,
                 taste_vector=taste_vector,
-                weights=weights,
-                time_context=time_context
+                weights=weights
             )
-            
+
             scored_candidates.append((track_file, score))
         
         if not scored_candidates:
@@ -93,12 +90,15 @@ class TrackSelector:
                         track_file: str,
                         session_vector: np.ndarray,
                         taste_vector: np.ndarray,
-                        weights: dict,
-                        time_context=None) -> float:
+                        weights: dict) -> float:
         """
         Calculate weighted score for a candidate track.
-        
-        Score = α * session_sim + β * taste_sim + γ * novelty + δ * anti_repetition + ε * time_context
+
+        Score = α * session_sim + β * taste_sim + γ * novelty + δ * anti_repetition
+
+        Those four weights sum to 1.0 and nothing is added on top of them.  The
+        `0.15 * time_sim` bonus that used to break that invariant went with the
+        time-context subsystem (audit D6 / L9).
         """
         # Normalize track embedding
         norm = np.linalg.norm(track_embedding)
@@ -119,18 +119,12 @@ class TrackSelector:
         # 4. Anti-repetition (time since last played)
         anti_rep = self._calculate_anti_repetition(track_file)
         
-        # Base weighted combination
+        # Weighted combination
         score = (weights['session_weight'] * session_sim +
                 weights['taste_weight'] * taste_sim +
                 weights['novelty_weight'] * novelty +
                 weights['anti_repetition_weight'] * anti_rep)
-        
-        # 5. Time context (Phase 3) - add as bonus if enabled
-        if time_context and config.enable_time_context:
-            time_sim = time_context.get_similarity(track_embedding)
-            # Add time context as bonus (not part of main weight sum)
-            score = score + config.time_context_weight * time_sim
-        
+
         return score
     
     def _calculate_novelty(self, track_embedding: np.ndarray) -> float:
@@ -194,12 +188,6 @@ class TrackSelector:
     def get_recent_history(self) -> List[str]:
         """Get list of recently played tracks."""
         return list(self.recent_history)
-    
-    def clear_history(self):
-        """Clear play history (for new session)."""
-        self.recent_history.clear()
-        # Don't clear play_history to maintain long-term anti-repetition
-        self.current_index = 0
     
     def get_stats(self) -> dict:
         """Get selector statistics."""

@@ -96,7 +96,6 @@ class FeedbackHandler:
         - Strong positive signal for user taste
         - Confirms session direction
         - No exploration change (likes don't affect exploration directly)
-        - Updates time context (Phase 3)
         """
         # Silently process like (no print to avoid TUI interference)
         
@@ -107,14 +106,7 @@ class FeedbackHandler:
         
         # Strong update to user taste
         self.user_taste.update_from_like(track_embedding)
-        
-        # Update time context (Phase 3)
-        if hasattr(self.session_state, 'time_context') and config.enable_time_context:
-            self.session_state.time_context.update(
-                track_embedding,
-                config.time_update_rate_like
-            )
-        
+
         # Save taste after explicit like
         self.user_taste.save()
         
@@ -128,7 +120,6 @@ class FeedbackHandler:
         - Updates session state (confirms direction)
         - Weak positive signal for user taste
         - Decreases exploration (exploitation)
-        - Updates time context (Phase 3)
         """
         # Don't print for every full listen (too noisy)
         
@@ -142,14 +133,7 @@ class FeedbackHandler:
         
         # Weak update to user taste
         self.user_taste.update_from_full_listen(track_embedding)
-        
-        # Update time context (Phase 3)
-        if hasattr(self.session_state, 'time_context') and config.enable_time_context:
-            self.session_state.time_context.update(
-                track_embedding,
-                config.time_update_rate_listen
-            )
-        
+
         # Decrease exploration (things are working)
         self.exploration_controller.decrease_exploration()
         

@@ -1,17 +1,15 @@
 """
-Main Orchestration - Adaptive Session AI DJ (Phase 2)
-Complete system with TUI interface.
+Main Orchestration - Adaptive Session AI DJ
+The single entry point.  Launched by start.sh.
 """
 
 import sys
 import time
 import signal
-from pathlib import Path
 
-# Import Phase 1 components
 from config import config
 from mpd_controller import MPDController
-from track_library import TrackLibrary, generate_dummy_embeddings
+from track_library import TrackLibrary
 from user_taste import UserTaste
 from session_state import SessionState
 from exploration_controller import ExplorationController
@@ -20,7 +18,6 @@ from queue_manager import QueueManager
 from feedback_handler import FeedbackHandler
 from persistence import Persistence, ensure_data_directories
 
-# Import Phase 2 components
 from tui import AdaptiveDJTUI
 
 
@@ -36,7 +33,7 @@ class AdaptiveDJWithTUI:
         
         # Initialize Phase 1 components
         print("="*60, file=sys.stderr)
-        print("Adaptive Session AI DJ - Phase 2 (Full TUI)", file=sys.stderr)
+        print("Adaptive Session AI DJ", file=sys.stderr)
         print("="*60, file=sys.stderr)
         
         # Validate config
@@ -56,26 +53,15 @@ class AdaptiveDJWithTUI:
         print("\n[2/10] Loading track library...", file=sys.stderr)
         self.track_library = TrackLibrary()
         
-        # Check if embeddings exist
+        # Embeddings are a hard requirement.  There is deliberately no
+        # "generate random ones for now" fallback (audit M2/M4): random vectors
+        # make every downstream number meaningless while the UI keeps reporting
+        # them as if they meant something.
         if not config.embeddings_file.exists():
-            print("\n⚠️  No embeddings file found!", file=sys.stderr)
-            print("For testing, I can generate random embeddings.", file=sys.stderr)
-            print("In production, you'd generate real embeddings using an audio model.", file=sys.stderr)
-            response = input("Generate dummy embeddings now? (y/n): ")
-            
-            if response.lower() == 'y':
-                print("Fetching tracks from MPD...", file=sys.stderr)
-                mpd_tracks = self.mpd_controller.list_all_tracks()
-                if not mpd_tracks:
-                    print("ERROR: No tracks found in MPD database", file=sys.stderr)
-                    print("Make sure your MPD music directory contains music files", file=sys.stderr)
-                    sys.exit(1)
-                
-                generate_dummy_embeddings(mpd_tracks, config.embeddings_file)
-            else:
-                print("Cannot proceed without embeddings", file=sys.stderr)
-                sys.exit(1)
-        
+            print(f"\nERROR: No embeddings file at {config.embeddings_file}", file=sys.stderr)
+            print("Generate them first:  python3 generate_embeddings.py", file=sys.stderr)
+            sys.exit(1)
+
         self.track_library.load_embeddings()
         print(f"✓ Loaded {self.track_library.get_track_count()} tracks", file=sys.stderr)
         
@@ -120,8 +106,7 @@ class AdaptiveDJWithTUI:
         self.persistence = Persistence(
             user_taste=self.user_taste,
             exploration_controller=self.exploration_controller,
-            feedback_handler=self.feedback_handler,
-            session_state=self.session_state   # needed to persist time context
+            feedback_handler=self.feedback_handler
         )
         
         # Load persistent state
@@ -155,7 +140,6 @@ class AdaptiveDJWithTUI:
         # can start playback when ready with [SPACE].
         # (Queue changes mid-session still auto-play via recalculate().)
         print(f"Session ready! Press [SPACE] to begin.", file=sys.stderr)
-        print(f"Vibe: {self.session_state.get_vibe_description()}", file=sys.stderr)
         time.sleep(1)  # Brief pause before TUI takeover
     
     def run(self):

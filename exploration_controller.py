@@ -68,27 +68,6 @@ class ExplorationController:
         self.consecutive_listens = 0
         print(f"High exploration mode activated: {self.exploration:.2f}", file=__import__("sys").stderr)
     
-    def get_exploration_factor(self, time_context=None) -> float:
-        """
-        Get current exploration factor [0, 1].
-        Higher values mean more exploration (novelty seeking).
-        Applies day-of-week modifier if time context provided (Phase 3).
-        
-        Args:
-            time_context: Optional TimeContext for day-of-week awareness
-        
-        Returns:
-            Exploration factor adjusted for current context
-        """
-        base_exploration = self.exploration
-        
-        # Apply day-of-week modifier (Phase 3)
-        if time_context and config.enable_day_context:
-            modifier = time_context.get_day_modifier()
-            return base_exploration * modifier
-        
-        return base_exploration
-    
     def get_weights(self) -> dict:
         """
         Get current scoring weights adjusted for exploration.
@@ -185,12 +164,3 @@ class ExplorationController:
         except Exception as e:
             print(f"Error loading exploration state: {e}", file=sys.stderr)
             return False
-    
-    def reset(self):
-        """Reset exploration state."""
-        self.exploration = config.exploration_initial
-        self.consecutive_skips = 0
-        self.consecutive_listens = 0
-        self.total_skips = 0
-        self.total_listens = 0
-        print("Exploration state reset", file=__import__("sys").stderr)

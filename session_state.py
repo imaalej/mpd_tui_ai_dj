@@ -4,10 +4,9 @@ Tracks evolving session direction separate from long-term taste.
 """
 
 import numpy as np
-from typing import List, Optional
+from typing import Optional
 from collections import deque
 from config import config
-from time_context import TimeContext
 
 
 class SessionState:
@@ -23,13 +22,6 @@ class SessionState:
         self.recent_tracks = deque(maxlen=config.session_influence_window)
         self.tracks_played = 0
         self.session_started = False
-        
-        # Vibe state tracking
-        self.current_vibe_keywords = []
-        self.vibe_trajectory = []
-        
-        # Time context awareness (Phase 3)
-        self.time_context = TimeContext(dimension=self.dimension)
         
     def _initialize_session_vector(self) -> np.ndarray:
         """Initialize session vector as random normalized vector."""
@@ -54,8 +46,7 @@ class SessionState:
         self.recent_tracks.clear()
         self.tracks_played = 0
         self.session_started = True
-        self.vibe_trajectory = []
-        
+
         print("Session started", file=__import__("sys").stderr)
     
     def update(self, track_embedding: np.ndarray):
@@ -82,10 +73,7 @@ class SessionState:
             self.session_vector = self.session_vector / norm
         else:
             self.session_vector = self._initialize_session_vector()
-        
-        # Track vibe trajectory
-        self._update_vibe_trajectory()
-    
+
     def penalize_similar(self, track_embedding: np.ndarray):
         """
         Penalize tracks similar to this embedding (after skip).
@@ -124,113 +112,31 @@ class SessionState:
             self.session_vector = self.session_vector / norm
         
         print("Vibe shifted!", file=__import__("sys").stderr)
-        self._update_vibe_trajectory()
-    
+
     def get_session_vector(self) -> np.ndarray:
         """Get current session vector (normalized)."""
         return self.session_vector.copy()
-    
-    def get_recent_average(self) -> np.ndarray:
-        """
-        Get average of recent tracks as alternative session representation.
-        """
-        if not self.recent_tracks:
-            return self.session_vector.copy()
-        
-        avg = np.mean(list(self.recent_tracks), axis=0)
-        norm = np.linalg.norm(avg)
-        if norm > 1e-8:
-            return avg / norm
-        return self.session_vector.copy()
-    
-    def get_similarity(self, track_embedding: np.ndarray) -> float:
-        """
-        Calculate cosine similarity between session state and track.
-        """
-        norm = np.linalg.norm(track_embedding)
-        if norm > 0:
-            track_embedding = track_embedding / norm
-        
-        return float(np.dot(self.session_vector, track_embedding))
-    
-    def _update_vibe_trajectory(self):
-        """Track vibe evolution for description generation."""
-        if len(self.recent_tracks) >= 2:
-            # Calculate momentum (similarity between consecutive recent tracks)
-            recent = list(self.recent_tracks)
-            momentum = np.dot(recent[-1], recent[-2])
-            self.vibe_trajectory.append(float(momentum))
-            
-            # Keep only recent trajectory
-            if len(self.vibe_trajectory) > 10:
-                self.vibe_trajectory = self.vibe_trajectory[-10:]
-    
-    def get_vibe_description(self) -> str:
-        """
-        Generate human-readable description of current vibe.
-        Maps embedding-space characteristics to mood descriptors.
-        """
-        if not self.session_started:
-            return "Initializing..."
-        
-        if self.tracks_played == 0:
-            return "Building your vibe..."
-        
-        if self.tracks_played == 1:
-            return "Establishing mood..."
-        
-        # Analyze trajectory
-        if len(self.vibe_trajectory) >= 3:
-            recent_momentum = np.mean(self.vibe_trajectory[-3:])
-            
-            if recent_momentum > 0.85:
-                consistency = "focused"
-            elif recent_momentum > 0.7:
-                consistency = "flowing"
-            elif recent_momentum > 0.5:
-                consistency = "drifting"
-            else:
-                consistency = "exploring"
-        else:
-            consistency = "developing"
-        
-        # Analyze session vector characteristics
-        # Use simple heuristics based on vector properties
-        vector_magnitude = np.linalg.norm(self.session_vector)
-        vector_entropy = -np.sum(np.abs(self.session_vector) * np.log(np.abs(self.session_vector) + 1e-10))
-        
-        if vector_entropy > 5.0:
-            mood = "eclectic"
-        elif vector_entropy > 4.0:
-            mood = "diverse"
-        else:
-            mood = "cohesive"
-        
-        # Count played tracks
-        if self.tracks_played < 3:
-            stage = "warming up"
-        elif self.tracks_played < 8:
-            stage = "building"
-        else:
-            stage = "deep in the zone"
-        
-        return f"{consistency} {mood} vibe, {stage}"
-    
+
+    # NOTE: there is deliberately no get_vibe_description() here.
+    #
+    # The old one derived a mood word from -Σ|v|·log|v| over the session vector
+    # and branched on thresholds (>5.0 "eclectic", >4.0 "diverse", else
+    # "cohesive").  For a 512-d unit vector that quantity is always ~55, so the
+    # function returned "eclectic" 100% of the time and two of its three
+    # branches were unreachable.  The momentum words (focused/flowing/drifting/
+    # exploring) and the stage words (warming up/building/deep in the zone) were
+    # equally invented — the stage word was a tracks_played counter in a costume.
+    #
+    # The replacement is a CLAP text-encoder descriptor bank scored by z-score
+    # against this library's own distribution (audit H1/D5), built in Stage 1 and
+    # wired to the display in Stage 3.  Until then the UI shows the track count,
+    # which is a fact.
+
     def get_stats(self) -> dict:
         """Get session statistics."""
         return {
             'tracks_played': self.tracks_played,
             'session_started': self.session_started,
             'recent_tracks_count': len(self.recent_tracks),
-            'vibe_description': self.get_vibe_description(),
             'session_vector_norm': float(np.linalg.norm(self.session_vector))
         }
-    
-    def reset(self):
-        """Reset session state."""
-        self.session_vector = self._initialize_session_vector()
-        self.recent_tracks.clear()
-        self.tracks_played = 0
-        self.session_started = False
-        self.vibe_trajectory = []
-        print("Session reset", file=__import__("sys").stderr)

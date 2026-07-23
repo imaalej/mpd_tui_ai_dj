@@ -9,16 +9,24 @@ listening session. Python + urwid TUI, MPD driven via `mpc` subprocesses.
 for an in-progress rewrite. Before changing anything:
 
 - **§0** — the decision record. It changes the meaning of about half the findings.
+- **§0b** — the implementation log: what has shipped, and where doing the work contradicted the plan.
 - **§8** — the ordered work plan, with a definition of done per stage.
 - **§7** — the target `.npz` schemas. Build to these.
 
-Findings are tagged `OPEN` / `NEW` / `ELEVATED` (work required) or `DISSOLVED` / `RESOLVED by deletion`
-/ `SUPERSEDED` (no work — the design change removed them). Don't fix a dissolved finding.
+Findings are tagged `OPEN` / `NEW` / `ELEVATED` (work required), `DONE` / `PARTIALLY DONE` (shipped),
+or `DISSOLVED` / `SUPERSEDED` (no work — the design change removed them). Don't fix a dissolved
+finding. §6 is the current status table.
 
 ## Project state
 
-The rewrite has not started. `HEAD` is pre-revision code; the audit describes the target. Where they
-disagree, the audit wins.
+**Stage 0 is complete. Stage 1 is next.** Line references in the audit's §2–§5 predate Stage 0 and
+are stale for every file it touched.
+
+**The application does not currently start.** Stage 0 deleted the embeddings (D3) and removed the
+random-vector fallback; `main_tui.py` exits pointing at `generate_embeddings.py`. Regenerating them
+*is* Stage 1 — do it with the C3/C5/M8 changes in place, not before, or you will run it twice.
+
+Where the code and the audit disagree, the audit wins.
 
 **Nothing in `data/` is worth preserving.** Embeddings, taste vector, exploration state and feedback
 history are all being regenerated or discarded (§0, D3). Do not write migration code, backward-compat
@@ -52,7 +60,8 @@ change a formula that a number in there depends on, re-measure rather than assum
 python3 generate_embeddings.py --help
 ```
 
-`main.py` and `setup_check.py` are stale duplicates scheduled for deletion (M2) — do not add to them.
+`main_tui.py` is the only orchestrator; `main.py` and `setup_check.py` were deleted in Stage 0 (M2).
+There is no demo/random-embedding path anywhere — it was removed on purpose (M2/M4).
 
 ## Environment
 
@@ -73,15 +82,17 @@ python3 generate_embeddings.py --help
   towers don't share a cone, and a random 512-d direction is 0.105-similar to real music where a
   session vector is 0.697. After any large session-vector manipulation, project back onto the manifold:
   `normalise(mean(top-25 library embeddings by dot(E, v)))` (H9).
-- **stderr is swallowed while the TUI runs.** Check `data/dj.log` once L5 lands; before that, expect
-  tracebacks from the background thread to vanish.
+- **stderr is swallowed while the TUI runs.** `data/dj.log` is the durable copy (L5, shipped in
+  Stage 0) — read it, not the 5-line console panel.
 
 ## Testing
 
-The three `test_phase*.py` files are being deleted, not repaired — roughly thirty of their 66 "passing"
-checks are hardcoded `True` literals (M1). Replacement is pytest plus a `FakeMPD` that models real
-semantics including consume mode. Behavioural tests, not existence checks: C1 and C4 both survived
-under a green suite.
+`python3 -m pytest tests` — 67 tests, green. The three `test_phase*.py` files were deleted rather than
+repaired (M1a); roughly thirty of their 66 "passing" checks were hardcoded `True` literals.
+
+The current suite covers Stage 0 only and **nothing in it touches MPD**. The `FakeMPD` that models
+real semantics including consume mode is Stage 2 (M1b) and has not been written. Behavioural tests,
+not existence checks: C1 and C4 both survived under a green suite.
 
 Two properties are newly assertable and should be tested from the start: embedding generation is
 bit-deterministic, and post-centring the random-pair similarity distribution sits near 0.

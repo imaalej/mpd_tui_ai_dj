@@ -125,52 +125,15 @@ class MPDController:
             print(f"Error getting MPD status: {e}", file=sys.stderr)
             return self._last_status if self._last_status else {'state': 'error'}
     
-    def play(self):
-        """Start playback."""
-        try:
-            subprocess.run(
-                ['mpc', '-h', self.host, '-p', str(self.port), 'play'],
-                capture_output=True,
-                timeout=2
-            )
-        except Exception as e:
-            print(f"Play command failed: {e}", file=sys.stderr)
-    
-    def pause(self):
-        """Pause playback."""
-        try:
-            subprocess.run(
-                ['mpc', '-h', self.host, '-p', str(self.port), 'pause'],
-                capture_output=True,
-                timeout=2
-            )
-        except Exception as e:
-            print(f"Pause command failed: {e}", file=sys.stderr)
-    
-    def toggle(self):
-        """Toggle play/pause."""
-        try:
-            subprocess.run(
-                ['mpc', '-h', self.host, '-p', str(self.port), 'toggle'],
-                capture_output=True,
-                timeout=2
-            )
-        except Exception as e:
-            print(f"Toggle command failed: {e}", file=sys.stderr)
-    
-    def next_track(self):
-        """Skip to next track."""
-        try:
-            subprocess.run(
-                ['mpc', '-h', self.host, '-p', str(self.port), 'next'],
-                capture_output=True,
-                timeout=2
-            )
-        except Exception as e:
-            print(f"Next command failed: {e}", file=sys.stderr)
-    
     def previous_track(self):
-        """Go to previous track."""
+        """
+        Go to previous track.
+
+        Currently unbound.  Retained per audit L8, but note that Stage 2 forces
+        MPD's `consume` mode on (D2), after which played tracks are gone from
+        MPD's queue and this cannot work — a working "previous" will have to
+        re-add from the application's own history instead of delegating here.
+        """
         try:
             subprocess.run(
                 ['mpc', '-h', self.host, '-p', str(self.port), 'prev'],
@@ -179,17 +142,6 @@ class MPDController:
             )
         except Exception as e:
             print(f"Previous command failed: {e}", file=sys.stderr)
-    
-    def seek(self, seconds: int):
-        """Seek to absolute position in current track (seconds)."""
-        try:
-            subprocess.run(
-                ['mpc', '-h', self.host, '-p', str(self.port), 'seek', str(seconds)],
-                capture_output=True,
-                timeout=2
-            )
-        except Exception as e:
-            print(f"Seek command failed: {e}", file=sys.stderr)
 
     def seek_relative(self, delta: int):
         """
@@ -255,78 +207,6 @@ class MPDController:
             )
         except Exception as e:
             print(f"Volume down command failed: {e}", file=sys.stderr)
-    
-    def add_track(self, track_file: str) -> bool:
-        """Add track to queue."""
-        try:
-            result = subprocess.run(
-                ['mpc', '-h', self.host, '-p', str(self.port), 'add', track_file],
-                capture_output=True,
-                timeout=2
-            )
-            return result.returncode == 0
-        except Exception as e:
-            print(f"Add track failed: {e}", file=sys.stderr)
-            return False
-    
-    def clear_queue(self):
-        """Clear the playback queue."""
-        try:
-            subprocess.run(
-                ['mpc', '-h', self.host, '-p', str(self.port), 'clear'],
-                capture_output=True,
-                timeout=2
-            )
-        except Exception as e:
-            print(f"Clear queue failed: {e}", file=sys.stderr)
-    
-    def get_queue(self) -> List[str]:
-        """Get current queue as list of track files."""
-        try:
-            result = subprocess.run(
-                ['mpc', '-h', self.host, '-p', str(self.port), 'playlist', '-f', '%file%'],
-                capture_output=True,
-                text=True,
-                timeout=2
-            )
-            if result.returncode == 0:
-                return [line.strip() for line in result.stdout.strip().split('\n') if line.strip()]
-            return []
-        except Exception as e:
-            print(f"Get queue failed: {e}", file=sys.stderr)
-            return []
-    
-    def get_queue_length(self) -> int:
-        """Get number of tracks in queue."""
-        return len(self.get_queue())
-    
-    def get_all_tracks(self) -> List[str]:
-        """Get all tracks in MPD database."""
-        try:
-            result = subprocess.run(
-                ['mpc', '-h', self.host, '-p', str(self.port), 'listall'],
-                capture_output=True,
-                text=True,
-                timeout=10
-            )
-            if result.returncode == 0:
-                return [line.strip() for line in result.stdout.strip().split('\n') if line.strip()]
-            return []
-        except Exception as e:
-            print(f"Get all tracks failed: {e}", file=sys.stderr)
-            return []
-    
-    def update_database(self):
-        """Trigger MPD database update."""
-        try:
-            subprocess.run(
-                ['mpc', '-h', self.host, '-p', str(self.port), 'update'],
-                capture_output=True,
-                timeout=2
-            )
-            print("MPD database update triggered", file=sys.stderr)
-        except Exception as e:
-            print(f"Database update failed: {e}", file=sys.stderr)
     
     def get_playlist_metadata(self) -> dict:
         """
@@ -435,15 +315,6 @@ class MPDController:
             'file':   track_file,
         }
     
-    def get_track_metadata(self, track_file: str) -> dict:
-        """Get metadata for a specific track file."""
-        # Re-use the cache-aware helper so both call sites stay consistent.
-        if not hasattr(self, '_metadata_cache'):
-            self._metadata_cache: Dict[str, dict] = {}
-        if track_file not in self._metadata_cache:
-            self._metadata_cache[track_file] = self._fetch_track_tags(track_file)
-        return self._metadata_cache[track_file]
-    
     def get_current_track_file(self) -> Optional[str]:
         """Get the file path of currently playing track."""
         status = self.get_status()
@@ -505,13 +376,25 @@ class MPDController:
         """
         Add a track to the MPD queue.
         track_file must be relative to MPD's music directory.
+
+        Returns True only if MPD actually accepted the track.  This used to
+        return True unconditionally (audit H7), which made every caller's
+        `if success:` check decorative: a track MPD refused — removed file,
+        stale database, path mismatch — was recorded as queued.  Once the queue
+        is one track deep (D1) a swallowed failure means playback silently runs
+        dry, so the return code is load-bearing, not hygiene.
         """
         try:
-            subprocess.run(
+            result = subprocess.run(
                 ['mpc', '-h', self.host, '-p', str(self.port), 'add', track_file],
                 capture_output=True,
+                text=True,
                 timeout=2
             )
+            if result.returncode != 0:
+                detail = (result.stderr or '').strip() or f"mpc exited {result.returncode}"
+                print(f"MPD refused track {track_file}: {detail}", file=sys.stderr)
+                return False
             return True
         except Exception as e:
             print(f"Error adding track {track_file}: {e}", file=sys.stderr)

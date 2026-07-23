@@ -58,62 +58,52 @@ class Config:
         self.taste_file = self.data_dir / 'state' / 'user_taste.npz'
         self.exploration_file = self.data_dir / 'state' / 'exploration_state.json'
         self.feedback_history_file = self.data_dir / 'state' / 'feedback_history.json'
-        
+        self.log_file = self.data_dir / 'dj.log'
+
         # System Parameters
         self.mpd_poll_interval = 0.5           # Seconds between MPD status polls
-        self.embedding_dimension = 512         # Expected embedding vector size (CLAP Phase 3)
-        
-        # Context Awareness Parameters (Phase 3)
-        self.enable_time_context = True        # Enable time-of-day awareness
-        self.enable_day_context = True         # Enable day-of-week awareness
-        
-        # Time period boundaries (hour ranges)
-        self.time_periods = {
-            'morning': (6, 10),       # 6am - 10am
-            'midday': (10, 14),       # 10am - 2pm
-            'afternoon': (14, 18),    # 2pm - 6pm
-            'evening': (18, 22),      # 6pm - 10pm
-            'night': (22, 6),         # 10pm - 6am (wraps around)
-        }
-        
-        # Weekday definition (Monday=0, Sunday=6)
-        self.weekdays = [0, 1, 2, 3, 4]        # Monday-Friday
-        
-        # Context update rates
-        self.time_update_rate_like = 0.05      # Update rate for explicit likes
-        self.time_update_rate_listen = 0.02    # Update rate for full listens
-        
-        # Context scoring weight
-        self.time_context_weight = 0.15        # Weight for time similarity in scoring
-        
-        # Day-of-week exploration modifiers
-        self.weekday_exploration_modifier = 0.8   # Reduce exploration on weekdays
-        self.weekend_exploration_modifier = 1.2   # Increase exploration on weekends
-        
-        # Context persistence file
-        self.context_file = self.data_dir / 'state' / 'time_context.npz'
-        
+        self.embedding_dimension = 512         # Expected embedding vector size (CLAP)
+
         # Ensure data directories exist
         self.data_dir.mkdir(parents=True, exist_ok=True)
         (self.data_dir / 'embeddings').mkdir(exist_ok=True)
         (self.data_dir / 'state').mkdir(exist_ok=True)
     
     def validate(self):
-        """Validate configuration parameters."""
-        assert 0 <= self.weight_session_similarity <= 1
-        assert 0 <= self.weight_taste_similarity <= 1
-        assert 0 <= self.weight_novelty <= 1
-        assert 0 <= self.weight_anti_repetition <= 1
-        
-        total_weight = (self.weight_session_similarity + 
-                       self.weight_taste_similarity + 
-                       self.weight_novelty + 
-                       self.weight_anti_repetition)
-        assert abs(total_weight - 1.0) < 0.01, f"Weights must sum to 1.0, got {total_weight}"
-        
-        assert 0 <= self.exploration_min <= self.exploration_max <= 1
-        assert self.queue_buffer_size >= self.queue_low_threshold
-        
+        """
+        Validate configuration parameters.
+
+        Raises ValueError on the first violation.  Deliberately NOT written with
+        bare `assert`: under `python -O` every assert is stripped, which would
+        silently disable the weight-sum invariant below (L9).
+        """
+        def _require(condition, message):
+            if not condition:
+                raise ValueError(f"Invalid configuration: {message}")
+
+        weights = {
+            'weight_session_similarity': self.weight_session_similarity,
+            'weight_taste_similarity': self.weight_taste_similarity,
+            'weight_novelty': self.weight_novelty,
+            'weight_anti_repetition': self.weight_anti_repetition,
+        }
+        for name, value in weights.items():
+            _require(0 <= value <= 1, f"{name} must be in [0, 1], got {value}")
+
+        # The four scoring weights are the whole of the score.  Nothing may be
+        # added on top of them (the time-context bonus that used to break this
+        # invariant is gone — D6).
+        total_weight = sum(weights.values())
+        _require(abs(total_weight - 1.0) < 0.01,
+                 f"scoring weights must sum to 1.0, got {total_weight}")
+
+        _require(0 <= self.exploration_min <= self.exploration_max <= 1,
+                 "require 0 <= exploration_min <= exploration_max <= 1, got "
+                 f"{self.exploration_min} / {self.exploration_max}")
+        _require(self.queue_buffer_size >= self.queue_low_threshold,
+                 f"queue_buffer_size ({self.queue_buffer_size}) must be >= "
+                 f"queue_low_threshold ({self.queue_low_threshold})")
+
         return True
 
 

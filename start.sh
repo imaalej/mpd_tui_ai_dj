@@ -127,16 +127,17 @@ if [ ! -f "$EMBED_FILE" ]; then
   echo "  Embeddings capture the 'sound fingerprint' of each song so the AI"
   echo "  can find musically similar tracks. You need to generate them once."
   echo ""
-  echo "  Choose an option:"
-  echo "    [1] Generate REAL embeddings using CLAP (best quality, slow,"
-  echo "        requires ~4 GB download on first run)"
-  echo "    [2] Generate DEMO embeddings (fast, random — good for testing)"
-  echo "    [Q] Quit"
+  echo "  There is no demo/random option: random vectors make every similarity,"
+  echo "  every novelty score and every learned preference meaningless while the"
+  echo "  interface keeps presenting them as insight."
   echo ""
-  read -rp "  Your choice [1/2/Q]: " EMB_CHOICE
+  # Lowercase via tr, not ${VAR,,} — the latter is a bash 4+ expansion and a
+  # hard syntax error on the bash 3.2 that macOS ships (audit M7).
+  read -rp "  Generate CLAP embeddings now? [y/N]: " EMB_CHOICE
+  EMB_CHOICE=$(printf '%s' "$EMB_CHOICE" | tr '[:upper:]' '[:lower:]')
 
-  case "${EMB_CHOICE,,}" in
-  1)
+  case "$EMB_CHOICE" in
+  y | yes)
     echo ""
     info "Checking for CLAP dependencies …"
     if ! python3 -c "import transformers, torch, torchaudio" &>/dev/null 2>&1; then
@@ -155,37 +156,11 @@ if [ ! -f "$EMBED_FILE" ]; then
     python3 generate_embeddings.py
     success "Embeddings generated!"
     ;;
-  2)
-    echo ""
-    info "Generating demo embeddings …"
-    python3 - <<'PYEOF'
-import sys
-sys.path.insert(0, '.')
-from config import config
-from track_library import generate_dummy_embeddings
-import subprocess, re
-
-result = subprocess.run(
-    ['mpc', 'listall'],
-    capture_output=True, text=True
-)
-tracks = [l.strip() for l in result.stdout.splitlines()
-          if l.strip() and re.search(r'\.(mp3|flac|ogg|m4a|wav|opus)$', l, re.I)]
-if not tracks:
-    print("No music tracks found!", file=sys.stderr)
-    sys.exit(1)
-generate_dummy_embeddings(tracks, config.embeddings_file)
-print(f"Generated demo embeddings for {len(tracks)} tracks.")
-PYEOF
-    success "Demo embeddings ready"
-    ;;
-  q | quit)
-    echo "Bye!"
-    exit 0
-    ;;
   *)
-    error "Invalid choice."
-    exit 1
+    echo ""
+    echo "  Nothing to play against. Run this when you are ready:"
+    echo "      python3 generate_embeddings.py"
+    exit 0
     ;;
   esac
 else
@@ -205,7 +180,7 @@ echo "    , / .         Volume down / up"
 echo "    ← / →         Seek backward / forward"
 echo "    ↑ / ↓         Navigate queue"
 echo "    ENTER         Play selected queue item"
-echo "    I             Time-context info"
+echo "    I             Model info"
 echo "    Q             Quit"
 echo ""
 sleep 1
