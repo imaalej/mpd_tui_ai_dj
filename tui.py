@@ -199,6 +199,83 @@ HISTORY_RENDER_LIMIT = 200
 # `_art_geometry()` asks the widget tree instead (audit H8).
 
 
+# Terminal byte sequences → the key names urwid hands `_handle_input`.
+#
+# This exists so the fallback text mode can share the urwid mode's one dispatch
+# table instead of keeping a second one (audit L9/M1c).  Only the sequences the
+# bindings actually use are here; anything else decodes to None and is ignored,
+# which is what urwid does with an unhandled key too.
+_RAW_KEYS = {
+    "\x1b[A": "up",
+    "\x1b[B": "down",
+    "\x1b[C": "right",
+    "\x1b[D": "left",
+    "\x1bOA": "up",         # some terminals send SS3 rather than CSI in
+    "\x1bOB": "down",       # application-cursor mode
+    "\x1bOC": "right",
+    "\x1bOD": "left",
+    "\r": "enter",
+    "\n": "enter",
+}
+
+
+def decode_key(raw: str) -> Optional[str]:
+    """
+    Turn one terminal keypress into a key name `_handle_input` knows.
+
+    Pure and importable on purpose: the fallback mode needs a pty to run, so
+    this is the part of it that can be tested without one — and the part that
+    was actually wrong before, since the two interfaces disagreed about what
+    `↑` meant (L9).
+    """
+    if not raw:
+        return None
+    if raw in _RAW_KEYS:
+        return _RAW_KEYS[raw]
+    if len(raw) == 1 and (raw.isprintable() or raw == " "):
+        return raw
+    return None
+
+
+def decode_keys(buffer: str):
+    """
+    Split a chunk of terminal input into key names, plus any incomplete tail.
+
+    Returns `(keys, remainder)`.  `remainder` is a partial escape sequence that
+    might still be completed by the next read; anything else is consumed.
+
+    The mode used to read one character at a time and `select()` on `sys.stdin`
+    between reads.  Those two do not agree about what is pending: `read()` on a
+    buffered text stream pulls everything available into Python's buffer, and
+    `select()` then reports the file descriptor as empty — so a burst of input
+    (a held-down arrow key, a paste, anything faster than one key per tick) left
+    keys sitting in the buffer, unread, until the next keypress dislodged one of
+    them.  Reading the whole burst and splitting it here is what makes the two
+    agree.
+    """
+    keys, i = [], 0
+    while i < len(buffer):
+        if buffer[i] == "\x1b":
+            sequence = buffer[i:i + 3]
+            if sequence in _RAW_KEYS:
+                keys.append(_RAW_KEYS[sequence])
+                i += 3
+                continue
+            if len(buffer) - i < 3 and any(k.startswith(buffer[i:])
+                                           for k in _RAW_KEYS):
+                return keys, buffer[i:]     # truncated — wait for the rest
+            if buffer[i:i + 2] in ("\x1b[", "\x1bO"):
+                i += 3      # a CSI/SS3 sequence we have no binding for: drop it
+                continue    # whole, or its tail arrives as bare keypresses
+            i += 1          # a bare ESC
+            continue
+        key = decode_key(buffer[i])
+        if key is not None:
+            keys.append(key)
+        i += 1
+    return keys, ""
+
+
 class AdaptiveDJTUI:
     """Terminal User Interface for Adaptive Session AI DJ."""
 
@@ -211,6 +288,11 @@ class AdaptiveDJTUI:
         # Written to by the signal handler to unblock urwid's MainLoop; see
         # `request_exit`.
         self._exit_pipe: Optional[int] = None
+        # urwid's own SIGWINCH handler, if we ever displace it, so it can still
+        # be called and still be given back (audit L1).  On urwid 3.0.5 we never
+        # do: urwid chains to us rather than replacing us.
+        self._urwid_sigwinch = None
+        self._sigwinch_installed = False
 
         # What played and what became of it (audit H1c).  The model is here
         # rather than behind the display because nothing behind the display has
@@ -433,6 +515,12 @@ class AdaptiveDJTUI:
         # is moved between monitors.  We use it to mark the art dirty so the
         # next 0.5s tick re-renders without issuing a "remove" first (which
         # would cause a visible blank frame).
+        #
+        # Installing it here is not enough and never was (audit L1): urwid's
+        # `Screen.start()` installs its own handler when `loop.run()` is called,
+        # replacing this one.  `_install_sigwinch_chain()` puts it back from
+        # inside the running loop; this call covers the fallback text mode,
+        # which has no urwid to overwrite it.
         signal.signal(signal.SIGWINCH, self._on_sigwinch)
 
         # A self-pipe the loop watches, so a signal arriving in the middle of
@@ -512,10 +600,28 @@ class AdaptiveDJTUI:
         self.dj.skip_current_track()
 
     def _like_track(self):
+        """
+        [L].  Like the playing track, or retract the like if it already has one.
+
+        The model half is `FeedbackHandler.process_unlike()`, which deletes the
+        like from the feedback history and replays the taste model over what is
+        left rather than subtracting a magnitude — see there for why a negative
+        update cannot undo a normalised EMA (audit L8).  The `♥` follows the
+        model rather than leading it: it is only added or removed once the
+        handler reports that the history actually changed, so a track with no
+        embedding cannot end up wearing a heart that `[L]` is then unable to
+        take off.
+        """
         t = self.current_status.get("track_file")
-        if t:
-            self.dj.feedback_handler.process_like(t)
+        if not t:
+            return
+        if self.history.is_liked(t):
+            if self.dj.feedback_handler.process_unlike(t) is not None:
+                self.history.unlike(t)
+        elif self.dj.feedback_handler.process_like(t):
             self.history.like(t)
+        if self.use_urwid:
+            self._update_session_panel()
 
     def _history_scroll(self, delta: int):
         """
@@ -568,8 +674,15 @@ class AdaptiveDJTUI:
 
     def _quit(self):
         self.running = False
-        # Restore default SIGWINCH handler
-        signal.signal(signal.SIGWINCH, signal.SIG_DFL)
+        # Only hand SIGWINCH back if we took it.  This used to drop to SIG_DFL
+        # unconditionally, which takes the handler away from urwid while urwid
+        # is still holding the screen — and its handler is how it learns about a
+        # resize during teardown.  `Screen.stop()` restores what it captured, so
+        # the right move is usually to leave it alone (audit L1).
+        if self._sigwinch_installed:
+            signal.signal(signal.SIGWINCH,
+                          self._urwid_sigwinch or signal.SIG_DFL)
+            self._sigwinch_installed = False
         if self.use_urwid:
             raise urwid.ExitMainLoop()
 
@@ -696,6 +809,35 @@ class AdaptiveDJTUI:
     # Keys that dismiss the inspector rather than scrolling it.
     _INFO_SCROLL_KEYS = ("up", "down", "page up", "page down", "home", "end")
 
+    # A LineBox draws one row above and below and one column each side.  That is
+    # structural to urwid's own widget, not a count of this application's
+    # layout, which is the distinction H8 is about.
+    _LINEBOX_BORDER = 2
+
+    def _overlay_inner_size(self, overlay):
+        """
+        The size urwid will hand the inspector's ListBox — asked, not derived.
+
+        This used to be `(int(cols * 0.7) - 2, box_rows - 2)`: our own copy of
+        the arithmetic urwid performs on the `("relative", 70)` width the
+        overlay declares.  Two places computing the same layout is how H8's
+        album-art constants came to be wrong, and being wrong here costs a
+        scroll page that jumps by the wrong amount.
+
+        `calculate_padding_filler` and `top_w_size` are the Overlay's own
+        methods, so this asks the widget where it is putting its child.  Read
+        per keypress rather than once, so the page still scrolls correctly if
+        the terminal is resized while `[I]` is held open — which it can be, now
+        that ↑↓ no longer dismiss it.
+        """
+        size = self.loop.screen.get_cols_rows()
+        left, right, top, bottom = overlay.calculate_padding_filler(size, True)
+        inner = overlay.top_w_size(size, left, right, top, bottom)
+        cols = inner[0] if len(inner) > 0 else size[0]
+        rows = inner[1] if len(inner) > 1 else size[1]
+        return (max(1, cols - self._LINEBOX_BORDER),
+                max(1, rows - self._LINEBOX_BORDER))
+
     def _show_model_info(self):
         """
         [I].  Draw the inspector and block on it until a key dismisses it.
@@ -708,14 +850,26 @@ class AdaptiveDJTUI:
         """
         lines = self._model_info_lines()
         if not self.use_urwid:
+            # The fallback mode had no `[I]` binding at all while this method
+            # already returned its lines for a non-urwid caller — a loose end
+            # rather than an intended asymmetry (§8, trap 4).  Print the page
+            # and hold it until a key, which is the same gesture the overlay
+            # makes in a terminal that has no loop to block.
+            print("\033[2J\033[H", end="")
+            for line in lines:
+                print(line)
+            print("\n── any key to return ──")
+            sys.stdout.flush()
+            self._wait_for_any_key()
             return lines
 
         walker = urwid.SimpleListWalker([urwid.Text(line) for line in lines])
         listbox = urwid.ListBox(walker)
         overlay_box = urwid.LineBox(listbox, title="Model Info")
 
-        cols, screen_rows = self.loop.screen.get_cols_rows()
-        box_rows = min(len(lines) + 2, max(6, screen_rows - 2))
+        _, screen_rows = self.loop.screen.get_cols_rows()
+        box_rows = min(len(lines) + self._LINEBOX_BORDER,
+                       max(6, screen_rows - 2))
 
         overlay = urwid.Overlay(
             overlay_box,
@@ -747,10 +901,7 @@ class AdaptiveDJTUI:
                 dismissed = False
                 for key in keys:
                     if key in self._INFO_SCROLL_KEYS:
-                        # The ListBox's own size: the Overlay's width is 70% of
-                        # the screen and the LineBox takes one column each side.
-                        inner = (max(1, int(cols * 0.7) - 2), max(1, box_rows - 2))
-                        listbox.keypress(inner, key)
+                        listbox.keypress(self._overlay_inner_size(overlay), key)
                     elif isinstance(key, tuple):
                         continue        # a mouse event; not a dismissal
                     else:
@@ -773,11 +924,76 @@ class AdaptiveDJTUI:
         Marks the album art dirty so _render_art re-sends on the next tick.
         We do NOT call render() here directly — signal handlers must be fast
         and must not write to the ueberzug pipe (not async-signal-safe).
+
+        Then hands the signal on to whatever urwid installed, because urwid's
+        own handler is how the screen learns its size changed.  Displacing it
+        outright would fix the album art by breaking the layout.
         """
         if self.show_album_art:
             self.album_art_renderer.force_redraw()
 
+        chained = self._urwid_sigwinch
+        if callable(chained):
+            chained(signum, frame)
+
+    def _install_sigwinch_chain(self):
+        """
+        Make sure `_on_sigwinch` is actually reached once the loop is running (L1).
+
+        L1 says urwid replaces our handler at startup, and the measurement it
+        cites is real:
+
+            after _setup_urwid()    <bound method AdaptiveDJTUI._on_sigwinch …>
+            after Screen.start()    <bound method Screen._sigwinch_handler …>
+
+        **But the conclusion drawn from it does not hold on urwid 3.0.5.**
+        `Screen.start()` *captures* what was installed and calls it — see
+        `_posix_raw_display.py`, where line 129 stores `_prev_sigwinch_handler`
+        and line 98 invokes it — and `Screen.stop()` puts it back.  urwid wraps
+        our handler rather than displacing it, so it was being invoked all
+        along.  `getsignal` shows urwid's handler because urwid's is on the
+        outside, which looks identical to being replaced and is not.
+
+        Installing on top of that is not a fix, it is a cycle: ours → urwid's →
+        ours (as urwid's `_prev`) → urwid's → … Driving it produced exactly
+        that, a `RecursionError` on the first real resize.
+
+        So this asks the screen whether we are already in its chain, and only
+        installs when we are not — which is the case on urwid versions without
+        `_prev_sigwinch_handler`, and the case the finding describes.  Reading
+        the screen object rather than the version number keeps it a property of
+        what is actually there.
+
+        **What the handler is for is a window move, not a resize.**  A resize
+        already self-heals within 0.5 s: `_art_geometry()` is re-derived from
+        `get_cols_rows()` on every tick, so the renderer's key changes and the
+        image is re-sent on its own.  A move to another monitor at the same size
+        produces the same key, the send is skipped, and the image is left
+        behind — which is what `force_redraw()` exists for.
+
+        Idempotent, so the tick can call it freely.
+        """
+        screen = getattr(self.loop, 'screen', None)
+        if getattr(screen, '_prev_sigwinch_handler', None) == self._on_sigwinch:
+            self._urwid_sigwinch = None
+            return False        # urwid already calls us; do not close the loop
+
+        current = signal.getsignal(signal.SIGWINCH)
+        if current == self._on_sigwinch:
+            return False
+
+        # Anything that is not a real callable — SIG_DFL, SIG_IGN, None — is not
+        # something to chain into.
+        self._urwid_sigwinch = current if callable(current) else None
+        signal.signal(signal.SIGWINCH, self._on_sigwinch)
+        self._sigwinch_installed = True
+        return True
+
     def _periodic_update(self, loop=None, user_data=None):
+        # The first tick is the earliest point at which urwid's own handler is
+        # in place to be chained: it is installed by `loop.run()`, which has not
+        # happened yet when `_setup_urwid` runs (audit L1).
+        self._install_sigwinch_chain()
         self._update_display()
         if self.running:
             self.loop.set_alarm_in(0.5, self._periodic_update)
@@ -1140,11 +1356,12 @@ class AdaptiveDJTUI:
             print(f"{cursor} {row['marks']} {row['label']}")
 
         print("\n" + "=" * 60)
-        # The same bindings as the urwid mode.  These used to disagree — ↑↓ were
-        # volume here and queue navigation there, while the README said something
-        # third (audit L9).
+        # The same bindings as the urwid mode — and now literally the same
+        # dispatch, via `decode_key()` into `_handle_input` (audit L9/M1c).
+        # These used to disagree: ↑↓ were volume here and queue navigation
+        # there, while the README said a third thing.
         print("SPACE=Play/Pause  N=Next  L=Like  ↑↓=History  ENTER=Replay")
-        print(",.=Vol  ←→=Seek  Q=Quit")
+        print(",.=Vol  ←→=Seek  I=Info  Q=Quit")
         print("=" * 60)
         sys.stdout.flush()
 
@@ -1192,46 +1409,79 @@ class AdaptiveDJTUI:
                     self.album_art_renderer.clear()
 
     def _run_simple_mode(self):
+        """
+        The no-urwid fallback.  Reads raw stdin and feeds `_handle_input`.
+
+        It used to carry its own `if key == …` ladder — a second binding table
+        beside the urwid one, which is how ↑↓ ended up meaning *volume* here and
+        *queue navigation* there while the README claimed a third thing (audit
+        L9).  Stage 3 reconciled the three lists by reading them; this makes
+        there be one list.  `decode_key()` turns terminal bytes into the names
+        urwid uses, and the dispatch after that is the same method the urwid
+        mode calls, so a binding cannot exist in one interface and not the
+        other.
+        """
         import select, termios, tty
 
-        old = termios.tcgetattr(sys.stdin)
+        fd = sys.stdin.fileno()
+        old = termios.tcgetattr(fd)
+        pending = ""
         try:
-            tty.setcbreak(sys.stdin.fileno())
+            tty.setcbreak(fd)
             while self.running:
                 self._update_display()
-                if select.select([sys.stdin], [], [], 0.5)[0]:
-                    key = sys.stdin.read(1)
-                    if key == "\x1b":
-                        if select.select([sys.stdin], [], [], 0.05)[0]:
-                            key += sys.stdin.read(1)
-                        if select.select([sys.stdin], [], [], 0.05)[0]:
-                            key += sys.stdin.read(1)
+                if not select.select([sys.stdin], [], [], 0.5)[0]:
+                    # A partial escape sequence that no further input completed
+                    # was never a key.  Dropping it here stops it from swallowing
+                    # the front of whatever is typed next.
+                    pending = ""
+                    continue
 
-                    if key.lower() == "q":
-                        self._quit()
-                    elif key == " ":
-                        self._toggle_play_pause()
-                    elif key.lower() == "n":
-                        self._skip_track()
-                    elif key.lower() == "l":
-                        self._like_track()
-                    elif key in (",", "<"):
-                        self._volume_down()
-                    elif key in (".", ">"):
-                        self._volume_up()
-                    elif key in ("\r", "\n"):
-                        self._replay_focused()
-                    elif key == "\x1b[A":
-                        self._history_scroll(-1)
-                    elif key == "\x1b[B":
-                        self._history_scroll(+1)
-                    elif key == "\x1b[C":
-                        self._seek_forward()
-                    elif key == "\x1b[D":
-                        self._seek_backward()
+                # `os.read` on the raw descriptor rather than `sys.stdin.read`,
+                # so what `select` reports and what is consumed are the same
+                # thing — see `decode_keys`.
+                chunk = os.read(fd, 64).decode("utf-8", "ignore")
+                if not chunk:
+                    break                       # EOF: the terminal went away
+
+                keys, pending = decode_keys(pending + chunk)
+                for key in keys:
+                    self._handle_input(key)
+                    if not self.running:
+                        break
         except KeyboardInterrupt:
             pass
         finally:
-            termios.tcsetattr(sys.stdin, termios.TCSADRAIN, old)
+            termios.tcsetattr(fd, termios.TCSADRAIN, old)
             self.running = False
             print("\n")
+
+    def _wait_for_any_key(self):
+        """
+        Hold the fallback mode's `[I]` page until a key dismisses it.
+
+        The urwid inspector holds its loop the same way — but it wakes every
+        0.5 s without a keypress, and this must too, for the same class of
+        reason.  A single unbounded `select` cannot be interrupted by anything:
+        `request_exit()` sets `running` false from the signal handler and the
+        page would sit there regardless, which is H3's shape in the one
+        interface H3 was never driven through.  So it polls, and a shutdown
+        gets out of here.
+
+        Reads the raw descriptor rather than `sys.stdin`, so `select` and the
+        read agree about what is pending — see `decode_keys`.  Returns at once
+        when stdin is not a terminal, so a non-interactive caller cannot be
+        wedged here at all.
+        """
+        import select
+
+        try:
+            if not sys.stdin.isatty():
+                return
+            fd = sys.stdin.fileno()
+            while self.running:
+                if select.select([sys.stdin], [], [], 0.25)[0]:
+                    os.read(fd, 64)
+                    return
+        except Exception:
+            pass

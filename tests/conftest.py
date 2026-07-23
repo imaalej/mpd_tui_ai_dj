@@ -20,6 +20,35 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
+from config import config  # noqa: E402  (needs the path insert above)
+
+
+@pytest.fixture(autouse=True)
+def _isolate_state_files(tmp_path_factory, monkeypatch):
+    """
+    Point every persistent-state path at a temp directory, for every test.
+
+    Found in Stage 4 while writing the persistence round-trips (M1c): the suite
+    was writing to the developer's **live** `data/state/`.  `process_like()`
+    calls `user_taste.save()` with no argument, which resolves to
+    `config.taste_file`, so a single green run replaced a real listener's taste
+    model with a fixture's and emptied `feedback_history.json` — the file Stage 3
+    made the `♥` marks depend on (L4).
+
+    A suite that destroys the state it is meant to protect is not green in any
+    sense worth having.  Autouse rather than opt-in, because the leak was in a
+    method three layers below the test that called it, and the next one will be
+    too.  Tests that want to assert on a specific path still monkeypatch it
+    themselves; this only changes where the default lands.
+    """
+    state = tmp_path_factory.mktemp("state")
+    for key, name in (('taste_file', 'user_taste.npz'),
+                      ('exploration_file', 'exploration_state.json'),
+                      ('feedback_history_file', 'feedback_history.json'),
+                      ('play_history_file', 'play_history.json')):
+        monkeypatch.setattr(config, key, state / name, raising=True)
+    return state
+
 
 @pytest.fixture(autouse=True)
 def _restore_stderr():
@@ -299,6 +328,7 @@ class FakeArtRenderer:
         self.protocol = None
         self.renders = []
         self.clears = 0
+        self.shutdowns = 0
         self.art_for = {}
 
     def is_available(self):
@@ -313,6 +343,12 @@ class FakeArtRenderer:
 
     def clear(self):
         self.clears += 1
+
+    def shutdown(self):
+        """The real renderer ends its child process here (audit L9)."""
+        self.shutdowns += 1
+        self.clears += 1
+        self.available = False
 
     def force_redraw(self):
         pass

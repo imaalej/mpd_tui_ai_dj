@@ -153,7 +153,25 @@ class CLAPEmbeddingGenerator:
     TRUNCATION = 'rand_trunc'
 
     PARTIAL_SAVE_INTERVAL = 100   # Save progress every N tracks
-    REQUIRED_DISK_SPACE_MB = 700  # Model download plus the window matrix
+
+    # What the first run actually puts on disk, measured rather than guessed
+    # (audit M7).  The old figure was 700 MB, stated nowhere else the same way:
+    # the README said "~1 GB model download" and start.sh said "~4 GB".  All
+    # three were wrong, and 700 was wrong in the direction that matters — the
+    # check would pass on a disk the download then fills.
+    #
+    # `du -sb ~/.cache/huggingface/hub/models--laion--clap-htsat-unfused`
+    # after a first run: 1,232,327,859 bytes.  It is twice the model's size
+    # because the repository's `main` carries only `pytorch_model.bin`
+    # (614.5 MB) and transformers ≥5 additionally fetches the safetensors
+    # conversion from `refs/pr/3` (614.4 MB).  Both end up cached.
+    # The artifact is counted too.  It is written to `data/embeddings/` rather
+    # than to the cache, so on a split filesystem this asks for slightly more
+    # than it will use in one place — the conservative direction for a check
+    # whose whole job is to refuse a run that cannot finish.
+    MODEL_CACHE_MB = 1176         # 1.15 GiB, measured
+    ARTIFACT_MB = 46              # track_embeddings.npz 45.5 MiB + descriptors
+    REQUIRED_DISK_SPACE_MB = MODEL_CACHE_MB + ARTIFACT_MB
 
     def __init__(
         self,

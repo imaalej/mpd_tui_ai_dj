@@ -406,14 +406,36 @@ class AdaptiveDJWithTUI:
         unreachable.  Unblocking the loop is what makes the rest of the shutdown
         path run at all (audit H3).
 
-        Signal handlers must stay minimal, so the mode restore is the only work
-        done here directly — it is the one thing that alters state outside this
-        process, and it must happen even if urwid never yields.
+        Signal handlers must stay minimal, so only the things that alter state
+        *outside* this process are done here directly — the mode restore, and
+        ending the album-art child.  Both must happen even if urwid never
+        yields.  The ueberzugpp leak (L9) is the same finding as this one seen
+        from the other side: before H3, `_shutdown()` was unreachable on
+        SIGTERM, so the child was orphaned every time the DJ was stopped by
+        anything other than `[Q]`.
         """
         self.running = False
         self._restore_mpd_modes()
+        self._shutdown_album_art()
         if self.tui is not None:
             self.tui.request_exit()
+
+    def _shutdown_album_art(self):
+        """
+        End the album-art child process.  Idempotent (audit L9).
+
+        Nothing in here may raise.  It runs on the signal path, ahead of
+        `tui.request_exit()` — the call that unblocks urwid and makes the whole
+        of the rest of the shutdown reachable (H3) — so an exception escaping
+        here would restore H3 in exchange for fixing L9.
+        """
+        renderer = getattr(self.tui, 'album_art_renderer', None)
+        if renderer is None:
+            return
+        try:
+            renderer.shutdown()
+        except Exception as e:
+            print(f"Album art shutdown failed: {e}", file=sys.stderr)
 
     def _shutdown(self):
         """Clean shutdown."""
@@ -429,9 +451,9 @@ class AdaptiveDJWithTUI:
         # Hand MPD back the way it was found
         self._restore_mpd_modes()
 
-        # Clear album art if displayed
-        if self.tui and self.tui.show_album_art:
-            self.tui.album_art_renderer.clear()
+        # Clear the album art *and* end the child process holding it (L9).
+        # `clear()` alone left `ueberzugpp` running with its stdin open.
+        self._shutdown_album_art()
 
         print("Goodbye!", file=sys.stderr)
 

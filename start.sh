@@ -153,6 +153,13 @@ if [ ! -f "$EMBED_FILE" ]; then
   echo "  Embeddings capture the 'sound fingerprint' of each song so the AI"
   echo "  can find musically similar tracks. You need to generate them once."
   echo ""
+  # Measured, not estimated — this script used to say "~4 GB download" while the
+  # README said "~1 GB" and the pre-flight check demanded 700 MB (audit M7).
+  echo "  What this costs, measured on a 674-track library:"
+  echo "    • 1.15 GB one-time model download (cached in ~/.cache/huggingface)"
+  echo "    • 46 MB of embeddings in data/embeddings/"
+  echo "    • about 5 minutes on an RTX 3070, or 25-35 minutes on CPU"
+  echo ""
   echo "  There is no demo/random option: random vectors make every similarity,"
   echo "  every novelty score and every learned preference meaningless while the"
   echo "  interface keeps presenting them as insight."

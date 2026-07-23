@@ -24,21 +24,28 @@ conversation in context.
   below, and several findings' "fix direction" blocks were rewritten because of it.
 - **§0b** is the implementation log, one entry per completed stage. It records what has actually
   shipped and — more usefully — the places where doing the work turned up something the plan had not
-  anticipated, including two of the audit's own empirical claims that turned out to be wrong.
+  anticipated, including several of the audit's own empirical claims that turned out to be wrong.
+  **Stage 4's entry is the one to read if you are about to trust a finding**: acting on L1's fix
+  direction exactly as written broke the application.
 - **§2–§5** are the findings, each tagged with a status: `OPEN`, `NEW`, `DISSOLVED`, `RESOLVED by
   deletion`, `SUPERSEDED`, `ELEVATED`, `DONE`. Only `OPEN`, `NEW` and `ELEVATED` require work.
-- **§6** is the status table — the fastest way to see what is still live.
+- **§6** is the status table — the fastest way to see what is still live. **As of Stage 4 nothing
+  is: every finding is closed**, one of them (L1) with its own claim corrected, and one (L6) declined
+  with a reason.
 - **§7** specifies the target data artifacts (the `.npz` schemas). Build to these.
 - **§8** is the ordered plan. Each stage has a definition of done. **Each stage leaves the
   application runnable** — there is no point in the sequence where it is half-migrated and broken.
-- **§9** lists what is still undecided.
-- **§10 / §10b / §10c / §10d** are the evidence appendix, one per stage that measured anything,
+- **§9** lists the judgement calls the plan rests on and what was deliberately deferred. Nothing is
+  undecided.
+- **§10 / §10b / §10c / §10d / §10e** are the evidence appendix, one per stage that measured anything,
   **newest wins where they overlap**. §10 is the pre-Stage-1 library and is provenance only. §10b is
   the embeddings, the centring and the descriptor bank. **§10c is the live record for anything about
   skips, selection or the manifold** — it re-took §10b's two "Re-measured for Stage 2" tables by
   driving the shipped code, and four of their figures did not reproduce. **§10d is the live record
   for the display**: the descriptor drift distribution, the widget-tree geometry, and the terminal
-  sizes at which the pre-Stage-3 layout crashed.
+  sizes at which the pre-Stage-3 layout crashed. **§10e is Stage 4**: why un-liking is a replay and
+  not a subtraction, what a first run actually costs on disk and on CPU, and the urwid source that
+  shows L1's conclusion was wrong.
 
 Where this document and the code disagree, the document describes the target. **Line references
 throughout §2–§5 are to `HEAD 8dc4275`, the pre-Stage-0 tree**, and are now stale for every file
@@ -714,6 +721,187 @@ history, and it is tested directly.
   reconciliation is asserted only by reading. L2's non-functional art paths are untouched (Stage 4).
 - **No Stage 4 work was pulled forward.** M7's remaining README contradictions, L1's SIGWINCH
   handler, L6's polling and the `.gitkeep` scaffolding are all still open.
+
+### Stage 4 — complete, 23 July 2026
+
+Net effect: **+126 tests** (416 → 542, all green, ~18 s), four new test files, the kitty and sixel
+album-art paths deleted, `[L]` made a toggle on a retraction model that is a replay rather than a
+guessed inverse, and **three defects found that were not in any finding** — one of them in the test
+suite itself, and one created by following L1's own fix direction.
+
+| Plan item | Landed as |
+|---|---|
+| **M1c** | `test_persistence_round_trip.py` (+22): the three files with no round-trip coverage, each as round-trip → behavioural consequence → missing file → corrupt file. `test_simple_mode.py` (+37): the fallback mode driven through a real pty, plus `decode_keys()` as a pure function. |
+| **M7** | Every figure re-measured and `test_documented_numbers.py` (+13) holds the three places together, because M7 is a consistency finding and rewriting the numbers once would not have fixed it. |
+| **L1** | **The finding's conclusion was wrong on this urwid** — see item 1 below. The handler was already being reached; what shipped is the check that keeps it reachable without closing a loop, and the first tests that assert any of it. |
+| **L2** | `KittyProtocol` and `SixelProtocol` deleted (D7), guarded by `test_deletions.py`. `_warn_about_unsupported_terminal()` tells a kitty or sixel user why there is no art and what would give them some — the only part of those ~100 lines that was ever true. |
+| **L8** | `UserTaste.replay()` + `UserTaste.explains()` + `FeedbackHandler.process_unlike()`. The retraction is a *deletion plus a recomputation*, gated on the history being able to account for the model. Reasoning and both measurements in item 2. |
+| **L9** | `.gitignore` switched from excluding the directories to excluding their contents, so the `.gitkeep` files ship — `git ls-files data` now lists all three. `AlbumArtRenderer.shutdown()` ends the child, wired into `_shutdown()` **and** the signal path. |
+| *(optional)* | The `[I]` overlay's ListBox is sized from `Overlay.calculate_padding_filler()` / `top_w_size()` rather than from our own copy of the `("relative", 70)` arithmetic, and re-read per keypress so it survives a resize while the page is open. |
+| **L6** | *(optional)* Not done. Still only worth it against a remote `MPD_HOST`, and Stage 4's brief is to change observable behaviour as little as possible. |
+
+**Verification.** 542 pytest tests pass. The application was then driven end to end against the live
+MPD in a pty at 120×45 and at 80×24, from a cold `data/state/`, with the user's queue, modes and
+volume snapshotted before and restored byte-identically after.
+
+| Criterion | Result |
+|---|---|
+| plays, one ahead, modes forced and restored | yes — `random on → off, consume off → on` at start, `random → on, consume → off` after `SIGTERM` |
+| `[L]` likes, `[L]` again retracts | yes — `♥` and `❤` drawn, then gone; `Un-liked; taste model rebuilt from 0 feedback events` at 120×45 and `from 2 feedback events` at 80×24 |
+| the retraction's fallback branch | **fired on real data** — see item 3 |
+| `[I]` opens, scrolls and dismisses | yes, at both sizes |
+| SIGWINCH during a live session | no traceback, no `RecursionError`, still rendering — **this is the check that found item 1** |
+| skip escalation | `Skip #1 λ=1.05`, `#2 λ=0.05 + snap`, `#3 λ=1.00 + snap`, `#4 λ=0.80 + snap` |
+| `80×24` | renders; no `WidgetError` |
+| ueberzugpp after `SIGTERM` | none |
+| `data/dj.log` | 0 tracebacks across both runs |
+
+### Three things the Stage 4 plan did not anticipate
+
+**1 · L1's measurement is right, its conclusion is wrong, and following its fix direction broke the
+application.** The finding says urwid replaces `_on_sigwinch` at startup, and cites `getsignal`
+returning `Screen._sigwinch_handler` after `Screen.start()`. That output is real. The inference from
+it is not: on urwid 3.0.5 `_posix_raw_display.Screen` **captures** whatever handler was installed
+into `_prev_sigwinch_handler` (line 129), **calls it** after its own work (line 98), and **restores
+it** in `stop()` (line 142). urwid wraps our handler rather than displacing it — which is
+indistinguishable from replacement through `getsignal`, and is not the same thing at all. The
+handler had been running the whole time.
+
+Re-installing on top of that, which is exactly what L1 says to do, closes a cycle: ours → urwid's →
+ours (as urwid's `_prev`) → urwid's → … The first live run produced precisely that, and only because
+it was a live run:
+
+```
+  File "tui.py", line 932, in _on_sigwinch
+    chained(signum, frame)
+  File "urwid/display/_posix_raw_display.py", line 98, in _sigwinch_handler
+    self._prev_sigwinch_handler(signum, frame)
+  … × ~500 …
+RecursionError: maximum recursion depth exceeded
+```
+
+Nine unit tests said the chaining was correct. All nine were consistent with each other and with the
+finding, and none of them knew what urwid does, because the double they ran against was one I wrote
+from the same assumption. **That is the shape of C1 and of `FakeMPD`, arriving in a stage whose whole
+subject is durability** — a harness built on the belief that produced the defect will reproduce the
+defect and pass. What caught it was sending a real `SIGWINCH` to a real process.
+
+The shipped code asks the screen object whether we are already in its chain
+(`_prev_sigwinch_handler is self._on_sigwinch`) and installs only when we are not — which is the
+world older urwid is in, and the world the finding describes. Reading the object rather than a
+version number keeps it a property of what is actually there. Both branches are now tested, including
+one that fails if the cycle comes back.
+
+**L1 is therefore recorded as done, but not as "the handler now works" — it already did.** What Stage
+4 added is the first test of any kind for it, and safety on urwid builds that do not chain.
+
+**2 · L8's trap warns against the wrong failure, and the right design needed two measurements rather
+than a decision.** §8 says subtracting `taste_update_like` is not symmetric because the update is a
+normalised EMA. True, but measured on the real library the asymmetry is *tiny* — cos 0.9999 against
+the truth in every ordinary case:
+
+```
+  like is the 2nd event         cos(subtract-0.1, truth)   min 0.999900   median 0.999953
+  like early, 3 events after                               min 0.999876   median 0.999942
+  settled model, 20 after                                  min 0.999871   median 0.999959
+  like is the only event                                   min 0.000000   median 0.000000   ← 
+```
+
+The last row is the finding. From zero, one like normalises to the track itself; subtracting 0.1·e
+from e gives 0.9·e, which normalises straight **back to e**. A subtraction cannot un-seed a model, so
+retracting your only like leaves your long-term taste pinned at unit strength to the track you just
+rejected — and that is the state a new listener is in, so it is the first retraction anyone performs.
+No magnitude fixes it, because the defect is structural rather than numerical. The audit's own
+argument would not have found this; the measurement did.
+
+Replaying the feedback history without the like has no such case, and reproduces the incrementally
+built model **bit for bit** (§10e). But a second measurement changed the design again: the replay is
+only exact if the history is a *complete* account of the model, and `_record_feedback` caps it at
+1000 events.
+
+```
+   999 lifetime events,  999 retained: cos = 1.000000000000   complete
+  1000 lifetime events, 1000 retained: cos = 1.000000000000   complete
+  1001 lifetime events, 1000 retained: cos = 0.994142650376   truncated
+  1400 lifetime events, 1000 retained: cos = 0.923200176638   truncated
+```
+
+A blind replay would move a long-time listener's taste by 0.077 for reasons unrelated to the track
+they un-liked — an order of magnitude more than the retraction itself, and silently. So
+`UserTaste.explains()` checks first, and when the history cannot account for the model the retraction
+is display-only and **says so in the console**. That is §8's second option, taken only where the
+first cannot be honest, and the README states which is which. Note there is no threshold here to
+calibrate: the discriminator is exact reproduction against ≤ 0.994, six orders of magnitude of
+margin, not a cut anyone chose.
+
+**3 · The test suite was writing to the developer's live `data/state/`, and had been for some time.**
+Found while writing M1c's round-trips. `process_like()` calls `user_taste.save()` with no argument,
+which resolves to `config.taste_file` — so a single green run replaced a real listener's taste model
+with a fixture's and emptied `feedback_history.json`, the file Stage 3 made the `♥` marks depend on
+(L4). Confirmed pre-existing by stashing every Stage 4 source change and watching the old code do it
+again.
+
+A suite that destroys the state it exists to protect is not green in a sense worth having, so the fix
+is an autouse fixture redirecting all four paths, rather than a monkeypatch in the tests that
+happened to notice. The leak was three layers below the test that triggered it, and the next one will
+be too.
+
+It also cost something real and is worth recording honestly: the taste model on this machine was
+already overwritten by the baseline run taken at the start of the stage, before there was any reason
+to snapshot it. Per D3 that is regenerable rather than lost, which is the only reason it is a
+footnote.
+
+**3b · Two smaller things the pty found, both pre-existing.** The fallback mode read one character
+per tick and `select()`ed on `sys.stdin` between reads — but `read()` on a buffered text stream
+drains the descriptor into Python's buffer, so `select()` then reported nothing pending and the rest
+of a burst sat unread until another keypress dislodged one character of it. It reads the raw
+descriptor now and splits the buffer with `decode_keys()`. And `[I]`'s fallback page blocked on an
+unbounded `select`, which nothing could interrupt — `request_exit()` sets `running` false from the
+signal handler and the page would have sat there through a SIGTERM. That is H3's shape in the one
+interface H3 was never driven through; it polls now.
+
+### Stage 4 — deviations from the plan's letter
+
+- **The fallback mode's bindings were not merely reconciled, they were made the same code.** §8 asks
+  for a harness for the mode as it stands. Testing it as it stood would have pinned a *second*
+  binding table beside the urwid one — the thing L9 is about — so `decode_key()`/`decode_keys()` turn
+  terminal bytes into urwid's key names and `_handle_input` does the dispatch for both interfaces. A
+  binding can no longer exist in one and not the other, which is a stronger claim than any test of
+  the old structure could have made. Most of the mode is now testable without a terminal; the pty
+  covers what genuinely needs one.
+- **`[I]` was bound in the fallback mode.** §8 trap 4 calls its absence "a loose end rather than an
+  intended asymmetry" without asking for it to be fixed. It is one line once the dispatch is shared,
+  and leaving a key advertised in the README and the urwid footer but dead in the other interface is
+  the dishonesty Stage 0 exists to remove.
+- **`ExplorationController.load()` and `UserTaste.load()` were made atomic.** Not in any finding.
+  Writing M1c's "file missing a key" case showed both assigned field by field, so a truncated file
+  left the object carrying some values from disk and the rest at their defaults — while returning
+  `False`, so the caller believed nothing had been read. `UserTaste` is the worse of the two: the β
+  ramp reads `total_updates`, so a vector loaded beside default counters arrives with none of its
+  weight earned. Both read every field before assigning any.
+- **`process_like()` returns a bool.** A track with no embedding produces no feedback event, and the
+  TUI was drawing a `♥` for it anyway — a heart that `[L]` could then never take off, because there
+  was nothing in the history to retract. Harmless before `[L]` was a toggle; a dead end after.
+- **The kitty and sixel paths were deleted rather than marked.** L2 offers either. D7 says take the
+  deletion when the honest answer is "delete this", and a branch that cannot work is not a feature
+  with a caveat. What replaced them is a sentence telling that user what to install.
+
+### What Stage 4 did **not** do
+
+- **L6 (`mpc idle`)** — optional in §8, and still only worth it against a remote `MPD_HOST`.
+- **The Session panel is empty at 80×24.** The layout renders (N1 stays fixed) but the Now Playing
+  box, the console and the footer consume all 24 rows, so the panel draws its border and no content.
+  Pre-existing — Stage 4 changed no layout — and fixing it means re-weighting a tree whose packing is
+  N1's fix. Recorded rather than touched.
+- **The first-press skip turnover is 100% against a 5% target on a cold session.** §9's item 5 already
+  notes the middle rows overshoot; this is the extreme of it, at press 1 from an essentially unseeded
+  vector, where the pool being compared against is a uniform draw. No file in the selection stack was
+  touched this stage (`session_state.py`, `manifold.py`, `track_selector.py`, `queue_manager.py` are
+  all unchanged), so it is an observation about a cold start rather than a regression — but it is the
+  first time the escalation has been driven from a genuinely empty `data/state/`.
+- **`[I]`'s fallback page and the urwid overlay are still two pieces of code.** They agree on
+  content; only the urwid one runs the session bookkeeping while open, because the fallback's own
+  loop is the thing that would be blocked.
 
 ---
 
@@ -1766,7 +1954,25 @@ needed, which is why §7's schema does not carry them.
 > (`test_skip_escalation.py`), the geometry (`test_manifold.py`), the β ramp (`test_taste_ramp.py`)
 > and anti-repetition persistence (`test_play_history_persistence.py`). 179 → **310 tests**.
 >
-> **Still open: M1c** (Stage 4) — broadening beyond what Stage 2 touched.
+> **Status (M1c, Stage 4).** `DONE.` 416 → **542 tests**. `test_persistence_round_trip.py` covers the
+> three state files that had none — `feedback_history.json` (never called directly by the suite at
+> all, and load-bearing since L4), `exploration_state.json`, and a *seeded* `user_taste.npz` — each as
+> round-trip, then the behavioural consequence, then a missing file, then a corrupt one. Writing the
+> "file missing a key" cases found that `ExplorationController.load()` and `UserTaste.load()` both
+> assigned field by field, leaving a truncated file half-applied while reporting failure; both are
+> atomic now.
+>
+> `test_simple_mode.py` gives the fallback text mode its first coverage, through a real pty — and the
+> mode was changed to deserve it: `decode_key()`/`decode_keys()` turn terminal bytes into urwid's key
+> names and `_handle_input` dispatches for both interfaces, so the second binding table L9 is about no
+> longer exists. The pty found two pre-existing defects (a buffered-read/`select` mismatch that
+> swallowed bursts, and an uninterruptible `[I]` page) and, in a mutation check, catches the exact
+> regression L9 records: rebinding `↑` to volume fails two tests.
+>
+> **And the suite was writing to the developer's live `data/state/`** — `process_like()` saves to
+> `config.taste_file` — so a green run replaced a real taste model with a fixture's. Confirmed
+> pre-existing by stashing every Stage 4 change. An autouse fixture now redirects all four paths.
+> §0b, item 3.
 
 **What.** `test_phase2.py` reports "Passed: 66". Roughly thirty of those are a literal list of
 hardcoded pass tuples:
@@ -2018,7 +2224,28 @@ minutes ago.
 
 ---
 
-### M7 · Setup documentation contradicts itself on every number, and macOS is claimed but unsupported. `OPEN — one item taken early`
+### M7 · Setup documentation contradicts itself on every number, and macOS is claimed but unsupported. `DONE — Stage 4`
+
+> **Status (Stage 4).** Every figure re-measured, and — more to the point — **held together by a
+> test**, because M7 is a consistency finding: the three numbers drifted apart because nothing bound
+> them, so rewriting them once would have fixed nothing.
+> `tests/test_documented_numbers.py` asserts the pre-flight check covers what is actually downloaded,
+> that both user-facing places state the same figure, that no stale claim survives on a line a user
+> reads, that a CPU estimate exists at all, and that `start.sh` uses no bash 4+ syntax.
+>
+> | | Measured, 23 July 2026 |
+> |---|---|
+> | Model cache after a first run | **1,232,327,859 B = 1.15 GiB** |
+> | Why it is twice the model | `main` carries only `pytorch_model.bin` (614,525,833 B); transformers 5.1.0 also fetches the safetensors conversion from `refs/pr/3` (614,431,440 B). Both `refs/main` and `refs/refs/pr/3` are present in the cache. |
+> | Pre-flight check | `MODEL_CACHE_MB = 1176` + `ARTIFACT_MB = 46`, derived rather than chosen. The old `700` passed on a disk the download then filled — worse than no check, because it reads as an endorsement. |
+> | GPU run | 5 min 23 s, 674 tracks, 24,494 windows, 75.8 windows/s (§10b, unchanged) |
+> | **CPU only**, 12 threads | audio encoder **17.0 windows/s** against the GPU's 333 → **≈ 25–35 min** for the same library. The figure that never existed, for the path that is the default fallback. |
+>
+> **macOS: the claim is dropped, not tested.** Stage 0 removed the `${VAR,,}` that made `start.sh` a
+> hard syntax error there, and a scan finds no other bash 4+ construct — so it would probably now
+> *run*. But nothing has been run there, and album art cannot work: the only two surviving renderers
+> are ueberzug and ueberzugpp, both X11/Wayland. The README says Linux, and says macOS is untested and
+> why. §8's trap 5 was observed — nothing was regenerated to obtain any of this.
 
 > **Done in Stage 0, opportunistically.** `${EMB_CHOICE,,}` is now
 > `tr '[:upper:]' '[:lower:]'` — that block was being rewritten to remove the demo-embeddings option
@@ -2103,39 +2330,69 @@ Because batch composition is load-bearing, `batch_size` is recorded in the artif
 
 ---
 
-### L1 · The SIGWINCH handler is never invoked. `OPEN — confirmed by measurement, Stage 3`
+### L1 · The SIGWINCH handler is never invoked. `DONE — Stage 4, and the finding was wrong`
 
-> **No longer a hedge.** The original text said "almost certainly never invoked". Driven directly:
+> **This finding's claim did not survive being acted on. It is rewritten here to carry the correct
+> one.**
+>
+> The measurement is real and reproduces:
 >
 > ```
 > after _setup_urwid()    <bound method AdaptiveDJTUI._on_sigwinch …>
 > after Screen.start()    <bound method Screen._sigwinch_handler …>
 > ```
 >
-> urwid replaces it, exactly as suspected. **But the consequence is narrower than the finding reads,
-> and Stage 3 narrowed it further.** `_art_geometry()` is now re-derived from `get_cols_rows()` on
-> every 0.5 s tick, and `AlbumArtRenderer.render()` skips only when its key —
-> `(path, x, y, width, height)` — is unchanged. So a **resize** changes the geometry, changes the key,
-> and re-sends within half a second on its own. What still needs the handler is a **window move at
-> unchanged size**: same key, send skipped, stale image. That is the case `force_redraw()` was written
-> for, and it is the case that remains broken.
+> **But "urwid replaces it" is the wrong reading of that output on urwid 3.0.5.**
+> `_posix_raw_display.Screen.start()` *captures* whatever handler was installed into
+> `_prev_sigwinch_handler` (line 129), calls it after its own work (line 98), and restores it in
+> `stop()` (line 142). urwid **wraps** our handler; it does not displace it. That is
+> indistinguishable through `getsignal`, which is why the original inference looked safe. The
+> handler had been running since Stage 0.
 >
-> Fix it, but describe it accurately in the commit: it restores redraw-on-monitor-move, not
-> redraw-on-resize.
+> **Following the fix direction below breaks the application.** Re-installing on top of a chain that
+> already reaches us closes a cycle — ours → urwid's → ours (as urwid's `_prev`) → urwid's → … — and
+> the first live `SIGWINCH` after doing so raised `RecursionError` about 500 frames deep, printing a
+> traceback over the interface. Nine unit tests written against a hand-made double agreed the
+> chaining was correct, because the double was built from this finding's assumption. §0b, item 1.
+>
+> **What shipped** asks the screen object whether we are already in its chain and installs only when
+> we are not, which is the case on urwid builds without `_prev_sigwinch_handler`. Both branches are
+> tested, including one that fails if the cycle returns. So the outcome of this finding is *safety on
+> other urwid versions plus the first tests of any kind for it* — not a behaviour change here.
+>
+> **What the handler is for, when it is needed, is narrower than the finding reads.** `_art_geometry()`
+> is re-derived from `get_cols_rows()` on every 0.5 s tick and `AlbumArtRenderer.render()` skips only
+> when its key — `(path, x, y, width, height)` — is unchanged. So a **resize** changes the geometry,
+> changes the key, and re-sends within half a second on its own. Only a **window move at unchanged
+> size** needs `force_redraw()`: same key, send skipped, stale image.
 
 `tui._setup_urwid()` installs `_on_sigwinch` during `__init__`. urwid's `MainLoop` /
-`raw_display.Screen.start()` installs its own SIGWINCH handler afterwards, when `loop.run()` is called
-— replacing it. Register through urwid's screen hooks, or re-install after `loop.run()` starts.
+`raw_display.Screen.start()` installs its own SIGWINCH handler afterwards, when `loop.run()` is
+called. On urwid 3.0.5 that handler delegates back; on builds that do not, re-install after
+`loop.run()` starts — but check which world you are in first, because doing it unconditionally is a
+recursion, not a fix.
 
 ---
 
-### L2 · Kitty and sixel album art fight urwid for the screen; only ueberzug works. `OPEN`
+### L2 · Kitty and sixel album art fight urwid for the screen; only ueberzug works. `DONE — Stage 4`
+
+> **Status.** Both classes deleted (D7: the honest answer was "delete this", and a branch that cannot
+> work is not a feature with a caveat). `test_deletions.py` guards `KittyProtocol`, `SixelProtocol`
+> and `img2sixel`. Detection is now ueberzugpp → ueberzug and stops there.
+>
+> What replaced them is the only part of those ~100 lines that was ever true:
+> `_warn_about_unsupported_terminal()` tells a kitty or sixel user why there is no art and that
+> `ueberzugpp` would give them some. Terminal detection for kitty is therefore still live and is
+> deliberately *not* in the deleted-symbols list — what is gone is the pretence of drawing into it.
 
 Both `KittyProtocol.render` and `SixelProtocol.render` write escape sequences straight to
 `sys.__stdout__` while urwid owns the terminal. urwid's next full redraw — every 0.5 s — paints over
 them. The ueberzug/ueberzugpp overlay protocols work because they draw in a separate X11/Wayland
 surface. Detection order puts ueberzug first, so this mostly hides, but the kitty and sixel branches
 are effectively non-functional and should be marked as such or removed. `album_art.py:234–325`
+
+**Restoring them is a different design, not a repair**: it needs urwid to stop owning the screen for
+the region the image occupies.
 
 ---
 
@@ -2257,12 +2514,29 @@ the space is centred — the centroid *is* the zero vector, which has no directi
 > `Persistence.reset_all()` called it, and that is gone. Taste-model inspection landed early as the
 > `[I]` overlay (§0b, item 2) and was extended with the descriptor rows in Stage 3.
 >
-> **Un-like (`[L]` as a toggle) moved to Stage 4.** This line used to say Stage 3. It is not a row in
-> §8's Stage 3 table and it is not a display change: un-liking means subtracting a like from the taste
-> model, which is the player, and Stage 3's whole constraint was that the player is closed. The
-> display half is already there — `SessionHistory.liked` is one set, rehydrated from disk (L4) — so
-> what remains is deciding what `UserTaste` does with a retraction, which is a modelling question, not
-> a keybinding.
+> **Un-like (`[L]` as a toggle) — `DONE — Stage 4`.** It is *not* a subtraction, and the reason is
+> stronger than the asymmetry §8's trap 1 warns about. Measured on the real library, subtracting
+> `taste_update_like` lands at cos 0.9999 from the truth in every ordinary case — and at **0.000** in
+> the one that matters: from zero a single like normalises to the track, and subtracting 0.1·e from e
+> gives 0.9·e, which normalises back to e. **A subtraction cannot un-seed a model**, so retracting
+> your only like would leave the taste vector pinned at unit strength to the track you just rejected,
+> which is the first retraction any new listener performs.
+>
+> So `process_unlike()` deletes the like from `feedback_history` and calls `UserTaste.replay()` over
+> what remains — asserting nothing, restating the definition the model already has. The replay
+> reproduces the incrementally built vector bit for bit (§10e).
+>
+> **Gated on `UserTaste.explains()`.** The replay is exact only if the history can account for the
+> model, and `_record_feedback` caps it at 1000 events; one event past the cap a replay lands at cos
+> 0.994 from the vector it replaced, and at 1400 events, 0.923. When the account is incomplete the
+> retraction is display-only — the `♥` goes, the like leaves the history, the taste vector is left
+> alone — and the console says which of the two happened. §8's second option, taken only where the
+> first cannot be honest, and the README states which is which. Both branches were exercised live.
+
+This line used to say Stage 3. It is not a row in §8's Stage 3 table and it is not a display change:
+un-liking means changing the taste model, which is the player, and Stage 3's whole constraint was
+that the player is closed. The display half was already there — `SessionHistory.liked` is one set,
+rehydrated from disk (L4).
 
 Never called anywhere in the running system: `MPDController.toggle` / `previous_track` / `seek` /
 `get_all_tracks` / `get_track_metadata`, `TrackLibrary.has_track` / `save_embeddings`,
@@ -2292,7 +2566,11 @@ taste model from the UI.
 - **`.gitignore` intent not achieved.** It excludes `data/state/` and `data/embeddings/` as
   directories, then tries to re-include `!data/state/.gitkeep` — which git cannot do inside an
   excluded directory. `git ls-files data` returns only `data/.gitkeep`. Harmless because
-  `Config.__init__` mkdirs them, but the scaffolding does not ship. — `OPEN`
+  `Config.__init__` mkdirs them, but the scaffolding does not ship. — `DONE` (Stage 4): the patterns
+  are `data/state/*` and `data/embeddings/*`, so the directories stay visible to git and the
+  negations underneath them work. `git ls-files data` now lists all three `.gitkeep` files, and
+  `test_deletions.py::test_no_learned_state_or_embeddings_are_committed` still requires that they are
+  the *only* thing under `data/` that is tracked.
 - **Time-context bonus breaks the weight invariant.** `config.validate()` enforces that the four
   weights sum to 1.0, then `_calculate_score` adds `0.15·time_sim` on top. — `DONE` (Stage 0): the
   bonus is gone, the invariant is true again and is now enforced outside `assert`.
@@ -2302,7 +2580,13 @@ taste model from the UI.
   `DONE` (Stage 0): `[I]` is a model inspector and always has content. Extended in Stage 3 (H1d).
 - **Orphaned ueberzugpp process.** `_shutdown` calls `clear()` but never terminates the child; cleanup
   relies on `__del__` firing at interpreter exit, which is not guaranteed. `album_art.py:118–124` —
-  `OPEN`, and it shares a root cause with H3: `_shutdown` is unreachable on SIGTERM. Fix both together.
+  `DONE` (Stage 4). `AlbumArtRenderer.shutdown()` clears *and* ends the child, and is called from
+  `_shutdown()` **and** from the signal handler — which is the half that was actually broken, since
+  `[Q]` always reached `_shutdown()` and a SIGTERM never did. `_terminate()` escalates to `kill()`
+  when the child ignores `terminate()`, which the old `wait(timeout=1)` swallowed. The art cleanup
+  runs *before* `request_exit()` and cannot raise, because an exception there would trade this
+  finding for H3; a test asserts that the shutdown still reaches `request_exit()` when the renderer
+  throws.
 - **Keybinding docs disagree.** README lists volume as `,` / `.`; the footer reads `Vol - [<,>]`. In
   the non-urwid fallback mode, `↑↓` are bound to volume rather than queue navigation, contradicting
   both. — `DONE` (Stage 3): one list of bindings, in the footer, the README table and the fallback
@@ -2317,9 +2601,12 @@ taste model from the UI.
 
 ## 6 · Findings status
 
-*As of Stage 3 complete, 23 July 2026. `Done` means the code is in the tree and a test guards it —
-which now includes the MPD path, via the `FakeMPD` built to verified semantics (M1b), **and the
-display**, via tests that construct and render the real widget tree (Stage 3).*
+*As of Stage 4 complete, 23 July 2026. `Done` means the code is in the tree and a test guards it —
+which now includes the MPD path, via the `FakeMPD` built to verified semantics (M1b), **the
+display**, via tests that construct and render the real widget tree (Stage 3), and **the fallback
+text interface**, via a pty (Stage 4). **Every finding is now closed.** Three are closed as
+`Dissolved`, one — L1 — is closed with its own claim corrected, and L6 is closed as declined with a
+reason rather than left open.*
 
 | ID | Finding | Status | Stage |
 |---|---|---|---|
@@ -2339,24 +2626,24 @@ display**, via tests that construct and render the real widget tree (Stage 3).*
 | **N1** | `WidgetError` on any terminal under 33 rows | **Done** — `('pack', …)` instead of `('weight', 3, …)`. Predates the audit; found while doing H8, reproduced live at 80×24 against the pre-Stage-3 tree | ~~3~~ |
 | **H9** | Neither `[V]` nor `[N]` changes direction; `[V]` aims off-manifold | **Done** — `[V]` deleted, `[N]` escalates on a solved λ. The design needed one correction found only by running it: the snap must be *inside* the solve (§0b) | ~~2~~ |
 | **M1a** | Tests untracked; phase files are theatre | **Done** — `.gitignore` fixed, phase files deleted, `tests/` tracked (67 green) | ~~0~~ |
-| **M1b/c** | No behavioural suite, no `FakeMPD` | **M1b done** — `FakeMPD` built to re-verified semantics and itself under test. **M1c partly done**: Stage 3 added the display's own coverage (+105, 311 → 416) including the widget tree, which is where N1 had been hiding. The rest — persistence round-trips, the fallback mode — is Stage 4 | ~~2~~ / ~~3~~ / 4 |
+| **M1b/c** | No behavioural suite, no `FakeMPD` | **Done** — `FakeMPD` built to re-verified semantics and itself under test (2); the display's own coverage, where N1 had been hiding (3); persistence round-trips and the fallback mode under a pty (4). 67 → 542. Stage 4 also found the suite writing to the developer's live `data/state/` | ~~2~~ / ~~3~~ / ~~4~~ |
 | **M2** | Two divergent orchestrators | **Done** — both deleted, plus the dummy-embedding paths | ~~0~~ |
 | **M3** | `mpd_music_directory` unvalidated | **Done** — read from MPD's config, source reported, probes resolved; fatal for generation, a warning at startup | ~~1~~ |
 | **M4** | Two sources of truth for track keys | **Done** — `mpc listall` only; coverage logged and enforced on load | ~~1~~ |
 | **M5** | No embedding-dimension validation | **Done** — full schema validation, file dimension wins, model checked by equality | ~~1~~ |
 | **M6a** | `time_context.npz` is JSON | **Done** — deleted (D6) | ~~0~~ |
 | **M6b** | `play_history` never persisted | **Done** — `play_history.json` carries `play_history`, `current_index` and `recent_history`, checkpointed with the rest | ~~2~~ |
-| **M7** | Contradictory setup docs; macOS unsupported | **Open** — Stage 2 removed what it falsified (`[V]`, queue depth 10, queue navigation) and added the skip-escalation and rank-sampling sections. The download sizes, the runtime estimate and the macOS claim remain | 4 |
+| **M7** | Contradictory setup docs; macOS unsupported | **Done** — cache re-measured at 1.15 GiB and the reason it is twice the model's size established; the pre-flight check derived from it rather than chosen; the missing CPU figure measured at 17.0 windows/s; the macOS claim dropped with its reasons. A test holds the three places together, since the finding is that they drifted | ~~2~~ / ~~3~~ / ~~4~~ |
 | **M8** | `--batch-size` ignored | **Done** — batching plus a decode/mel worker pool, which is where the cost actually was (§0b) | ~~1~~ |
-| **L1** | SIGWINCH handler never invoked | Open | 4 |
-| **L2** | Kitty/sixel art fights urwid | Open | 4 |
+| **L1** | SIGWINCH handler never invoked | **Done — and the finding was wrong.** urwid 3.0.5 *chains* to the previous handler rather than replacing it, so it had been running since Stage 0; acting on the fix direction closed a cycle and raised `RecursionError` on the first live resize. What shipped is the check that keeps it safe on urwid builds that do not chain, plus the first tests for it | ~~4~~ |
+| **L2** | Kitty/sixel art fights urwid | **Done** — both classes deleted (D7) and guarded; a kitty or sixel user is told why there is no art and what to install | ~~4~~ |
 | **L3** | Album-art geometry hardcoded | **Elevated → H8**, done | ~~3~~ |
 | **L4** | Hearts vanish on restart | **Done** — `SessionHistory.liked` rehydrates from `feedback_history.json`; `TUI.liked_tracks` deleted | ~~3~~ |
 | **L5** | No log file; stderr swallowed | **Done** — teed to `data/dj.log`, 5 tests | ~~0~~ |
-| **L6** | Polling instead of `mpc idle` | Open — still low priority at depth 1 | 4 (optional) |
+| **L6** | Polling instead of `mpc idle` | **Declined** — optional in §8, and still only worth it against a remote `MPD_HOST`. At depth 1 the one queued track gives the 2 s poll minutes of runway, and Stage 4's brief is to change observable behaviour as little as possible | — |
 | **L7** | Random cold-start taste vector at β=0.3 | **Done** — β ramps over 20 updates; session vector starts at zero and seeds from the first real track. One guard deliberately *kept* against the plan (§0b) | ~~0~~ / ~~2~~ |
-| **L8** | Dead API surface | **Done** — deleted except the two the plan defers. Un-like moved from Stage 3 to Stage 4: it is a taste-model change, not a display one | ~~0~~ / 4 |
-| **L9** | Assorted small traps | **Mixed** — `validate()` off `assert`, the weight invariant, the dead `[I]`, `select_track`'s set mutation and the keybinding docs are done; `.gitkeep` scaffolding and the ueberzugpp child remain | ~~0~~ / ~~2~~ / ~~3~~ / 4 |
+| **L8** | Dead API surface | **Done** — deleted except the two the plan defers (0). Un-like shipped in Stage 4 as a *replay* of the feedback history rather than a negative update, gated on the history being able to account for the model — the measurement that decided it is that a subtraction cannot un-seed a model, so retracting your only like would leave the taste vector pinned to it | ~~0~~ / ~~4~~ |
+| **L9** | Assorted small traps | **Done** — `validate()` off `assert`, the weight invariant, the dead `[I]`, `select_track`'s set mutation and the keybinding docs (0–3); the `.gitkeep` scaffolding now ships and the ueberzugpp child is terminated on both exit paths (4) | ~~0~~ / ~~2~~ / ~~3~~ / ~~4~~ |
 
 ---
 
@@ -2699,7 +2986,7 @@ built in Stage 1 and had been sitting unused since.
 
 ---
 
-### Stage 4 — Make it durable *(half a day)*
+### Stage 4 — Make it durable *(half a day)* · ✅ **COMPLETE 23 July 2026**
 
 > **Read this before writing anything.**
 >
@@ -2786,6 +3073,12 @@ built in Stage 1 and had been sitting unused since.
 | — | *(optional)* Size the `[I]` overlay's ListBox from the widget tree | It computes its inner size from the 70% relative width it declares — a hand-derived number of exactly the kind H8 removed, in a place where being wrong costs a slightly-off scroll page (§0b). |
 
 **Done when:** a fresh clone runs the suite green, and green means something.
+
+> **Complete, 23 July 2026.** 542 tests, green, ~18 s; driven live at 120×45 and 80×24 from a cold
+> `data/state/`, with the user's MPD queue, modes and volume restored byte-identically. Every row
+> above is done except L6, which is declined with a reason. §0b records what the stage found that
+> this plan did not anticipate — including that **trap 3's own fix direction, applied as written,
+> broke the application**, and that the suite had been overwriting the developer's live taste model.
 
 ---
 
@@ -3505,6 +3798,175 @@ deletion guards.
 
 ---
 
+## 10e · Stage 4 measurements
+
+*Taken 23 July 2026 against the shipped code and the real 674-track library. Two of the three changed
+a design decision, and one of them contradicted the finding that prompted the work.*
+
+### L8 — can a subtraction undo a like?
+
+The question §8's trap 1 poses. `_update` is `v ← normalise((1 − w)·v + w·e)` with `w = 0.1` for a
+like; the proposed inverse is a `−0.1` update. Measured against the truth (the same event sequence
+with the like never applied), 40 seeds per row:
+
+```
+  scenario                        cos(subtract-0.1, truth)
+  like is the 2nd event             min 0.999900   median 0.999953
+  like early, 3 events after        min 0.999876   median 0.999942
+  settled model, 20 events after    min 0.999871   median 0.999959
+  5 likes, one retracted            min 0.999900   median 0.999923
+  like is the only event            min 0.000000   median 0.000000
+```
+
+**The asymmetry the trap warns about is real and negligible — 10⁻⁴. The failure is the last row, and
+it is total.** From zero, `(1−w)·0 + w·e` normalises to `e`; subtracting `0.1·e` gives `0.9·e`, which
+normalises back to `e`. A subtraction cannot un-seed a model. The truth there is the zero vector, so
+the cosine is 0 by construction — retract your only like and your long-term taste stays pinned, at
+unit strength, to the track you just rejected. That is the first retraction any new listener makes.
+
+### L8 — does a replay reproduce the model it replaces?
+
+```
+     10 events: bit-identical=True  max|Δ|=0.000e+00  cos=1.000000000000  counts match
+     50 events: bit-identical=True  max|Δ|=0.000e+00  cos=1.000000000000  counts match
+    200 events: bit-identical=True  max|Δ|=0.000e+00  cos=1.000000000000  counts match
+   1000 events: bit-identical=True  max|Δ|=0.000e+00  cos=1.000000000000  counts match
+```
+
+Exactly, including `total_updates`, `like_count`, `skip_count` and `full_listen_count`, because the
+replay drives the same `update_from_*` methods in the same order.
+
+### L8 — but only while the history is a complete account
+
+`_record_feedback` caps the history at 1000 events. Simulated lifetimes, comparing a replay of what
+was *retained* against the vector built incrementally from everything:
+
+```
+     50 lifetime events,   50 retained: cos = 1.000000000000   complete
+    500 lifetime events,  500 retained: cos = 1.000000000000   complete
+    999 lifetime events,  999 retained: cos = 1.000000000000   complete
+   1000 lifetime events, 1000 retained: cos = 1.000000000000   complete
+   1001 lifetime events, 1000 retained: cos = 0.994142650376   truncated
+   1400 lifetime events, 1000 retained: cos = 0.923200176638   truncated
+```
+
+This is what `UserTaste.explains()` tests, and the reason it needs no calibration: the discriminator
+is **exact reproduction versus ≤ 0.994**, six orders of magnitude of margin, not a threshold anyone
+chose. A blind replay past the cap would move the taste vector by 0.077 for reasons unrelated to the
+retraction — more than the retraction itself, and invisibly.
+
+### M7 — what the first run actually costs
+
+```
+  du -sb ~/.cache/huggingface/hub/models--laion--clap-htsat-unfused
+  1232327859                                    # 1.15 GiB
+
+  refs/main         → 8fa0f1c…   pytorch_model.bin        614,525,833 B
+  refs/refs/pr/3    → 79b58ed…   model.safetensors        614,431,440 B
+  (tokenizer, vocab, merges, configs)                       3,369,610 B
+```
+
+The repository's `main` carries **no** safetensors — `HfApi.model_info` lists ten files and
+`pytorch_model.bin` is the only weight file among them — so transformers 5.1.0 additionally pulls the
+conversion from `refs/pr/3`. Both stay cached, which is why the honest figure is 1.15 GiB rather than
+the ~590 MiB the model's own size suggests. The old `REQUIRED_DISK_SPACE_MB = 700` sat between the
+two and passed on a disk the download then filled.
+
+### M7 — the CPU figure that never existed
+
+CLAP audio-tower throughput, batch 32, 10-second windows, on the machine in the header
+(12 logical cores, torch defaulting to 6 threads):
+
+```
+        mel extraction    encode        serial pipeline    24,494 windows
+  cuda      33.3 win/s     333.1 win/s      30.3 win/s        13.5 min
+  cpu       40.5 win/s      17.0 win/s      12.0 win/s        34.1 min
+```
+
+The encoder is **20× slower on CPU** and becomes the bottleneck, where on GPU mel extraction is (which
+is M8's finding, still true). The shipped run overlaps mel with a worker pool and achieves 75.8
+windows/s on GPU — 5 min 23 s — so the honest CPU projection for the same library is the encoder
+ceiling, 24,494 / 17.0 ≈ 24 min, up to 34 min unoverlapped. The README states 25–35 min. Note the
+GPU column here is *not* the shipped 75.8 win/s: this measures a serial pipeline with no worker pool,
+so it understates both devices equally and is useful for the ratio, which is what a reader needs.
+
+### L1 — urwid chains, it does not replace
+
+```python
+# urwid/display/_posix_raw_display.py
+129:  self._prev_sigwinch_handler = self.signal_handler_setter(signal.SIGWINCH, self._sigwinch_handler)
+ 97:  if callable(self._prev_sigwinch_handler):
+ 98:      self._prev_sigwinch_handler(signum, frame)
+142:  self.signal_handler_setter(signal.SIGWINCH, self._prev_sigwinch_handler or signal.SIG_DFL)
+```
+
+L1's `getsignal` output is correct and its conclusion is not: urwid's handler is on the *outside*,
+and calls ours. Installing on top of that closes a cycle, which a live `SIGWINCH` demonstrated
+immediately:
+
+```
+  File "tui.py", line 932, in _on_sigwinch          →  chained(signum, frame)
+  File "urwid/…/_posix_raw_display.py", line 98     →  self._prev_sigwinch_handler(signum, frame)
+  … ~500 frames …
+  RecursionError: maximum recursion depth exceeded
+```
+
+Nine unit tests passed against this code. They were written from the finding's assumption and ran
+against a double built from it — the same failure mode `FakeMPD` exists to prevent, in the stage
+whose subject is durability.
+
+### The live runs
+
+Both from a cold `data/state/`, under `pty.fork()` with an explicit `TIOCSWINSZ`, MPD snapshotted and
+restored.
+
+```
+  120×45   started ✓  playing ✓  ♥ drawn ✓  un-like exact ("rebuilt from 0 feedback events") ✓
+           [I] open/scroll/dismiss ✓   SIGWINCH: no traceback ✓   no orphaned ueberzugpp ✓
+           Skip #1 λ=1.05        100% turnover (target  5%)
+           Skip #2 λ=0.05 + snap 100% turnover (target 20%)
+
+   80×24   renders, no WidgetError ✓   un-like exact ("rebuilt from 2 feedback events") ✓
+           Skip #3 λ=1.00 + snap 100% turnover (target 50%)
+           Skip #4 λ=0.80 + snap 100% turnover (target 85%)
+
+  modes    random on → off, consume off → on   at start
+           random → on,     consume → off      after SIGTERM       (byte-identical to the snapshot)
+  dj.log   0 tracebacks across both runs
+```
+
+Two observations, neither a Stage 4 change (no file in the selection stack was touched):
+
+- **Turnover is 100% from press 1 on a cold session**, against a 5% target. §9's item 5 already notes
+  the middle rows overshoot; this is its extreme, and consistent with §10c's finding that turnover
+  varies tenfold with how settled the session vector is. At press 1 from an unseeded vector the pool
+  being compared against is a uniform draw, so everything in it turns over. **This is the first time
+  the escalation has been driven from a genuinely empty `data/state/`**, and it suggests the schedule
+  means nothing until the session has settled — worth a measurement of its own before the schedule is
+  ever retuned.
+- **The Session panel draws no content rows at 80×24.** The header, the packed Now Playing box, the
+  console and the two-row footer consume all 24. The layout renders — N1 stays fixed — but the panel
+  is a border. Pre-existing; fixing it means re-weighting a tree whose packing *is* N1's fix.
+
+### Suite growth, Stage 4
+
+```
+  Stage 0 →  67   Stage 1 → 179   Stage 2 → 311   Stage 3 → 416   Stage 4 → 542
+```
+
+Stage 4's 126: `test_simple_mode.py` (37, the fallback mode's first coverage — a pty plus
+`decode_keys()` as a pure function), `test_shutdown_and_resize.py` (34, the ueberzugpp child, the
+SIGWINCH chain and the `[I]` overlay's derived size), `test_persistence_round_trip.py` (22),
+`test_unlike.py` (22), `test_documented_numbers.py` (13), plus 3 deletion guards for L2 — and one
+autouse fixture that stops the whole suite writing to the developer's live `data/state/`.
+
+A mutation check on the part that matters: rebinding `↑` from history to volume — the exact
+regression L9 records — fails `test_the_arrow_keys_mean_the_same_thing_in_both_interfaces` and
+`test_the_arrow_keys_scroll_the_history_at_a_real_terminal`, one through the shared dispatch and one
+through the pty.
+
+---
+
 *All line references in §2–§5 are against `HEAD 8dc4275` plus the then-uncommitted `tui.py` change
 (footer key-hint rewording, +10/−10, cosmetic). They predate Stage 0 and are stale for every file it
 touched — see §0b. Measurements were taken on the machine described in the header; the
@@ -3529,3 +3991,15 @@ word count instead. It also rendered the widget tree for the first time in the p
 found a crash on every terminal shorter than 33 rows (**N1**), which had survived three stages and
 311 behavioural tests. The habit that keeps paying is not re-measuring specifically; it is refusing
 to inherit a claim — a number, or a green suite — without checking what it actually covers.*
+
+***§10e is the fifth, and it is the one where the audit was wrong about itself.*** *L1 was recorded as
+"confirmed by measurement" — and the measurement was right while the conclusion drawn from it was
+not: urwid wraps our SIGWINCH handler rather than replacing it, so acting on the fix direction closed
+a recursion, under nine unit tests that all agreed because they ran against a double built from the
+same assumption. L8's trap named the wrong failure mode, and the real one — that a subtraction cannot
+un-seed a taste model — was found only by measuring the case the trap did not think to name. And the
+suite itself turned out to have been overwriting the developer's live taste model for some time.*
+
+*Every stage of this rewrite has ended the same way: the thing that was assumed rather than driven is
+the thing that was wrong. Four times it was a number. The fifth time it was a finding in this
+document, and the correction is written into L1 itself rather than left here.*

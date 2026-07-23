@@ -13,21 +13,22 @@ build/
 venv/
 env/
 
+# Ignore the *contents* of the data directories, not the directories (audit L9).
+#
+# This used to read `data/state/` and `data/embeddings/`, then try to re-include
+# `!data/state/.gitkeep` underneath them.  git cannot do that: once a directory
+# is excluded it is never descended into, so a negation for something inside it
+# can never match.  `git ls-files data` returned only `data/.gitkeep`, and the
+# scaffolding a fresh clone was supposed to get did not ship.  Trailing `/*`
+# keeps the directory itself visible, so the negations below work.
+
 # User-specific learned data (personalized to each user's taste)
-data/state/user_taste.npz
-data/state/exploration_state.json
-data/state/feedback_history.json
-data/state/
-
-# Embeddings (large files generated from user's own music library)
-data/embeddings/track_embeddings.npz
-data/embeddings/
-
-# Keep the data directory structure but not the files
-!data/
-!data/.gitkeep
-!data/embeddings/.gitkeep
+data/state/*
 !data/state/.gitkeep
+
+# Embeddings (large files generated from the user's own music library)
+data/embeddings/*
+!data/embeddings/.gitkeep
 
 # OS files
 .DS_Store

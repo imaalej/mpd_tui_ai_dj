@@ -33,6 +33,17 @@ class ImageProtocol:
     def clear(self):
         pass
 
+    def shutdown(self):
+        """
+        Release anything the protocol is holding outside this process.
+
+        Separate from `clear()`, which only removes the image: the overlay
+        protocols run a child process, and cleanup used to rely on `__del__`
+        firing at interpreter exit.  That is not guaranteed, and on SIGTERM it
+        did not happen at all, so the child outlived the DJ (audit L9).
+        """
+        pass
+
 
 # ---------------------------------------------------------------------------
 # ueberzugpp  (modern C++ rewrite — JSON stdin)
@@ -115,13 +126,16 @@ class UeberzugppProtocol(ImageProtocol):
         except Exception:
             pass
 
+    def shutdown(self):
+        """
+        End the child process.  See `ImageProtocol.shutdown` for why this is not
+        left to `__del__` (audit L9).
+        """
+        _terminate(self.process)
+        self.process = None
+
     def __del__(self):
-        if self.process:
-            try:
-                self.process.terminate()
-                self.process.wait(timeout=1)
-            except Exception:
-                pass
+        self.shutdown()
 
 
 # ---------------------------------------------------------------------------
@@ -205,124 +219,71 @@ class UeberzugProtocol(ImageProtocol):
         except Exception:
             pass
 
+    def shutdown(self):
+        _terminate(self.process)
+        self.process = None
+
     def __del__(self):
-        if self.process:
-            try:
-                self.process.terminate()
-                self.process.wait(timeout=1)
-            except Exception:
-                pass
+        self.shutdown()
 
 
 # ---------------------------------------------------------------------------
-# Kitty graphics protocol
+# Kitty and sixel are gone (audit L2)
 # ---------------------------------------------------------------------------
+#
+# `KittyProtocol` and `SixelProtocol` used to live here.  Both wrote escape
+# sequences straight to `sys.__stdout__` while urwid owned the terminal, so
+# urwid's next full redraw — every 0.5 s — painted over them.  They were not
+# "mostly working"; they were a picture that appeared and was erased twice a
+# second, and only the detection order (ueberzug first) kept that out of sight.
+#
+# They are deleted rather than marked, per D7: a branch that cannot work is not
+# a feature with a caveat.  `_warn_about_unsupported_terminal()` below tells a
+# kitty or sixel user why there is no art and what would give them some, which
+# is the part of those 100 lines that was ever worth anything.
+#
+# Restoring them would need urwid to stop owning the screen for the region the
+# image occupies, which is a different design, not a repair.
 
 
-class KittyProtocol(ImageProtocol):
-    # Kitty requires base64 payload chunks <= 4096 bytes.
-    _CHUNK = 4096
-    # Image ID used for placement so we can delete it with a=d later.
-    _IMG_ID = 1
+def _terminate(process):
+    """
+    End a child process and reap it.
 
-    def detect(self) -> bool:
-        term = os.environ.get("TERM", "")
-        kit = os.environ.get("KITTY_WINDOW_ID", "")
-        self.available = (term == "xterm-kitty") or bool(kit)
-        return self.available
-
-    def render(self, image_path: Path, x: int, y: int, width: int, height: int):
-        if not image_path.exists():
+    Cleanup used to rely on `__del__` firing at interpreter exit, which is not
+    guaranteed — and on SIGTERM, before H3, `_shutdown()` was unreachable
+    entirely, so the ueberzugpp child outlived the DJ (audit L9).  The two share
+    that root cause, which is why the shutdown path now calls this explicitly.
+    """
+    if process is None:
+        return
+    try:
+        if process.poll() is not None:
             return
+        process.terminate()
         try:
-            import base64
-
-            # Detect format so we pass the right 'f' value.
-            # Kitty format codes: 32=JPEG  100=PNG  (anything else -> PNG)
-            suffix = image_path.suffix.lower()
-            fmt = 32 if suffix in (".jpg", ".jpeg") else 100
-
-            raw = image_path.read_bytes()
-            b64 = base64.standard_b64encode(raw).decode()
-            chunks = [b64[i : i + self._CHUNK] for i in range(0, len(b64), self._CHUNK)]
-
-            # Use sys.__stdout__ (raw terminal fd) so Kitty escape sequences
-            # go directly to the terminal, bypassing urwid's output buffering.
-            out = sys.__stdout__
-
-            # Position the cursor at (col x, row y) before emitting graphics.
-            # Kitty renders at the current cursor position; without this the
-            # image appears wherever urwid last left the cursor.
-            out.write(f"\033[{y + 1};{x + 1}H")
-
-            # Transmit in chunks with m=1 (more) / m=0 (last) continuation flag.
-            # Single-chunk case: m=0 in the first (and only) chunk.
-            for idx, chunk in enumerate(chunks):
-                more = 0 if idx == len(chunks) - 1 else 1
-                if idx == 0:
-                    # First chunk carries all display parameters.
-                    out.write(
-                        f"\033_Ga=T,f={fmt},t=d,i={self._IMG_ID},"
-                        f"c={width},r={height},m={more};{chunk}\033\\"
-                    )
-                else:
-                    out.write(f"\033_Gm={more};{chunk}\033\\")
-
-            out.flush()
+            process.wait(timeout=1)
         except Exception:
-            pass
-
-    def clear(self):
-        """Delete the placed image using Kitty's delete action."""
-        try:
-            out = sys.__stdout__
-            out.write(f"\033_Ga=d,i={self._IMG_ID}\033\\")
-            out.flush()
-        except Exception:
-            pass
+            process.kill()
+            process.wait(timeout=1)
+    except Exception:
+        pass
 
 
-# ---------------------------------------------------------------------------
-# Sixel graphics protocol
-# ---------------------------------------------------------------------------
-
-
-class SixelProtocol(ImageProtocol):
-    def detect(self) -> bool:
-        term = os.environ.get("TERM", "")
-        self.available = any(x in term for x in ["mlterm", "yaft", "sixel"])
-        return self.available
-
-    def render(self, image_path: Path, x: int, y: int, width: int, height: int):
-        if not image_path.exists():
-            return
-        try:
-            # Capture img2sixel output and write it directly to the raw
-            # terminal fd (__stdout__) so it bypasses urwid's output buffer.
-            # Pass both -w and -h in pixels so the image is constrained to the
-            # target cell area; without -h a tall cover can overflow into
-            # adjacent TUI panels.  Typical terminal cell: 8px wide, 16px tall.
-            result = subprocess.run(
-                [
-                    "img2sixel",
-                    "-w",
-                    str(width * 8),
-                    "-h",
-                    str(height * 16),
-                    str(image_path),
-                ],
-                capture_output=True,
-                timeout=3,
-            )
-            if result.returncode == 0 and result.stdout:
-                out = sys.__stdout__
-                # Position cursor at the target cell before emitting sixel data.
-                out.write(f"\033[{y + 1};{x + 1}H")
-                out.flush()
-                out.buffer.write(result.stdout)
-                out.flush()
-        except Exception:
-            pass
+def _warn_about_unsupported_terminal():
+    """Say why there is no album art here, when the terminal looked promising."""
+    term = os.environ.get("TERM", "")
+    kitty = term == "xterm-kitty" or bool(os.environ.get("KITTY_WINDOW_ID", ""))
+    sixel = any(x in term for x in ("mlterm", "yaft", "sixel"))
+    if not (kitty or sixel):
+        return
+    which = "kitty's graphics protocol" if kitty else "sixel"
+    print(
+        f"Album art: this terminal supports {which}, but that path is not "
+        "implemented — the images fought urwid for the screen and lost every "
+        "0.5 s. Install `ueberzugpp` for working album art (audit L2).",
+        file=sys.stderr,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -456,13 +417,15 @@ class AlbumArtRenderer:
 
     def _detect_protocol(self):
         """Detect and initialise best available protocol.
-        Order: ueberzugpp → ueberzug → kitty → sixel
+
+        Order: ueberzugpp → ueberzug.  Those are the two that work: they draw
+        into a separate X11/Wayland surface, so urwid's redraw does not erase
+        them.  The kitty and sixel branches were deleted (audit L2) — see the
+        note where they used to be.
         """
         protocols = [
             ("ueberzugpp", UeberzugppProtocol()),
             ("ueberzug", UeberzugProtocol()),
-            ("kitty", KittyProtocol()),
-            ("sixel", SixelProtocol()),
         ]
         for name, protocol in protocols:
             if protocol.detect():
@@ -470,7 +433,9 @@ class AlbumArtRenderer:
                 self.available = True
                 print(f"Album art: {name} protocol active", file=sys.stderr)
                 return
+            protocol.shutdown()
         print("Album art: no supported protocol found (disabled)", file=sys.stderr)
+        _warn_about_unsupported_terminal()
 
     def is_available(self) -> bool:
         return self.available
@@ -511,6 +476,28 @@ class AlbumArtRenderer:
                 pass
         self.current_image = None
         self._render_key = None
+
+    def shutdown(self):
+        """
+        Clear the image and end the protocol's child process (audit L9).
+
+        `_shutdown()` called `clear()` and stopped there, which removes the
+        picture but leaves `ueberzugpp` running with its stdin held open —
+        cleanup was left to `__del__` at interpreter exit, which is not
+        guaranteed to fire and did not fire at all on SIGTERM, because
+        `_shutdown()` was itself unreachable there until H3.  The two findings
+        share that root cause, so the signal path calls this as well.
+
+        Safe to call more than once, and after it the renderer reports itself
+        unavailable rather than writing to a pipe that is gone.
+        """
+        self.clear()
+        if self.protocol is not None:
+            try:
+                self.protocol.shutdown()
+            except Exception:
+                pass
+        self.available = False
 
     def force_redraw(self):
         """

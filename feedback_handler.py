@@ -95,30 +95,115 @@ class FeedbackHandler:
 
         return outcome
 
-    def process_like(self, track_file: str):
+    def process_like(self, track_file: str) -> bool:
         """
         Process like: user explicitly liked current track.
         - Strong positive signal for user taste
         - Confirms session direction
         - No exploration change (likes don't affect exploration directly)
+
+        Returns True if the like was recorded.  The caller needs this: a track
+        with no embedding produces no event, and drawing a `♥` for it would
+        leave a heart that `[L]` cannot retract, because there is nothing in the
+        history to retract (audit L8).
         """
         # Silently process like (no print to avoid TUI interference)
-        
+
         track_embedding = self.track_library.get_embedding(track_file)
         if track_embedding is None:
             print(f"Warning: No embedding found for liked track", file=sys.stderr)
-            return
-        
+            return False
+
         # Strong update to user taste
         self.user_taste.update_from_like(track_embedding)
 
         # Save taste after explicit like
         self.user_taste.save()
-        
+
         # Record feedback
         self._record_feedback('like', track_file)
         self.session_feedback_count['likes'] += 1
-    
+        return True
+
+    def process_unlike(self, track_file: str) -> Optional[dict]:
+        """
+        Retract a like: drop it from the history and recompute the model.
+
+        `[L]` on an already-liked track (audit L8).  The retraction is a
+        *deletion plus a replay*, not a negative update, and the difference is
+        not stylistic.  `_update` is a normalised EMA, so subtracting
+        `taste_update_like` after adding it does not return the vector to where
+        it was — and the error depends on how many events landed in between.
+        There is no magnitude that makes it symmetric, so choosing one would be
+        asserting a fact the arithmetic cannot support (D4).  Removing the event
+        and replaying `UserTaste` over what remains asserts nothing: it produces
+        the model you would have had if the key had never been pressed.
+
+        Every like for the track goes, not just the last one, because the claim
+        being retracted is "you like this track" and the panel shows one `♥`
+        however many times it was pressed.
+
+        **The replay only runs if the history can account for the model.**  It
+        cannot always: the history is capped at 1000 events, tracks leave the
+        library, and a `user_taste.npz` can outlive the feedback file beside it.
+        Replaying a partial history would rewrite the taste vector for reasons
+        the listener did not ask for — measured at cos 0.923 against the model
+        it replaced, one lifetime past the cap, which dwarfs the retraction
+        itself.  So `UserTaste.explains()` is checked first, and when it says no
+        the retraction is display-only: the like leaves the history, the `♥`
+        goes, the taste vector is left exactly where it is, and the console says
+        which of the two happened.  That is the audit's own second option, taken
+        only where the first one cannot be honest.
+
+        Both files are written here.  The taste model is authoritative at the
+        next launch while the hearts are rehydrated from the history, so saving
+        one without the other leaves a restart showing a `♥` for a like the
+        model no longer holds.
+
+        Returns a report, or None if there was no like to retract.
+        """
+        def is_target(event):
+            return (event.get('type') == 'like'
+                    and event.get('track') == track_file)
+
+        removed = sum(1 for event in self.feedback_history if is_target(event))
+        if not removed:
+            return None
+
+        get_embedding = self.track_library.get_embedding
+        exact = self.user_taste.explains(self.feedback_history, get_embedding)
+
+        self.feedback_history = [e for e in self.feedback_history
+                                 if not is_target(e)]
+
+        if exact:
+            report = self.user_taste.replay(self.feedback_history, get_embedding)
+            self.user_taste.save()
+        else:
+            report = {'applied': 0, 'missing_embedding': 0, 'unrecognised': 0}
+
+        report['exact'] = exact
+        report['removed'] = removed
+        self.save_feedback_history()
+
+        self.session_feedback_count['likes'] = max(
+            0, self.session_feedback_count['likes'] - removed)
+
+        if exact:
+            note = ""
+            if report['missing_embedding']:
+                note = (f", {report['missing_embedding']} skipped — no embedding "
+                        "in the current library")
+            print(f"Un-liked; taste model rebuilt from {report['applied']} "
+                  f"feedback events{note}", file=sys.stderr)
+        else:
+            print("Un-liked (heart only): the saved feedback history no longer "
+                  "accounts for the taste model, so rebuilding it would move "
+                  "your taste for reasons unrelated to this track. The taste "
+                  "vector is unchanged.", file=sys.stderr)
+
+        return report
+
     def process_full_listen(self, track_file: str):
         """
         Process full listen: user listened to entire track.

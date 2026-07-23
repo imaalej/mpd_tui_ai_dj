@@ -180,6 +180,18 @@ class SessionHistory:
     def like(self, track: str):
         self.liked.add(track)
 
+    def unlike(self, track: str):
+        """
+        Drop the `♥`.  The counterpart to `like()` for `[L]` as a toggle (L8).
+
+        Display-side only, and deliberately so: this set is what the panel
+        draws, while what the *model* does with a retraction is
+        `FeedbackHandler.process_unlike()`.  The heart is removed here after
+        that call succeeds, so a retraction the model could not perform does not
+        leave the panel claiming otherwise.
+        """
+        self.liked.discard(track)
+
     # ── Focus ────────────────────────────────────────────────────────────────
 
     def move_focus(self, delta: int) -> bool:

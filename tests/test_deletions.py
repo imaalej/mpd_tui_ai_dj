@@ -90,6 +90,17 @@ DELETED_SYMBOLS = [
     "queue_walker",
     "queue_listbox",
     "_session_line",
+    # Stage 4.  The kitty and sixel album-art paths (L2).  Both wrote escape
+    # sequences to `sys.__stdout__` while urwid owned the terminal, so urwid's
+    # next full redraw — every 0.5 s — painted over them.  They were not a
+    # feature with a caveat; they were an image that appeared and was erased
+    # twice a second, hidden only by ueberzug coming first in detection order.
+    # Note `KITTY_WINDOW_ID` is deliberately *not* here: detecting a kitty
+    # terminal is still live, to tell that user why there is no art and what
+    # would give them some.  What is gone is the pretence of drawing into it.
+    "KittyProtocol",
+    "SixelProtocol",
+    "img2sixel",
 ]
 
 SEARCHED_SUFFIXES = {".py", ".sh"}

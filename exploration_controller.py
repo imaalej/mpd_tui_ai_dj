@@ -175,13 +175,25 @@ class ExplorationController:
         try:
             with open(filepath, 'r') as f:
                 state = json.load(f)
-            
-            self.exploration = state['exploration']
-            self.consecutive_skips = state['consecutive_skips']
-            self.consecutive_listens = state['consecutive_listens']
-            self.total_skips = state['total_skips']
-            self.total_listens = state['total_listens']
-            
+
+            # Read every field before assigning any of them.  Assigning as we
+            # went left a truncated or older file half-applied — `exploration`
+            # taken from disk, the counters still at their defaults — while
+            # this method returned False and the caller believed nothing had
+            # happened.  A load either replaces the state or leaves it alone.
+            exploration = float(state['exploration'])
+            consecutive_skips = int(state['consecutive_skips'])
+            consecutive_listens = int(state['consecutive_listens'])
+            total_skips = int(state['total_skips'])
+            total_listens = int(state['total_listens'])
+
+            self.exploration = exploration
+            self.consecutive_skips = consecutive_skips
+            self.consecutive_listens = consecutive_listens
+            self.total_skips = total_skips
+            self.total_listens = total_listens
+
+
             print(f"Loaded exploration state: {self.exploration:.2f}, "
                   f"{self.total_skips} total skips, {self.total_listens} total listens", file=__import__("sys").stderr)
             

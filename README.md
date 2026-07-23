@@ -37,7 +37,13 @@ A terminal-based DJ that learns your taste in real time and curates a continuous
 
 - **Python 3.9+**
 - **MPD** (Music Player Daemon) + **MPC** — must be running with your music library indexed
-- A terminal (Linux or macOS)
+- **Linux.** Developed and run on Fedora with Python 3.14. macOS is *untested* — the README used to
+  claim it, and nothing had ever been run there. `start.sh` no longer uses any bash 4+ syntax, so it
+  should survive the bash 3.2 macOS ships, but album art will not work: the only two working
+  renderers are `ueberzug` and `ueberzugpp`, and both draw into an X11/Wayland surface.
+- **About 1.3 GB of free disk** for the first run — 1.15 GB of model cache and a 46 MB embedding file.
+  See "First run" below for where that goes.
+- A GPU is optional. See the table below for what it costs without one.
 
 ---
 
@@ -55,7 +61,19 @@ bash start.sh
 
 The music directory is read from MPD's own config (`~/.config/mpd/mpd.conf`, `/etc/mpd.conf`, …). If that cannot be found you will be asked for it; set `MPD_MUSIC_DIR` to skip the question permanently.
 
-**First run only — embeddings:** The DJ needs audio fingerprints of your library to find musically similar tracks. These come from [CLAP](https://github.com/LAION-AI/CLAP), and generating them is the one slow step: a model download, then a decode-and-encode pass over every track. Measured on this machine — 674 tracks, RTX 3070 — that pass took **5 minutes 23 seconds** and produced a 45 MB file. On CPU expect substantially longer.
+**First run only — embeddings:** The DJ needs audio fingerprints of your library to find musically similar tracks. These come from [CLAP](https://github.com/LAION-AI/CLAP), and generating them is the one slow step: a model download, then a decode-and-encode pass over every track.
+
+Every number here is measured on this machine against a 674-track library, not estimated:
+
+| | Measured |
+|---|---|
+| Model cache after the first run | **1.15 GB** (1,232,327,859 bytes) |
+| Why it is twice the model's size | The repo's `main` carries only `pytorch_model.bin` (614.5 MB); transformers ≥ 5 also fetches the safetensors conversion from `refs/pr/3` (614.4 MB), and both stay cached |
+| Embedding pass, RTX 3070 | **5 min 23 s** — 674 tracks, 24,494 windows, 75.8 windows/s |
+| Embedding pass, CPU only (12 threads) | **≈ 25–35 min** — the audio encoder runs at 17.0 windows/s against the GPU's 333 |
+| Output | `track_embeddings.npz` **45.5 MB** + `descriptors.npz` 93 KB |
+
+`start.sh` refuses to begin a run that cannot finish, checking free space against the same figures.
 
 Tracks are enumerated from `mpc listall`, so the embedding keys are exactly the paths MPD will be asked to play. Files MPD cannot decode are skipped and listed in `data/embeddings/failed.txt` with the reason, rather than disappearing silently.
 
@@ -83,7 +101,7 @@ mpc status   # should show your track count
 |-----|--------|
 | `Space` | Play / Pause |
 | `N` | Skip track — escalates if you keep pressing it (see below) |
-| `L` | Like current track |
+| `L` | Like current track — press again on a liked track to un-like it |
 | `↑` / `↓` | Move the cursor through the session history |
 | `Enter` | Play the track under the cursor again — it becomes `↓ next:` |
 | `,` / `.` | Volume down / up |
@@ -92,9 +110,28 @@ mpc status   # should show your track count
 | `Q` | Quit |
 
 These are the same bindings in the urwid interface and in the plain-text fallback,
-and the footer advertises exactly this list. A test drives every row of the table
-through the real key handler, because the footer, this table and the fallback
-used to disagree three ways.
+and the footer advertises exactly this list. They are not merely documented as the
+same: the fallback decodes terminal bytes into key names and then calls the *same*
+dispatch method the urwid mode does, so a binding cannot exist in one interface and
+not the other. A test drives every row of the table through the real key handler,
+and a second one drives them through a pty into the fallback mode, because the
+footer, this table and the fallback used to disagree three ways.
+
+**What un-liking does to the model.** Retracting a like is not a negative update.
+The taste vector is a normalised moving average, so subtracting the same weight
+does not return it to where it was — and in the case that matters most, it fails
+outright: retract your only like and a subtraction leaves your long-term taste
+still pointing exactly at the track you just rejected, because normalising `0.9·e`
+gives back `e`. So `L` removes the like from your feedback history and *recomputes*
+the taste model from what is left. The result is the model you would have had if
+you had never pressed the key, exactly.
+
+There is one exception, and it tells you when it happens. The feedback history is
+capped at 1000 events, so a long-running listener's history may no longer account
+for their whole taste model — recomputing from a partial history would move the
+vector for reasons unrelated to this track. When that is the case the retraction
+is display-only: the heart goes and the like leaves the history, but the taste
+model is left alone, and the console says so.
 
 ---
 

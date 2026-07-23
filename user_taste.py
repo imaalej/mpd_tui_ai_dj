@@ -122,6 +122,100 @@ class UserTaste:
 
         self.total_updates += 1
     
+    # Which update each recorded feedback event applied.  This table is the
+    # whole reason `replay()` can be exact: the taste vector is a deterministic
+    # function of the ordered feedback history and nothing else, so "what would
+    # it be if this event had not happened" is answerable by recomputation
+    # rather than by guessing an inverse (audit L8).
+    _EVENT_UPDATES = {
+        'like': 'update_from_like',
+        'full_listen': 'update_from_full_listen',
+        'skip': 'update_from_skip',
+    }
+
+    def replay(self, events, get_embedding) -> dict:
+        """
+        Recompute the whole model from an ordered feedback history.
+
+        This exists for un-liking (audit L8), and the reason it is a replay
+        rather than a subtraction is arithmetic.  `_update` is a normalised EMA:
+
+            v ← normalise((1 − w)·v + w·e)
+
+        so applying −w after +w does **not** return the vector to where it was,
+        and how far it lands from there depends on how many updates happened in
+        between.  Picking a magnitude and calling it symmetry would be exactly
+        the kind of constant D4 exists to delete — a number asserting a fact
+        ("this undoes a like") that the arithmetic does not support.
+
+        Replaying asserts nothing.  It restates the definition the model already
+        has: your taste is what your feedback history says it is.  Drop the event
+        and recompute, and the result is the model you would have had if you had
+        never pressed the key — exactly, not approximately.
+
+        Args:
+            events: the feedback history, oldest first, as `_record_feedback`
+                writes it.
+            get_embedding: `track -> embedding | None`, normally
+                `TrackLibrary.get_embedding`.
+
+        Returns a report of what the replay could and could not account for.
+        The counts are not decoration: an event whose track has since left the
+        library cannot be re-applied, so it is the one way a replay can diverge
+        from the vector it replaced, and the caller should be able to say so.
+        """
+        self.taste_vector = self._initialize_taste_vector()
+        self.total_updates = 0
+        self.like_count = 0
+        self.skip_count = 0
+        self.full_listen_count = 0
+
+        applied = missing = unrecognised = 0
+        for event in events:
+            method = self._EVENT_UPDATES.get(event.get('type'))
+            if method is None:
+                unrecognised += 1
+                continue
+            embedding = get_embedding(event.get('track'))
+            if embedding is None:
+                missing += 1
+                continue
+            getattr(self, method)(embedding)
+            applied += 1
+
+        return {
+            'applied': applied,
+            'missing_embedding': missing,
+            'unrecognised': unrecognised,
+        }
+
+    def explains(self, events, get_embedding) -> bool:
+        """
+        Would replaying `events` reproduce the vector this model already holds?
+
+        A replay is only an exact retraction if the history is a *complete*
+        account of the model, and it is not always: `_record_feedback` caps the
+        history at 1000 events, tracks can leave the library, and a
+        `user_taste.npz` can outlive the feedback file beside it.  When the
+        account is incomplete the replay still runs, but it moves the vector for
+        reasons that have nothing to do with the like being retracted.
+
+        Measured over synthetic lifetimes on the real library: while the history
+        is complete this reproduces the stored vector **bit for bit** (cos =
+        1.000000000000 at 50, 500, 999 and 1000 events).  One event past the
+        cap it is 0.994, and at 1400 events it is 0.923.  So this is not a
+        calibrated threshold with a scale to get wrong — it is exact
+        reproduction against six orders of magnitude of margin, which is why the
+        tolerance below is a float-noise allowance rather than a number anyone
+        had to choose.
+
+        Does not mutate this model.
+        """
+        scratch = UserTaste(dimension=self.dimension)
+        scratch.replay(events, get_embedding)
+        return bool(np.allclose(scratch.taste_vector, self.taste_vector,
+                                rtol=0, atol=1e-9))
+
     def save(self, filepath: Optional[Path] = None):
         """Save taste model to disk."""
         if filepath is None:
@@ -152,12 +246,26 @@ class UserTaste:
         
         try:
             data = np.load(filepath)
-            self.taste_vector = data['taste_vector']
-            self.total_updates = int(data['total_updates'])
-            self.like_count = int(data['like_count'])
-            self.skip_count = int(data['skip_count'])
-            self.full_listen_count = int(data['full_listen_count'])
-            
+
+            # Every field is read before any of it is assigned.  Assigning as we
+            # went meant a file missing one key left the model carrying a vector
+            # from disk with counters from a fresh object — and the β ramp reads
+            # those counters, so the taste term would have arrived at full
+            # weight or none of it, depending which key was absent, while this
+            # method reported the load as failed.
+            taste_vector = data['taste_vector']
+            total_updates = int(data['total_updates'])
+            like_count = int(data['like_count'])
+            skip_count = int(data['skip_count'])
+            full_listen_count = int(data['full_listen_count'])
+
+            self.taste_vector = taste_vector
+            self.total_updates = total_updates
+            self.like_count = like_count
+            self.skip_count = skip_count
+            self.full_listen_count = full_listen_count
+
+
             print(f"Loaded taste model: {self.total_updates} updates, "
                   f"{self.like_count} likes, {self.full_listen_count} full listens",
                   file=sys.stderr)

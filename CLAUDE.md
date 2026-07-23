@@ -17,6 +17,8 @@ for an in-progress rewrite. Before changing anything:
 - **§10d** — the Stage 3 measurements: the descriptor drift distribution (which changed what the
   readout ships), the derived-versus-hand-counted art geometry, and the terminal sizes at which the
   pre-Stage-3 layout crashed.
+- **§10e** — the Stage 4 measurements: why un-liking is a replay and not a subtraction, what a first
+  run costs on disk and on CPU, and the urwid source showing that **L1's conclusion was wrong**.
 
 Findings are tagged `OPEN` / `NEW` / `ELEVATED` (work required), `DONE` / `PARTIALLY DONE` (shipped),
 or `DISSOLVED` / `SUPERSEDED` (no work — the design change removed them). Don't fix a dissolved
@@ -24,8 +26,8 @@ finding. §6 is the current status table.
 
 ## Project state
 
-**Stages 0–3 are complete. Stage 4 is next.** Line references in the audit's §2–§5 predate Stage 0
-and are stale for every file those stages touched.
+**Stages 0–4 are complete. The rewrite is done and every finding is closed.** Line references in the
+audit's §2–§5 predate Stage 0 and are stale for every file those stages touched.
 
 **The application plays, and now says what it is playing.** It runs continuously one track ahead,
 adapts on the very next song, forces and restores MPD's playback modes on every exit path, and
@@ -35,13 +37,19 @@ CLAP descriptors z-scored against this library, the Session panel lists what act
 from the widget tree. Verified live at 120×45 and 80×24, with the user's MPD queue, modes and volume
 restored byte-identically.
 
-**Stage 4 is durability.** Read §8's Stage 4 section, which Stage 3 rewrote. The remaining work is
-M1c (persistence round-trips, and the non-urwid fallback mode — now the only interface with no
-coverage), M7's README contradictions, L1's SIGWINCH handler, L2's non-functional kitty/sixel art
-paths, L8's un-like binding (moved out of Stage 3: it is a taste-model change, not a display one),
-and L9's `.gitkeep` scaffolding and leaked ueberzugpp child.
+**Stage 4 made it durable.** 542 tests. The fallback text mode is driven through a pty and shares one
+binding table with the urwid mode; all four state files have round-trip coverage; `[L]` is a toggle;
+the kitty and sixel art paths are deleted; the ueberzugpp child dies on every exit path; the
+`.gitkeep` scaffolding ships; and the setup numbers are measured and held together by a test.
 
-Two things Stage 3 established that are easy to undo:
+**The most important thing Stage 4 learned is about this document.** Acting on **L1's fix direction
+exactly as written broke the application** — urwid 3.0.5 *chains* to the previous SIGWINCH handler
+rather than replacing it, so re-installing on top closed a recursion. Nine unit tests passed, because
+they ran against a double built from L1's own assumption. A live `SIGWINCH` found it in seconds.
+L1 has been rewritten to carry the correct claim. **Where a finding states a conclusion drawn from an
+observation, check the observation still supports it before acting.**
+
+Three things later stages established that are easy to undo:
 
 - **The Now Playing box is `('pack', …)`, not `('weight', 3, …)`.** Weighting it raises `WidgetError`
   on every terminal shorter than 33 rows — a defect that shipped through three stages and 311 tests
@@ -51,6 +59,11 @@ Two things Stage 3 established that are easy to undo:
   40 real sessions it has p10 = 0.948 and median = 0.989, so it reads as "0.99" forever. That is the
   same compressed-scale defect H1 and C5 are both about. The cosine is still computed and shown in
   `[I]` with its distribution beside it. See §10d before changing this back.
+- **Un-liking is a replay of the feedback history, not a `−0.1` update.** Measured: the subtraction is
+  within 10⁻⁴ of correct in every ordinary case and **totally wrong in one** — a subtraction cannot
+  un-seed a model, so retracting your only like leaves the taste vector pinned at unit strength to the
+  track you just rejected. It is gated on `UserTaste.explains()` because the history is capped at 1000
+  events and a replay past that cap moves the vector by 0.077 for unrelated reasons. See §10e.
 
 **The display layer owns its own state, deliberately.** `vibe_readout.py` (the z-vector drift store)
 and `session_history.py` (what played, the marks, the `↑↓` cursor) are pure modules that nothing
@@ -61,8 +74,14 @@ Stage 3 addition, and §0b records why it belongs there rather than in `tui.py`.
 
 The vector space is settled: 674 tracks, full-coverage deterministic windows, centred on load, plus a
 49-word CLAP descriptor bank. So are the player and the display. Use §10c's numbers for anything
-about skips, selection or the manifold; §10b for the embeddings and the descriptor bank; **§10d for
-the readout, the drift distribution and the widget-tree geometry**.
+about skips, selection or the manifold; §10b for the embeddings and the descriptor bank; §10d for
+the readout, the drift distribution and the widget-tree geometry; **§10e for the taste model's
+retraction arithmetic and the setup figures**.
+
+Two things Stage 4 measured and left alone, both recorded in §10e rather than fixed: the first `[N]`
+press turns over **100%** of the pool against a 5% target when the session vector is cold (§9's item
+5, at its extreme — and the first time the escalation has been driven from an empty `data/state/`),
+and the Session panel draws no content rows at 80×24 because the packed layout consumes all of them.
 
 Where the code and the audit disagree, the audit wins. Several of the audit's own empirical claims
 turned out to be wrong when the work was done; those findings have been **rewritten to carry the
@@ -165,7 +184,7 @@ the app itself only restores the modes.
 
 ## Testing
 
-`python3 -m pytest tests` — 416 tests, green, about 17 seconds. The three `test_phase*.py` files were
+`python3 -m pytest tests` — 542 tests, green, about 18 seconds. The three `test_phase*.py` files were
 deleted rather than repaired (M1a); roughly thirty of their 66 "passing" checks were hardcoded `True`
 literals.
 
@@ -195,6 +214,18 @@ latter. What that means in practice, and what to preserve:
   under 33 rows. `test_art_geometry.py` renders the real frame at seven terminal sizes and *locates
   the art placeholder in the canvas* rather than asserting `_art_geometry`'s arithmetic back at it —
   a test that repeats the calculation it is checking proves only that it agrees with itself.
+
+- **The fallback text mode is under test, through a pty.** `test_simple_mode.py`. It stopped being
+  guesswork when the mode stopped having its own binding table: `decode_key()`/`decode_keys()` turn
+  terminal bytes into urwid's key names and `_handle_input` dispatches for both interfaces, so most of
+  it is testable without a terminal and a binding cannot exist in one interface and not the other.
+  Two traps if you extend it: `tty.setcbreak` uses `TCSAFLUSH`, so keys written to the pty *before*
+  the loop starts are discarded — send them from the first tick; and a burst is consumed by one read,
+  so a key meant to dismiss `[I]` must arrive after the page opens.
+- **The suite must never write to `data/state/`.** It did, for some time — `process_like()` saves to
+  `config.taste_file` — and a green run replaced a real taste model with a fixture's. An autouse
+  fixture in `conftest.py` redirects all four paths. Do not remove it, and do not add a state file
+  without adding it there.
 
 Fixtures live in `tests/conftest.py`: `rng` (seeded), `library` (in-memory `TrackLibrary`),
 `make_artifact` (schema-correct `.npz` with any field overridable), `fake_mpd` (**consume on**, the
