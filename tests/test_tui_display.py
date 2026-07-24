@@ -472,7 +472,7 @@ def test_the_palette_defines_exactly_the_attributes_the_widgets_use(tui):
 
     source = Path(tui.__module__.replace('.', '/') + '.py')
     if not source.exists():
-        source = Path(__file__).resolve().parent.parent / "tui.py"
+        source = Path(__file__).resolve().parent.parent / "src" / "tui.py"
     text = source.read_text()
 
     palette_block = re.search(r"palette = \[(.*?)\n        \]", text, re.S).group(1)

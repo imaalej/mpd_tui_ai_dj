@@ -209,7 +209,7 @@ Nothing is shown before a track has played. The session vector starts at zero, a
 You can also ask for any track's descriptors from the command line:
 
 ```bash
-python3 generate_embeddings.py --describe "Arctic Monkeys"
+python3 src/generate_embeddings.py --describe "Arctic Monkeys"
 ```
 
 This replaced a mood phrase — *"focused cohesive vibe, deep in the zone"* — assembled from three heuristics, all invented against scales nobody measured. The mood word came from an entropy-like quantity that is always ≈ 55 for a 512-dimensional unit vector, so it returned *eclectic* every time and its other two branches were unreachable; the *warming up → building → deep in the zone* stage word was a track counter in a costume.

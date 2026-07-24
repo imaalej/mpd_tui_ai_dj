@@ -17,7 +17,7 @@ import pytest
 
 from mpd_controller import MPDController
 
-SOURCE = Path(__file__).resolve().parent.parent / "mpd_controller.py"
+SOURCE = Path(__file__).resolve().parent.parent / "src" / "mpd_controller.py"
 
 
 def test_no_method_is_defined_twice():

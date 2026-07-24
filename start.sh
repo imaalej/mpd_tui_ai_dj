@@ -122,7 +122,7 @@ fi
 # wrong directory wastes an entire embedding-generation run.
 header "Step 4/5 · Locating MPD's music directory"
 
-if MUSIC_DIR=$(python3 music_directory.py 2>/dev/null); then
+if MUSIC_DIR=$(python3 src/music_directory.py 2>/dev/null); then
   success "Music directory: $MUSIC_DIR"
 else
   warn "Could not read MPD's music_directory from its config."
@@ -186,13 +186,13 @@ if [ ! -f "$EMBED_FILE" ]; then
     fi
     echo ""
     info "Generating real embeddings — this will take a while …"
-    python3 generate_embeddings.py
+    python3 src/generate_embeddings.py
     success "Embeddings generated!"
     ;;
   *)
     echo ""
     echo "  Nothing to play against. Run this when you are ready:"
-    echo "      python3 generate_embeddings.py"
+    echo "      python3 src/generate_embeddings.py"
     exit 0
     ;;
   esac
@@ -215,4 +215,4 @@ echo "    Q             Quit"
 echo ""
 sleep 1
 
-python3 main_tui.py
+python3 src/main_tui.py

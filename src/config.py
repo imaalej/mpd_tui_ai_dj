@@ -131,8 +131,11 @@ class Config:
         self.recent_history_size = 50          # Tracks to remember for anti-repetition
         self.minimum_replay_gap = 20           # Minimum tracks before replaying
         
-        # Persistence Paths
-        self.data_dir = Path(__file__).parent / 'data'
+        # Persistence Paths.  Anchored to the repo root (the parent of src/),
+        # not to this module's directory: the code lives in src/ but data/ stays
+        # at the top level, so every launch and every test resolves the same
+        # data/ regardless of the working directory (audit G2).
+        self.data_dir = Path(__file__).parent.parent / 'data'
         self.embeddings_file = self.data_dir / 'embeddings' / 'track_embeddings.npz'
         self.descriptors_file = self.data_dir / 'embeddings' / 'descriptors.npz'
         self.failed_tracks_file = self.data_dir / 'embeddings' / 'failed.txt'
