@@ -174,8 +174,14 @@ def test_the_start_sh_control_banner_lists_every_binding():
         "Skip",           # N
         "Pass",           # V (G1)
         "Like",           # L
-        "history",        # ↑ / ↓  (the E1 omission)
-        "Replay",         # ENTER  (the E1 omission)
+        "history cursor", # ↑ / ↓ (the E1 omission)
+        "Zoom",           # + / − (G3)
+        "Reset",          # ENTER over the cloud (G3)
+        "Replay",         # ENTER over the history  (the E1 omission)
+        "Cycle panes",    # T (G3)
+        "F1 / F2 / F3",   # direct pane jumps (G3)
+        "mouse",          # right-drag / scroll / click / slider (G3)
+        "slider",         # the orbit-speed slider (G3)
         "Volume",         # , / .
         "Seek",           # ← / →
         "Model info",     # I

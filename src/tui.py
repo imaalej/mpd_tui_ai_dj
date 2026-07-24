@@ -57,6 +57,8 @@ from config import config
 from album_art import get_album_art_renderer
 from session_history import SessionHistory
 from vibe_readout import VibeReadout, format_descriptors
+from mood_axes import MoodAxes
+from vibe_cloud import VibeCloudWidget, point_rgb
 
 
 # ─── Console log interceptor ────────────────────────────────────────────────
@@ -179,8 +181,10 @@ _install_console_capture()
 # it — rather than a count of something else, which is why it survives H8.
 ART_COLS = 33
 
-# Fixed row count for the console panel's ListBox (its LineBox adds 2 more).
-CONSOLE_ROWS = 5
+# How many captured console lines the toggle-on console panel renders.  It fills
+# the body when shown ([C]) and scrolls to the newest, so this only bounds how
+# many Text widgets are built — the durable copy is `data/dj.log` (§4).
+CONSOLE_ROWS = 60
 
 # Below this the art area is too small to be an image rather than a smear, so
 # the renderer is cleared instead.  Nothing downstream depends on the numbers;
@@ -192,6 +196,30 @@ MIN_ART_COLS = 8
 # a few dozen rows at most; this only stops an all-night session from rendering
 # hundreds of Text widgets that are scrolled off screen anyway.
 HISTORY_RENDER_LIMIT = 200
+
+# The vibe cloud animates on its own alarm, decoupled from the 2 Hz MPD poll so
+# orbit speed and framerate are independent of how often MPD is polled (G3).  The
+# alarm ticks fast (up to ~144 fps for buttery drags), but a repaint only happens
+# when the camera actually moved enough to change a dot (`cloud.pose_changed()`),
+# so a slow ambient spin repaints a handful of times a second and only an active
+# drag/zoom pays the full framerate — cheap when idle, smooth when moving.  This
+# drives ONLY the cloud panel's redraw; the session bookkeeping stays on the 0.5 s
+# tick, so a fast cloud never starves `_sync_session_state` (§4).
+ANIMATION_INTERVAL = 1.0 / 144.0
+
+# How far a keyboard zoom step and a mouse gesture move the camera.  Shaping
+# constants — they set feel, not fact.
+KEY_ZOOM_STEP = 1.15
+WHEEL_ZOOM_STEP = 1.12
+DRAG_AZIMUTH_GAIN = 0.03
+DRAG_TILT_GAIN = 0.06
+
+# The three body views the space below the Now Playing box can show.  The cloud
+# is the centrepiece and the default; history and console are one keypress away
+# (G3), which is what frees the full cell budget for the cloud to be legible.
+BODY_CLOUD = "cloud"
+BODY_HISTORY = "history"
+BODY_CONSOLE = "console"
 
 # NOTE: `RIGHT_COL_ROWS` is deliberately gone.  It was the hand-counted height of
 # the Now Playing right-hand Pile, and the album art was pinned to it — so every
@@ -310,6 +338,18 @@ class AdaptiveDJTUI:
         # The descriptor readout, finally reading the bank Stage 1 built.
         self.vibe = VibeReadout(getattr(dj, 'descriptor_bank', None))
 
+        # The vibe cloud (Phase 4, inspection G3).  `MoodAxes` reads the stored
+        # per-library triad + calibration from the descriptor bank; absent axes
+        # are not fatal — the widget shows a rebuild message and the rest of the
+        # app plays on, the same "absent is not fatal" discipline the bank
+        # follows.  Built lazily in `_setup_urwid`; None until then and in the
+        # fallback text mode, which has no cloud.
+        self.axes: Optional[MoodAxes] = None
+        self.cloud: Optional[VibeCloudWidget] = None
+        self.body_view = BODY_CLOUD
+        # Last mouse position during a drag-orbit, or None between drags.
+        self._drag_last: Optional[tuple] = None
+
         # Album art.  Injectable so the widget tests can construct the tree
         # without detecting protocols and spawning a ueberzugpp child.
         self.album_art_renderer = (art_renderer if art_renderer is not None
@@ -357,7 +397,7 @@ class AdaptiveDJTUI:
         # A flow widget, not a Filler: `Frame` wants flow widgets for its header
         # and footer, and a real flow widget can report its own `rows()` — which
         # is what `_art_geometry()` reads instead of assuming 1 (H8).
-        self.header_text = urwid.Text("🎵 Adaptive Session AI DJ", align="center")
+        self.header_text = urwid.Text("🎵 AI DJ", align="center")
         self.header = urwid.AttrMap(self.header_text, "header")
 
         # ── Now Playing: right column widgets ──
@@ -365,6 +405,9 @@ class AdaptiveDJTUI:
         self.artist_text = urwid.Text("Artist: ---")
         self.album_text = urwid.Text("Album: ---")
         self.track_text = urwid.Text("Track: ---")
+        # The lookahead, right under the track labels — checking "what's next"
+        # by opening the history panel was cumbersome, so it lives in the header.
+        self.np_next_text = urwid.Text("Next:   ---")
 
         # The vibe readout, in two rows (audit H1b).  The first names the top
         # three descriptors by z-score against this library's own distribution;
@@ -390,6 +433,7 @@ class AdaptiveDJTUI:
                 urwid.AttrMap(self.artist_text, "track_info"),
                 urwid.AttrMap(self.album_text, "track_info"),
                 urwid.AttrMap(self.track_text, "track_info"),
+                urwid.AttrMap(self.np_next_text, "next_up"),
                 urwid.Divider(),
                 urwid.AttrMap(self.seek_bar_progress, "seek_bar"),
                 self.seek_time_text,
@@ -430,18 +474,17 @@ class AdaptiveDJTUI:
                                              title="♪ Now Playing")
 
         # ── Console panel ──
+        #
+        # No longer inline: Phase 4 moves it off the default view onto a toggle
+        # ([C]), because `data/dj.log` is already the durable copy (§4) so the
+        # five-line panel was never the source of truth — hiding it loses nothing
+        # and buys the cloud the full cell budget (G3).  It fills the body when
+        # shown, rather than the old fixed five rows.
         self.console_walker = urwid.SimpleFocusListWalker(
             [urwid.Text(("console_text", "── console ready ──"))]
         )
         console_lb = urwid.ListBox(self.console_walker)
-        # BoxAdapter gives the ListBox a fixed height inside a Pile.
-        # WidgetDisable makes it non-selectable, so ↑↓ and ENTER reach
-        # `unhandled_input` instead of being swallowed by this ListBox's own
-        # scrolling — the Pile would otherwise focus it, being the first
-        # selectable thing in the body.
-        self.console_box = urwid.LineBox(
-            urwid.BoxAdapter(console_lb, CONSOLE_ROWS), title="System Console"
-        )
+        self.console_box = urwid.LineBox(console_lb, title="System Console")
 
         # ── Session panel ──
         #
@@ -465,6 +508,22 @@ class AdaptiveDJTUI:
             title="Session",
         )
 
+        # ── The vibe cloud (Phase 4, inspection G3) ──
+        #
+        # The whole body below the Now Playing box.  Built here so the widget
+        # tree is complete; `_build_cloud` reads the stored mood axes and projects
+        # the library once.  A LineBox titles it with the live axis triad, and no
+        # border shows through album art because the art sits in the Now Playing
+        # box above, on its own surface.
+        self._build_cloud()
+
+        # One swappable slot below Now Playing: cloud (default), history, or
+        # console.  `WidgetPlaceholder` swaps the visible box; the whole slot is
+        # `WidgetDisable`d so ↑↓/ENTER fall through to the one shared dispatch
+        # table (`_handle_input`) instead of a ListBox eating them — the same
+        # reason the old console/session panels were disabled.
+        self.body_placeholder = urwid.WidgetPlaceholder(self.cloud_box)
+
         # ── Main layout ──
         #
         # `('pack', …)` for Now Playing, not `('weight', 3, …)`.  Its content is
@@ -478,8 +537,7 @@ class AdaptiveDJTUI:
         self.main_pile = urwid.Pile(
             [
                 ("pack", self.now_playing_box),
-                (CONSOLE_ROWS + 2, urwid.WidgetDisable(self.console_box)),
-                ("weight", 1, urwid.WidgetDisable(self.session_box)),
+                ("weight", 1, urwid.WidgetDisable(self.body_placeholder)),
             ]
         )
 
@@ -489,8 +547,9 @@ class AdaptiveDJTUI:
         # the footer on `<`/`>`, and simple mode bound ↑↓ to volume while the
         # urwid mode had them unbound.  One set of bindings now, everywhere.
         footer_text = urwid.Text(
-            "[SPACE] Pause   [N] Skip   [V] Pass   [L] Like   [↑↓] History   "
-            "[ENTER] Replay   [,.] Vol   [←→] Seek   [I] Info   [Q] Quit",
+            "[SPACE] Pause  [N] Skip  [V] Pass  [L] Like  [↑↓] History  "
+            "[ENTER] Reset/Replay  [+−] Zoom  [T] Pane  "
+            "[,.] Vol  [←→] Seek  [I] Info  [Q] Quit",
             align="center",
         )
         # A flow widget, so a narrow terminal wraps the hints onto a second row
@@ -511,6 +570,16 @@ class AdaptiveDJTUI:
             unhandled_input=self._handle_input,
         )
 
+        # The vibe cloud paints in 256-colour `AttrSpec`s (G3).  Without this urwid
+        # down-converts every one to the nearest of 16 and the cloud goes muddy —
+        # so declare the high-colour capability rather than emitting raw ANSI.
+        # Harmless on a 16-colour terminal (urwid still down-converts there); this
+        # only unlocks the full cube where the terminal supports it.
+        try:
+            self.loop.screen.set_terminal_properties(colors=256)
+        except Exception:                                  # noqa: BLE001
+            pass
+
         # SIGWINCH fires on both terminal resize AND when the terminal window
         # is moved between monitors.  We use it to mark the art dirty so the
         # next 0.5s tick re-renders without issuing a "remove" first (which
@@ -530,6 +599,44 @@ class AdaptiveDJTUI:
         self._exit_pipe = self.loop.watch_pipe(self._on_exit_requested)
 
         self.loop.set_alarm_in(0.5, self._periodic_update)
+        # The cloud's own ~30 fps redraw, decoupled from the 0.5 s poll above
+        # (G3).  Both are non-blocking urwid alarms, so the fast one never
+        # starves the session bookkeeping the slow one runs (§4).
+        self.loop.set_alarm_in(ANIMATION_INTERVAL, self._animate)
+
+    def _build_cloud(self):
+        """
+        Load the stored mood axes and project the library into the cloud once.
+
+        Absent axes are not fatal (Phase 3): `MoodAxes.load` reports and returns
+        None, and the widget then draws a rebuild message while the rest of the
+        app plays on.  The library matrix is already centred and L2-normalised by
+        `TrackLibrary` (C5), which is exactly the space `coordinates` expects.
+        """
+        self.axes = MoodAxes.load()
+        library = getattr(self.dj, 'track_library', None)
+        matrix = getattr(library, 'embedding_matrix', None)
+        track_list = getattr(library, 'track_list', None)
+
+        coords = rgb = None
+        axis_labels = None
+        if (self.axes is not None and matrix is not None
+                and track_list is not None and len(track_list) > 0):
+            try:
+                coords = self.axes.coordinates(matrix)
+                rgb = point_rgb(coords)
+                axis_labels = self.axes.labels
+            except Exception as exc:                       # noqa: BLE001
+                print(f"Vibe cloud projection failed: {exc}", file=sys.stderr)
+                coords = rgb = None
+
+        self.cloud = VibeCloudWidget(
+            coords, rgb, track_list,
+            label_fn=self._label_for, axis_labels=axis_labels)
+
+        title = ("♁ Vibe Space · " + " · ".join(self.axes.labels)
+                 if self.axes is not None else "♁ Vibe Space")
+        self.cloud_box = urwid.LineBox(self.cloud, title=title)
 
     def request_exit(self):
         """
@@ -553,6 +660,12 @@ class AdaptiveDJTUI:
     # ── Input handling ────────────────────────────────────────────────────────
 
     def _handle_input(self, key):
+        # Mouse events arrive as tuples through the same channel (urwid delivers
+        # them to `unhandled_input`).  They only mean something over the cloud.
+        if isinstance(key, tuple):
+            self._handle_mouse(key)
+            return
+
         # Don't lowercase arrow keys or special keys
         key_lower = key.lower() if isinstance(key, str) else key
 
@@ -568,20 +681,126 @@ class AdaptiveDJTUI:
             self._like_track()
         elif key_lower == "i":
             self._show_model_info()
+        elif key_lower == "t":
+            self._toggle_pane()
+        elif key == "f1":
+            self._show_pane(BODY_CLOUD)
+        elif key == "f2":
+            self._show_pane(BODY_HISTORY)
+        elif key == "f3":
+            self._show_pane(BODY_CONSOLE)
         elif key == "right":
             self._seek_forward()
         elif key == "left":
             self._seek_backward()
         elif key == "up":
-            self._history_scroll(-1)
+            self._arrow_up()
         elif key == "down":
-            self._history_scroll(+1)
+            self._arrow_down()
         elif key == "enter":
-            self._replay_focused()
+            self._enter_action()
+        elif key_lower in ("+", "="):
+            self._zoom_in()
+        elif key_lower == "-":
+            self._zoom_out()
         elif key_lower in (",", "<"):
             self._volume_down()
         elif key_lower in (".", ">"):
             self._volume_up()
+
+    # ── Arrows / enter / zoom ─────────────────────────────────────────────────
+    #
+    # The arrows always drive the session history (the cloud is orbited with the
+    # mouse — right-drag — not the keyboard).  ENTER is the one focus-dependent
+    # key: it recentres the cloud when the cloud is up, and replays the focused
+    # track when the history is up.  It is still one binding table (§4): the key →
+    # this method is fixed, only ENTER's effect follows the view.
+
+    def _arrow_up(self):
+        self._history_scroll(-1)
+
+    def _arrow_down(self):
+        self._history_scroll(+1)
+
+    def _enter_action(self):
+        if self._cloud_focused():
+            self.cloud.reset_view()
+        else:
+            self._replay_focused()
+
+    def _zoom_in(self):
+        if self._cloud_focused():
+            self.cloud.zoom_by(KEY_ZOOM_STEP)
+
+    def _zoom_out(self):
+        if self._cloud_focused():
+            self.cloud.zoom_by(1.0 / KEY_ZOOM_STEP)
+
+    def _handle_mouse(self, event):
+        """
+        Drag-orbit, wheel-zoom and click-to-inspect over the cloud (G3).
+
+        Buttons:
+          • **wheel** — zoom, wherever the pointer is;
+          • **right-drag** — orbit the camera (moved off the left button so the
+            left is free to pick things);
+          • **left-click / left-drag on the orbit slider** — set the orbit speed;
+          • **left-click on a point** — inspect it (highlight + readout line).
+
+        Mouse coordinates are global screen cells, translated to the cloud's own
+        rectangle (derived from the widget tree, like the album-art geometry)
+        before reaching the widget.  Anything outside the cloud view is ignored.
+        """
+        if not self._cloud_focused():
+            return
+        if len(event) < 4:
+            return
+        name, button, col, row = event[0], event[1], event[2], event[3]
+
+        # Wheel: zoom, wherever the pointer is.
+        if button == 4:
+            self.cloud.zoom_by(WHEEL_ZOOM_STEP)
+            return
+        if button == 5:
+            self.cloud.zoom_by(1.0 / WHEEL_ZOOM_STEP)
+            return
+
+        if "release" in name:
+            self._drag_last = None
+            return
+
+        geometry = self._cloud_geometry(*self.loop.screen.get_cols_rows())
+        if geometry is None:
+            self._drag_last = None
+            return
+        gx, gy, gw, gh = geometry
+        lx, ly = col - gx, row - gy
+
+        # Right button: drag to orbit.
+        if button == 3:
+            if "press" in name:
+                self._drag_last = (col, row)
+            elif "drag" in name and self._drag_last is not None:
+                self.cloud.orbit(
+                    d_azimuth=(col - self._drag_last[0]) * DRAG_AZIMUTH_GAIN,
+                    d_tilt=-(row - self._drag_last[1]) * DRAG_TILT_GAIN)
+                self._drag_last = (col, row)
+            return
+
+        # Left button: the orbit slider takes precedence over a point pick, so a
+        # click (or drag along) the slider track sets the speed.
+        if button == 1 and ("press" in name or "drag" in name):
+            fraction = self.cloud.slider_at(lx, ly)
+            if fraction is not None:
+                self.cloud.set_orbit_fraction(fraction)
+                self.cloud._invalidate()
+                return
+            if "press" in name and 0 <= lx < gw and 0 <= ly < gh:
+                # Inspect the point: highlight + name it in the readout line; no
+                # console spam, no second surface.
+                if not self.cloud.select_at(lx, ly):
+                    self.cloud.clear_selection()
+                self.cloud._invalidate()
 
     # ── Actions ──────────────────────────────────────────────────────────────
 
@@ -1031,6 +1250,83 @@ class AdaptiveDJTUI:
         if self.running:
             self.loop.set_alarm_in(0.5, self._periodic_update)
 
+    def _animate(self, loop=None, user_data=None):
+        """
+        Advance the cloud's ambient orbit and repaint just it (~30 fps).
+
+        Deliberately does *nothing* to the session vector, the history or MPD —
+        it is a camera step, not a data event, keeping ambient motion and data
+        motion strictly separate (§4/G3).  Only the cloud view is animated; in
+        the history/console views there is nothing moving, so the redraw is
+        skipped and the terminal stays quiet.
+
+        urwid caches every unchanged widget's canvas, so `draw_screen` here
+        recomputes only the invalidated cloud and diffs its cells to the
+        terminal — the "panel-only redraw" G3 asks for, without urwid needing a
+        partial-draw API.
+        """
+        if not self.running:
+            return
+        if self._cloud_focused():
+            self.cloud.advance(ANIMATION_INTERVAL)
+            # Repaint only when the camera moved enough to matter — a slow spin
+            # crosses the threshold a few times a second, a drag every frame.
+            if self.cloud.pose_changed():
+                self.cloud._invalidate()
+                try:
+                    self.loop.draw_screen()
+                except Exception:
+                    pass
+        self.loop.set_alarm_in(ANIMATION_INTERVAL, self._animate)
+
+    # ── Body views: cloud / history / console (inspection G3) ─────────────────
+
+    # The three panes, in the order [T] cycles through them.  F1/F2/F3 jump
+    # straight to one (cloud/history/console) — a convenience not advertised in
+    # the footer, which shows only the [T] cycle.
+    _PANE_CYCLE = (BODY_CLOUD, BODY_HISTORY, BODY_CONSOLE)
+
+    def _set_body_view(self, view: str):
+        """Swap the body's visible panel and refresh it."""
+        self.body_view = view
+        if not self.use_urwid:
+            return
+        box = {BODY_CLOUD: self.cloud_box,
+               BODY_HISTORY: self.session_box,
+               BODY_CONSOLE: self.console_box}[view]
+        self.body_placeholder.original_widget = box
+        if view == BODY_HISTORY:
+            self._update_session_panel()
+        elif view == BODY_CONSOLE:
+            self._update_console()
+        else:
+            self.cloud._invalidate()
+
+    def _toggle_pane(self):
+        """[T].  Cycle the body: cloud → history → console → cloud."""
+        if not self.use_urwid:
+            return
+        try:
+            nxt = self._PANE_CYCLE[
+                (self._PANE_CYCLE.index(self.body_view) + 1) % len(self._PANE_CYCLE)]
+        except ValueError:
+            nxt = BODY_CLOUD
+        self._set_body_view(nxt)
+
+    def _show_pane(self, view: str):
+        """[F1]/[F2]/[F3].  Jump straight to one pane."""
+        if self.use_urwid:
+            self._set_body_view(view)
+
+    def _cloud_focused(self) -> bool:
+        """True when the cloud is the visible, usable pane — so ENTER recentres it,
+        the mouse drives it, and the animation alarm paints it.
+
+        In the fallback text mode there is no cloud, so this is always False.
+        """
+        return (self.use_urwid and self.body_view == BODY_CLOUD
+                and self.cloud is not None and self.cloud.available)
+
     # ── Display update ────────────────────────────────────────────────────────
 
     def _sync_session_state(self) -> dict:
@@ -1054,7 +1350,28 @@ class AdaptiveDJTUI:
         stats = self.dj.session_state.get_stats()
         self.vibe.observe(self.dj.session_state.get_session_vector(),
                           stats['tracks_played'], stats['is_seeded'])
+        self._update_cloud_data(status.get("track_file"), stats)
         return status
+
+    def _update_cloud_data(self, track_file, stats):
+        """
+        Point the cloud's ring at the playing track and lay down a comet bead if
+        the session vector has moved.
+
+        Done from `_sync_session_state` (the 2 Hz observe), not the animation
+        alarm, so the comet only advances on real data — and so it keeps
+        advancing even while the `[I]` overlay has the main loop blocked, the same
+        reason the history bookkeeping lives here (§4).
+        """
+        if self.cloud is None or not self.cloud.available:
+            return
+        self.cloud.set_current_track(track_file)
+        if self.axes is not None and stats.get('is_seeded'):
+            vector = self.dj.session_state.get_session_vector()
+            try:
+                self.cloud.note_session(self.axes.coordinates(vector))
+            except Exception:                              # noqa: BLE001
+                pass
 
     def _update_display(self):
         status = self._sync_session_state()
@@ -1088,6 +1405,11 @@ class AdaptiveDJTUI:
         else:
             self.track_text.set_text(f"Track:   {title}")
 
+        # The lookahead, shown in the header so "what's next" needs no panel.
+        next_label = self._next_track_label()
+        self.np_next_text.set_text(f"Next:    {next_label}" if next_label
+                                   else "Next:    —")
+
         # Seek bar
         position = status.get("position", 0)
         duration = status.get("duration", 0)
@@ -1109,11 +1431,15 @@ class AdaptiveDJTUI:
         self.descriptor_text.set_text(descriptor_line)
         self.drift_text.set_text(drift_line)
 
-        # Console
-        self._update_console()
-
-        # Session panel
-        self._update_session_panel()
+        # Refresh only the body panel actually on screen.  The default view is
+        # the cloud (redrawn on its own alarm), so the console and history panels
+        # — up to ~260 Text widgets between them — are not rebuilt at 2 Hz for a
+        # viewer who cannot see them; each is refreshed when toggled to, via
+        # `_set_body_view` (inspection G3).
+        if self.body_view == BODY_CONSOLE:
+            self._update_console()
+        elif self.body_view == BODY_HISTORY:
+            self._update_session_panel()
 
         # Album art
         if self.show_album_art and track_file:
@@ -1129,6 +1455,32 @@ class AdaptiveDJTUI:
             self.album_art_placeholder.set_text("🖼  Album Art")
 
     # ── Album art positioning ─────────────────────────────────────────────────
+
+    def _main_pile_slots(self, cols: int, rows: int):
+        """
+        Where each `main_pile` item lands, read from the widget tree.
+
+        Returns `(header_rows, footer_rows, slots)` where `slots` is a list of
+        `(widget, y_top, height)` in 0-indexed terminal rows, or None when the
+        body has no room.  Both `_art_geometry` and `_cloud_geometry` derive their
+        rectangles from this one walk (audit H8: read the layout, never
+        hand-count it — and never copy the read into two places that can drift).
+        """
+        if cols <= 0 or rows <= 0:
+            return None
+        header_rows = self.frame.header.rows((cols,)) if self.frame.header else 0
+        footer_rows = self.frame.footer.rows((cols,)) if self.frame.footer else 0
+        body_rows = rows - header_rows - footer_rows
+        if body_rows <= 0:
+            return None
+
+        item_rows = self.main_pile.get_item_rows((cols, body_rows), False)
+        slots = []
+        y = header_rows
+        for (widget, _options), height in zip(self.main_pile.contents, item_rows):
+            slots.append((widget, y, height))
+            y += height
+        return header_rows, footer_rows, slots
 
     def _art_geometry(self, cols: int, rows: int):
         """
@@ -1156,23 +1508,16 @@ class AdaptiveDJTUI:
             np_columns   → column_widths() gives the art cell's width, and the
                            widths of the cells before it give its x-offset
         """
-        if cols <= 0 or rows <= 0:
+        slots = self._main_pile_slots(cols, rows)
+        if slots is None:
             return None
-
-        header_rows = self.frame.header.rows((cols,)) if self.frame.header else 0
-        footer_rows = self.frame.footer.rows((cols,)) if self.frame.footer else 0
-        body_rows = rows - header_rows - footer_rows
-        if body_rows <= 0:
-            return None
+        _header_rows, footer_rows, slots = slots
 
         # Row and column of the Now Playing box's top-left corner.
-        item_rows = self.main_pile.get_item_rows((cols, body_rows), False)
-        y = header_rows
-        for (widget, _options), height in zip(self.main_pile.contents, item_rows):
+        for widget, y_top, height in slots:
             if widget is self.now_playing_box:
-                np_rows = height
+                y, np_rows = y_top, height
                 break
-            y += height
         else:
             return None
         x = 0
@@ -1210,6 +1555,30 @@ class AdaptiveDJTUI:
             return None
         return x, y, width, visible
 
+    def _cloud_geometry(self, cols: int, rows: int):
+        """
+        The cloud widget's inner rectangle `(x, y, w, h)`, from the widget tree.
+
+        Same discipline as `_art_geometry` (H8): read the layout rather than
+        hand-count it, so the mouse hit rectangle tracks the panels above it.  The
+        cloud sits in the weight-1 body slot below the packed Now Playing box,
+        inside a LineBox (one border row/column each side).
+        """
+        slots = self._main_pile_slots(cols, rows)
+        if slots is None:
+            return None
+        _header_rows, _footer_rows, slots = slots
+
+        # The body slot is the one that is not the Now Playing box.
+        for widget, y_top, height in slots:
+            if widget is not self.now_playing_box:
+                inner_w = cols - 2
+                inner_h = height - 2
+                if inner_w <= 0 or inner_h <= 0:
+                    return None
+                return 1, y_top + 1, inner_w, inner_h
+        return None
+
     def _render_art(self, art_path):
         """
         Position the art from the live screen size and re-render.
@@ -1243,7 +1612,7 @@ class AdaptiveDJTUI:
             return
 
         self.console_walker.clear()
-        # Show only the last CONSOLE_ROWS lines so the widget fills neatly
+        # The newest lines, newest at the bottom; the ListBox scrolls to them.
         for line in lines[-CONSOLE_ROWS:]:
             # Colour-code by content
             if any(w in line for w in ("error", "Error", "ERROR", "failed", "Failed")):

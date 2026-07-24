@@ -35,6 +35,19 @@ def start_playing(tui, tracks=2):
     return mpd
 
 
+def show_history(tui):
+    """
+    Reveal the session-history panel.
+
+    Phase 4 (G3) made the vibe cloud the default body and moved history onto a
+    toggle ([H]); the arrow keys and ENTER navigate the history only while it is
+    the focused view.  Tests that assert on the history panel or its bindings
+    switch to it first, the way a listener would.
+    """
+    from tui import BODY_HISTORY
+    tui._set_body_view(BODY_HISTORY)
+
+
 # ── Key routing ──────────────────────────────────────────────────────────────
 
 
@@ -57,6 +70,7 @@ def test_the_body_is_not_selectable(tui):
 
 
 def test_up_and_down_move_the_history_cursor(tui):
+    show_history(tui)
     tui.history.note_playing("a.flac")
     tui.history.note_playing("b.flac")
     tui.history.note_playing("c.flac")
@@ -68,6 +82,7 @@ def test_up_and_down_move_the_history_cursor(tui):
 
 
 def test_scrolling_an_empty_history_is_harmless(tui):
+    show_history(tui)
     tui._handle_input("down")
     tui._handle_input("up")
     tui._handle_input("enter")
@@ -82,6 +97,7 @@ def test_enter_queues_the_focused_track_as_next(tui):
     current, lookahead = mpd.queue[0], mpd.queue[1]
     replay = mpd.known_tracks[7]
 
+    show_history(tui)
     tui.history.note_playing(current)
     tui.history.note_playing(replay)
     tui.history.note_playing(current)
@@ -103,6 +119,7 @@ def test_enter_adds_before_it_deletes(tui):
     drop the lookahead until the poller noticed.
     """
     mpd = start_playing(tui, tracks=2)
+    show_history(tui)
     tui.history.note_playing(mpd.queue[0])
     mpd.calls.clear()
 
@@ -117,6 +134,7 @@ def test_enter_adds_before_it_deletes(tui):
 
 def test_a_refused_track_leaves_the_queue_untouched(tui):
     mpd = start_playing(tui, tracks=2)
+    show_history(tui)
     before = list(mpd.queue)
     replay = mpd.known_tracks[9]
     mpd.refuse.add(replay)
@@ -135,6 +153,7 @@ def test_a_refused_track_leaves_the_queue_untouched(tui):
 
 def test_the_panel_shows_the_lookahead_and_the_history(tui):
     mpd = start_playing(tui, tracks=2)
+    show_history(tui)
     tui._update_display()
     text = panel_text(tui)
 
@@ -145,6 +164,7 @@ def test_the_panel_shows_the_lookahead_and_the_history(tui):
 
 def test_the_history_panel_lists_what_played_newest_first(tui):
     mpd = start_playing(tui, tracks=3)
+    show_history(tui)
     tui._update_display()
     mpd.finish_track()
     tui._update_display()
@@ -166,6 +186,7 @@ def test_a_skipped_track_is_marked_in_the_panel(tui):
     the player actually recorded rather than from the keypress.
     """
     mpd = start_playing(tui, tracks=3)
+    show_history(tui)
     tui._update_display()
     current = mpd.queue[0]
 
@@ -185,6 +206,7 @@ def test_pressing_v_passes_the_track_and_marks_it_in_the_panel(tui):
     here the wiring under test is key → history mark, so the advance is stubbed.
     """
     mpd = start_playing(tui, tracks=3)
+    show_history(tui)
     tui._update_display()
     passed = mpd.queue[0]
 
@@ -223,6 +245,7 @@ def test_a_completed_track_is_marked_in_the_panel(tui):
 
 def test_liking_shows_a_heart_in_the_panel_and_on_the_track_line(tui):
     mpd = start_playing(tui, tracks=2)
+    show_history(tui)
     tui._update_display()
 
     tui._handle_input("l")
@@ -252,6 +275,7 @@ def test_events_from_previous_sessions_do_not_back_fill_the_panel(tui):
 
 
 def test_an_empty_history_says_so(tui):
+    show_history(tui)
     tui._update_display()
     assert "nothing has played yet" in panel_text(tui)
 
@@ -264,6 +288,7 @@ def test_the_panel_asks_for_tags_per_track_not_per_playlist(tui):
     show.  `fetch_track_tags` is per-track.
     """
     mpd = start_playing(tui, tracks=2)
+    show_history(tui)
     assert not hasattr(mpd, 'get_playlist_metadata')
 
     tui._update_display()
@@ -458,31 +483,37 @@ def test_the_footer_advertises_exactly_the_keys_that_are_bound(tui):
     is not advertised, which is what ↑↓ and ENTER were.
     """
     footer = tui.frame.footer.base_widget.text
-    for advertised in ("[SPACE]", "[N]", "[L]", "[↑↓]", "[ENTER]",
-                       "[,.]", "[←→]", "[I]", "[Q]"):
+    for advertised in ("[SPACE]", "[N]", "[V]", "[L]", "[↑↓]", "[ENTER]",
+                       "[+−]", "[T]", "[,.]", "[←→]", "[I]", "[Q]"):
         assert advertised in footer
 
-    # Every advertised key reaches a distinct action.  Recorded through the real
-    # `_handle_input`, so a binding removed from the dispatch table fails here
-    # rather than quietly leaving the footer lying.
+    # Every advertised key reaches a distinct dispatch target.  Recorded through
+    # the real `_handle_input`, so a binding removed from the table fails here
+    # rather than quietly leaving the footer lying.  The pane cycle is `[T]`;
+    # F1/F2/F3 jump straight to a pane but are a deliberately unadvertised
+    # convenience, so they are not in this footer list.  ENTER routes to a single
+    # method whose *effect* follows the view (reset vs replay) — that branch has
+    # its own test; here the invariant is the fixed key → method table (§4).
     fired = []
-    for name in ('_toggle_play_pause', '_skip_track', '_like_track',
-                 '_history_scroll', '_replay_focused', '_volume_down',
+    for name in ('_toggle_play_pause', '_skip_track', '_pass_track',
+                 '_like_track', '_arrow_up', '_arrow_down', '_zoom_in',
+                 '_zoom_out', '_enter_action', '_toggle_pane', '_volume_down',
                  '_volume_up', '_seek_backward', '_seek_forward',
                  '_show_model_info', '_quit'):
         monkeypatched = (lambda n: lambda *a, **k: fired.append(n))(name)
         setattr(tui, name, monkeypatched)
 
-    for key in (" ", "n", "l", "up", "down", "enter", ",", ".",
-                "left", "right", "i", "q"):
+    for key in (" ", "n", "v", "l", "up", "down", "+", "-", "enter", "t",
+                ",", ".", "left", "right", "i", "q"):
         before = len(fired)
         tui._handle_input(key)
         assert len(fired) == before + 1, f"[{key}] is advertised but does nothing"
 
-    assert fired == ['_toggle_play_pause', '_skip_track', '_like_track',
-                     '_history_scroll', '_history_scroll', '_replay_focused',
-                     '_volume_down', '_volume_up', '_seek_backward',
-                     '_seek_forward', '_show_model_info', '_quit']
+    assert fired == ['_toggle_play_pause', '_skip_track', '_pass_track',
+                     '_like_track', '_arrow_up', '_arrow_down', '_zoom_in',
+                     '_zoom_out', '_enter_action', '_toggle_pane', '_volume_down',
+                     '_volume_up', '_seek_backward', '_seek_forward',
+                     '_show_model_info', '_quit']
 
 
 def test_the_footer_wraps_rather_than_truncating_on_a_narrow_terminal(tui):

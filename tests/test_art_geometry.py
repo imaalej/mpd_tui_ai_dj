@@ -152,21 +152,28 @@ def test_the_right_column_starts_exactly_where_the_art_area_ends(tui):
             f"{cols}x{rows}: artist column {found[1]}, art ends at {x + width}")
 
 
-def test_the_art_area_never_overlaps_the_console_panel(tui):
+def test_the_art_area_stays_within_the_now_playing_box(tui):
     """
     The reason the old code pinned the height to a constant at all: a landscape
     cover scaled to the full column width could otherwise run down over the seek
-    bar and into the console.  Now the height *is* the art cell's rendered
-    height, so the bound holds by construction — this checks it holds in fact.
+    bar and out of the Now Playing box into whatever sits below it.  Now the
+    height *is* the art cell's rendered height, so the bound holds by
+    construction — this checks it holds in fact.
+
+    Phase 4 (G3) made the panel below the box the vibe cloud (the old console
+    moved to a toggle), and at very small sizes the weighted cloud can be
+    squeezed to nothing while the fixed-height console never was — so the honest,
+    size-robust assertion is that the art clears the Now Playing box's own bottom
+    border, the first `└` line in the render, which the packed box always draws.
     """
     for cols, rows in TERMINAL_SIZES:
         _x, y, _w, height = tui._art_geometry(cols, rows)
         lines = render_text(tui.frame, cols, rows)
-        console_row = next(i for i, line in enumerate(lines)
-                           if "System Console" in line)
-        assert y + height <= console_row, (
+        np_bottom = next(i for i, line in enumerate(lines)
+                         if line.startswith("└"))
+        assert y + height <= np_bottom, (
             f"{cols}x{rows}: art occupies rows {y}..{y + height - 1}, "
-            f"console starts at {console_row}")
+            f"Now Playing box closes at {np_bottom}")
 
 
 def test_the_width_is_the_declared_art_column(tui):

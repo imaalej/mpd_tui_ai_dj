@@ -4,32 +4,41 @@ A terminal-based DJ that learns your taste in real time and curates a continuous
 
 ```
 ╔════════════════════════════════════════════════════════════════════╗
-║                  🎵 Adaptive Session AI DJ                         ║
+║                            🎵 AI DJ                                 ║
 ╠════════════════════════════════════════════════════════════════════╣
 ║  ♪ Now Playing                                                     ║
 ║  ┌─────────────┐   ▶ Playing        Vol: 72%                       ║
-║  │             │                                                   ║
 ║  │  [cover]    │   Artist:  Floating Points                        ║
 ║  │             │   Album:   Promises                               ║
 ║  │             │   Track:   ❤ LesAlpx                              ║
+║  │             │   Next:    Pharoah Sanders – The Creator …        ║
 ║  └─────────────┘   [████████████░░░░░░░░░░░░]  3:12 / 8:44         ║
 ║                    ♪ hypnotic · nocturnal · sparse                 ║
-║                    ⟳ 2 of 3 held over 5 tracks · 14 played         ║
-╠════════════════════════════════════════════════════════════════════╣
-║  System Console                                                    ║
-║  [14:32:01] Exploration decreased to 0.18 (6 consecutive listens)  ║
-╠════════════════════════════════════════════════════════════════════╣
-║  Session                                                           ║
-║    ↓ next:  Pharoah Sanders – The Creator Has a Master Plan        ║
-║  ──────────────────────────────────────────────────────────────    ║
-║   ♥♪ Floating Points – LesAlpx                                     ║
-║    ✓ Alice Coltrane – Journey in Satchidananda                     ║
-║    ⏭ Kamasi Washington – Change of the Guard                       ║
+╠═ ♁ Vibe Space · Tone · Saturation · Organic ══════════════════════╣
+║                        ⢀⠴⠋⠉⠉⠙⠲⢄                                     ║
+║                    ⢠⠞⠁ ⢀⣀⡠⠤⠤⡀ ⠈⠳⡄        the whole library,       ║
+║                   ⡞  ⡴⠋⠁⢠⡆   ⠙⢦  ⢹⡄       projected onto three     ║
+║                  ⢸  ⣸⠁ ⢀⣼⣷⣄   ⠈⣇  ⡇       legible mood axes,       ║
+║                   ⢧⡀ ⠹⣄ ⠈⠛⠁ ⢀⡴⠋ ⣰⠇       auto-rotating, coloured  ║
+║                    ⠙⠦⣄⡈⠙⠒⠒⠚⠋ ⣠⠴⠋         by its own coordinates;  ║
+║                        ⠉⠓⠒⠒⠒⠋⠁ ●←         the comet is your vibe.  ║
+║  ♪ Floating Points – LesAlpx    T +0.4  S −0.3  O +1.1             ║
+║  ⟳ orbit [━━━━●───────────────────────────────────────]   12%     ║
 ╠════════════════════════════════════════════════════════════════════╣
 ║ [SPACE] Pause  [N] Skip  [V] Pass  [L] Like  [↑↓] History          ║
-║ [ENTER] Replay  [,.] Vol  [←→] Seek  [I] Info  [Q] Quit            ║
+║ [ENTER] Reset/Replay  [+−] Zoom  [T] Pane                          ║
+║ [,.] Vol  [←→] Seek  [I] Info  [Q] Quit                            ║
 ╚════════════════════════════════════════════════════════════════════╝
 ```
+
+The body below the header is a live **vibe cloud** — an auto-rotating 3-D point
+cloud of your whole library in mood space, with a comet tracing your session's
+trajectory. It carries the full screen; `[T]` cycles the body between the cloud,
+the session history and the console (or `F1`/`F2`/`F3` jump straight to one), so
+each gets the whole panel when you want it. The next track shows on the `Next:`
+line in the header, so you never have to leave the cloud to see what's coming.
+**Right-drag** to orbit, **scroll** to zoom, **click** a point to see which track
+it is, and drag the **orbit slider** to set the spin speed (it starts slow).
 
 ---
 
@@ -110,11 +119,22 @@ mpc status   # should show your track count
 | `V` | Pass — move on to the queued track without changing the vibe |
 | `L` | Like current track — press again on a liked track to un-like it |
 | `↑` / `↓` | Move the cursor through the session history |
-| `Enter` | Play the track under the cursor again — it becomes `↓ next:` |
+| `+` / `−` | Zoom the cloud in / out |
+| `Enter` | **Over the cloud:** reset the view. **Over the history:** replay the track under the cursor — it becomes `↓ next:` |
+| `T` | Cycle the body pane: cloud → history → console → cloud |
+| `F1` / `F2` / `F3` | Jump straight to the cloud / history / console pane |
 | `,` / `.` | Volume down / up |
 | `←` / `→` | Seek backward / forward 10s |
 | `I` | Show model state (descriptors, sampling, taste, exploration, weights) — `↑↓` scrolls it |
 | `Q` | Quit |
+| mouse | Over the cloud: **right-drag** to orbit, **scroll** to zoom, **left-click** a point to inspect its track, and drag the **orbit-speed slider** at the bottom |
+
+The camera is a mouse instrument — right-drag to orbit, scroll to zoom — so the
+arrows are free to always mean "move the history cursor". `Enter` is the one key
+that does two things: it recentres the cloud when the cloud is up, and replays the
+focused track when the history is up. That is a focus mode, not a second binding
+table — the key reaches one dispatch method, which acts on whichever view is
+showing. Everything else means the same thing everywhere.
 
 These are the same bindings in the urwid interface and in the plain-text fallback,
 and the footer advertises exactly this list. They are not merely documented as the

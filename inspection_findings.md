@@ -522,3 +522,70 @@ ANSI. Verify: render the widget at several terminal sizes (the `test_art_geometr
 point" discipline); assert the animation alarm coexists with the 2 Hz poll without dropping full-listens;
 a hit-test unit test. Python is adequate (674 points is trivial); revisit C/Rust only for very large
 libraries.
+
+> **What Phase 4 actually did** (branch `rewrite/phase-3` tip, suite 619 → 651; so a future reader doesn't re-derive it):
+> - **New module `src/vibe_cloud.py`** — the pure geometry (`rotation_matrix`, `point_rgb`,
+>   `compute_frame` → a `Frame` of dense `(rows, cols)` Braille/colour/hit grids, `hit_test`) is split from
+>   the urwid `VibeCloudWidget`, so the arithmetic is unit-tested without a tty (the `explore_mood_axes`
+>   discipline).  **Everything is a single Braille dot** — every library point and every marker.  Library
+>   points are **depth-shaded** — colour dimmed toward `SHADE_MIN` by distance from the camera this frame,
+>   so a turn of the cloud reads as 3-D.  (Fatter billboarded markers — squares/discs/rings — were tried
+>   and rejected: always facing the camera, they flatten the cloud into a swimming plane; a 1-dot mark has
+>   no facing, so depth is carried by shading and markers are told apart purely by a bright contrasting
+>   colour on top — cyan for the playing track, magenta for a clicked point, white for the comet head.)
+>   Rasterised **vectorised** — all dots become flat coordinate arrays, then `np.bitwise_or.at` for the
+>   glyphs and a stable-sort-by-depth scatter for colour and hit; the current track and comet are marks
+>   (index −1, colour but **not hit**, so a marker over a point never makes it unclickable), the selected
+>   point is the point recoloured (keeps its index).  Clicking uses a nearest-within-`CLICK_RADIUS` search,
+>   not a bigger dot.  Measured **~1.5 ms/frame** for 674 points at 96×28, well under a 144 fps budget.
+> - **Colour is `point_rgb`** — Hue←axis 0 (Tone), Sat←axis 1 (Saturation), Value←axis 2 (Organic), a pure
+>   function of each point's coordinates so hue and position cannot disagree (G3).
+> - **The comet is data-only** — `VibeCloudWidget.note_session`, called from `_sync_session_state` (the 2 Hz
+>   observe, *not* the animation alarm), lays a bead only when the session vector actually moved
+>   (`COMET_MOVE_EPSILON`), so ambient orbit never touches it.  It updates even while `[I]` blocks the loop,
+>   the same reason the history bookkeeping lives there (§4).
+> - **The animation alarm** (`_animate`, `ANIMATION_INTERVAL = 1/60`) advances only the camera and
+>   `draw_screen`s; urwid's canvas cache means only the invalidated cloud recomputes and only its cells
+>   diff to the terminal — the "panel-only redraw" G3 asks for, with no urwid partial-draw API.  It is a
+>   *separate* alarm from the 0.5 s `_periodic_update`, so the fast redraw never starves the session poll
+>   (verified: a full listen between frames is still recorded).  Orbit speed is per-tick, calibrated for
+>   real time (`advance(dt)`, rad/s), and set live by the on-panel **orbit slider** (0 = static, starts slow).
+> - **Eased camera + adaptive repaint** (the "buttery" pass): a mouse drag sets a *target*; `advance(dt)`
+>   eases the actual angle/zoom toward it (`1 − e^(−dt/τ)`), so tilt animates every frame instead of
+>   lurching at the mouse-event rate — which is what a vertical drag reported at (the terminal's rows are
+>   taller than its columns), making up/down feel choppier than a left/right spin.  The alarm ticks up to
+>   ~144 fps but `_animate` only repaints when `cloud.pose_changed()` (the camera crossed `POSE_EPS_*`
+>   since the last render), so a slow ambient spin repaints ~a few times a second and only an active
+>   drag/zoom pays the full framerate.  Everything is framerate-independent (rad/s × dt), so the interval
+>   can change without changing the feel.
+> - **Body restructure** — `main_pile` is now `[('pack', now_playing_box), ('weight', 1,
+>   WidgetDisable(WidgetPlaceholder))]`; the placeholder swaps between `cloud_box` (default), `session_box`
+>   and `console_box`.  The console lost its inline fixed height and is a full-body pane now
+>   (`data/dj.log` is the durable copy, §4).  The whole slot stays `WidgetDisable`d so ↑↓/ENTER fall
+>   through to the one dispatch table.  Panes are switched with **`[T]`** (cycle cloud → history → console)
+>   or **`F1/F2/F3`** (jump straight to one; unadvertised in the footer).
+> - **Camera is mouse-first, arrows are history** (a UX refinement after the first cut): orbit is
+>   **right-drag** (`_handle_mouse`, button 3 — left is freed for picking), zoom is **scroll**, and an
+>   on-panel **orbit-speed slider** (0 = static, `ORBIT_SPEED_DEFAULT` starts slow) is set by left-click/drag
+>   on its track (`VibeCloudWidget.slider_at`/`set_orbit_fraction`).  So `↑/↓` always move the history
+>   cursor; **`ENTER`** is the one focus-dependent key (`_enter_action`): reset the cloud over the cloud,
+>   replay over the history — one binding, focus-dependent effect, not two tables (§4).
+> - **Mouse** (`_handle_mouse`) — urwid enables 1002 (drag, with the button number) + 1006 (SGR) mouse modes
+>   by default and routes unhandled events to `unhandled_input` as tuples; the handler translates a global
+>   click to the cloud's own rectangle (`_cloud_geometry`, sharing the `_main_pile_slots` walk with
+>   `_art_geometry`) and does wheel-zoom, right-drag-orbit, left-click-to-inspect (nearest library point
+>   within `CLICK_RADIUS` cells → the track key; the picked point is **recoloured** to a contrasting hue and
+>   lifted on top, not ringed), and the left-click orbit slider.
+> - **Header extras** — the top bar title is just **"🎵 AI DJ"**, and the Now Playing right column gains a
+>   **`Next:` line** (the lookahead) under the three track labels, so "what's next" needs no panel.
+> - **256-colour** — `loop.screen.set_terminal_properties(colors=256)`, or urwid down-converts every
+>   `AttrSpec` to the nearest of 16 and the cloud goes muddy.
+> - **Absent axes are not fatal** — `MoodAxes.load()` returns `None` on an old descriptor bank; the widget
+>   then draws a wrapped "rebuild with `--descriptors-only`" message and the rest of the app plays on.
+> - **Tests** — `tests/test_vibe_cloud.py` (32): pure colour/geometry/hit-test, the widget rendered to real
+>   canvases at six sizes (incl. degenerate), camera clamps, comet-only-on-data, click-resolves-to-track
+>   against a real frame, and TUI integration (default view, toggles, focus-mode arrows, mouse wheel/click/
+>   drag, animation-vs-poll independence, geometry-matches-render, no-axes survivable).  The body-layout
+>   coupling in `test_tui_display`/`test_simple_mode`/`test_art_geometry` was updated to reveal the history
+>   before asserting on it, and the footer/banner guards extended to the new bindings.  A published HTML
+>   artifact bakes 60 frames of the **real** widget for a visual check without a tty.
