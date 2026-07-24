@@ -722,13 +722,13 @@ class AdaptiveDJTUI:
         exploration = self.dj.exploration_controller.get_stats()
         selector = self.dj.track_selector.get_stats()
         weights = self.dj.exploration_controller.get_weights(
-            taste_updates=taste['total_updates'])
+            taste_updates=taste['positive_updates'])
 
         # τ is the effective number of candidates the sampler is choosing among.
         # Reporting it is the point of picking a rank-based rule: it is a true
         # statement about what the machine is doing, derived rather than named.
         tau = self.dj.track_selector.temperature(exploration['exploration'])
-        ramp = self.dj.exploration_controller.taste_ramp(taste['total_updates'])
+        ramp = self.dj.exploration_controller.taste_ramp(taste['positive_updates'])
 
         schedule = config.skip_turnover_schedule
         run = exploration['consecutive_skips']
@@ -800,9 +800,10 @@ class AdaptiveDJTUI:
             "─" * 50,
             "TASTE MODEL",
             f"  seeded           {'yes' if taste['is_seeded'] else 'no (no positive signal yet)'}",
-            f"  updates          {taste['total_updates']}",
+            f"  updates          {taste['total_updates']} "
+            f"({taste['positive_updates']} positive — likes + full listens)",
             f"  β earned         {ramp:.0%}   (full weight after "
-            f"{config.taste_ramp_updates} updates)",
+            f"{config.taste_ramp_updates} positive signals; skips do not count)",
             f"  likes            {taste['like_count']}",
             f"  full listens     {taste['full_listen_count']}",
             f"  skips            {taste['skip_count']}",

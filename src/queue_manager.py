@@ -64,7 +64,7 @@ class QueueManager:
             session_vector=self.session_state.get_session_vector(),
             taste_vector=self.user_taste.get_taste_vector(),
             weights=self.exploration_controller.get_weights(
-                taste_updates=self.user_taste.total_updates),
+                taste_updates=self.user_taste.positive_updates),
             exploration=self.exploration_controller.exploration,
             exclude_tracks=set(exclude or ()),
         )

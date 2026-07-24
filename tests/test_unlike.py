@@ -322,6 +322,43 @@ def test_the_session_like_count_comes_back_down(library, tmp_path, monkeypatch):
     assert handler.get_session_stats()['likes'] == 0
 
 
+def test_unliking_a_previous_session_like_does_not_touch_tonights_count(
+        library, tmp_path, monkeypatch):
+    """
+    B6: `feedback_history` spans every session on disk, so `removed` counts likes
+    from previous nights too.  Retracting one of those must not decrement *this*
+    session's like tally, which only ever counted tonight's likes.
+    """
+    handler = _handler(library, tmp_path, monkeypatch)
+    old_track = library.track_list[0]
+    tonight = library.track_list[1]
+
+    # A like from a previous session: in the loaded history, never in this
+    # session's stats.
+    handler.feedback_history.append(
+        {'timestamp': 't', 'type': 'like', 'track': old_track})
+
+    handler.process_like(tonight)
+    assert handler.get_session_stats()['likes'] == 1
+
+    handler.process_unlike(old_track)
+    assert handler.get_session_stats()['likes'] == 1, (
+        "retracting a prior-session like decremented tonight's count")
+
+
+def test_the_session_count_never_goes_negative_on_a_stale_history(
+        library, tmp_path, monkeypatch):
+    """A like present only in the loaded history, retracted with an empty session
+    tally, must clamp at zero rather than go negative."""
+    handler = _handler(library, tmp_path, monkeypatch)
+    old_track = library.track_list[0]
+    handler.feedback_history.append(
+        {'timestamp': 't', 'type': 'like', 'track': old_track})
+
+    handler.process_unlike(old_track)
+    assert handler.get_session_stats()['likes'] == 0
+
+
 def test_a_like_with_no_embedding_is_not_recorded(library, tmp_path, monkeypatch):
     """
     `process_like` reports whether it recorded anything, so the TUI cannot draw

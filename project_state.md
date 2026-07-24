@@ -109,8 +109,21 @@ feedback_handler.py ──┬──▶ session_state.py   short-term vibe vector
 5. `QueueManager.ensure_one_ahead()` keeps exactly one track ahead, with `consume on` so MPD pops
    finished tracks itself — making the refill condition `len(playlist) < 2`.
 
-Before anything has played both vectors are zero and step 1 returns an empty pool, so the first track
-is a uniform random draw rather than an arbitrary `argpartition` ordering.
+On a **cold** start both vectors are zero and step 1 returns an empty pool, so the opening picks are
+uniform random draws rather than an arbitrary `argpartition` ordering. Two nuances that the plain
+"the first track is uniform" claim glosses over (audit B3/B4):
+
+- **The first *two* tracks are both uniform, not one.** `start_session` pre-queues `1 + queue_lookahead`
+  (= 2) tracks while the session vector is still zero, so the lookahead is drawn independently of track
+  1. Selection first reflects the seeded session at track 3. This is inherent to depth-1 gapless
+  startup — the lookahead has to exist before track 1 plays, and nothing has seeded the vibe yet. It is
+  accepted rather than fixed: deferring the lookahead until track 1 seeds the session would improve
+  exactly one track at the cost of a startup-gap edge case, not worth it. Documented so it is a known
+  choice, not a surprise.
+- **On a *warm* restart it is not uniform at all.** A persisted taste model seeds `taste_vector`, so
+  `get_candidate_pool` opens its taste half and the first track is drawn from taste neighbours. This is
+  the desirable behaviour (the README promises taste anchoring across sessions); the "first track is
+  uniform" invariant only ever described the cold start.
 
 ### What feeds back
 
@@ -585,6 +598,18 @@ know were seen and decided on.
 - **L6 — `mpc idle`.** Steady state is ~12 `mpc` spawns/sec at 0.8 ms each, about 1% of one core. It
   matters only against a remote `MPD_HOST`, where each call is a TCP round trip. At depth 1 the one
   queued track gives the 2 s poll minutes of runway.
+- **A1 — a lock around selector/queue mutation.** The two threads share mutable state, but correctness
+  does not rest on a lock: the GIL makes each `deque`/`dict`/reference op atomic, and the one fatal
+  outcome (advance into an empty queue) is prevented *by construction* — every skip variant adds before
+  it advances, which holds under any interleaving. The realistic residual race briefly makes the queue
+  one entry deeper and self-corrects. A lock is cheap insurance, not a fix; adding one now risks a
+  deadlock between the skip path and the background loop for no observed misbehaviour. Deferred until a
+  real race is seen, or added opportunistically.
+- **F1 — MPD reconnection.** `MPDController.connected` is a one-time startup gate that never reverts.
+  This reads like a missing reconnect, but there is no persistent connection to lose: **every operation
+  is a fresh `mpc` subprocess**, so if MPD restarts mid-session the calls fail only while it is down and
+  succeed again on their own once it returns — the app self-heals without any reconnect logic. The flag
+  is a startup check, not a liveness signal, and is not consulted to gate ongoing playback commands.
 
 ### Open observations — measured, not fixed
 
