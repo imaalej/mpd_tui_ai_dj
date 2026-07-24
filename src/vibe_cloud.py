@@ -34,7 +34,7 @@ honest terminal target (see `archive/NOTES.md`).
 """
 
 import math
-from typing import Callable, Dict, List, Optional, Tuple
+from typing import Callable, Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
 
@@ -107,6 +107,60 @@ POSE_EPS_ZOOM = 0.003
 # trail records genuine vibe motion, not floating-point jitter.
 COMET_MAX = 48
 COMET_MOVE_EPSILON = 0.05
+
+# ── The scaffold (exploration) ────────────────────────────────────────────────
+#
+# The readability problem this addresses: a cloud of specks has no reference
+# frame, so orbiting reads as "the dots are swimming" rather than "the volume is
+# turning".  A dim static frame gives the eye something to hold — the classic
+# fix in every 3-D plot, and free here because the frame goes through the same
+# projection and painter's sort as the points.
+#
+# Two constraints Braille imposes, and how each is met:
+#   * **No alpha.** "Lower opacity" is (a) a genuinely dim colour — 24-bit means
+#     a near-background grey is available, which the 256-cube could not do — and
+#     (b) **stippling**: sampling a line every 2nd or 3rd dot instead of every
+#     dot, so the line reads as a faint dotted rule rather than a hard wall.
+#   * **Eight dots share one cell colour.**  So the scaffold is splatted with a
+#     large *negative* depth bump: its dots light up, but any library point in
+#     the same cell wins that cell's colour.  The frame can never recolour the
+#     data, only sit behind it.
+# The box is **±2σ**, not a number picked to look right: the coordinates are
+# z-scored per axis (§6), so 2.0 is a stated fact about the library — most of it
+# is inside the box and the outliers visibly are not.  It also happens to be the
+# largest box that stays on the panel: at the fixed 0.5 tilt a cube corner
+# reaches 1.556·e vertically against the panel's 3.0σ half-height.
+SCAFFOLD_EXTENT = 2.0
+SCAFFOLD_DIV = 4               # grid subdivisions per wall/floor
+SCAFFOLD_SPACING = 2.0         # dots between line samples: 1 = solid, 2 = dotted
+COL_SCAFFOLD_FAR = 0x0f141a    # the far side of the frame, barely above the bg
+COL_SCAFFOLD_NEAR = 0x55697e   # the near side — still well under any point
+COL_SCAFFOLD_LABEL = 0x7a8b9c  # axis names
+# The gnomon is screen-anchored, so it is sized in **cells** rather than σ, and
+# it never depth-shades: it is an instrument, not part of the scene.
+GNOMON_CELLS = 5               # arm length, in character cells
+GNOMON_MARGIN = 3
+SHADOW_WEIGHT = 0.55           # the cast shadow, relative to a ruled line
+
+# The presets `[B]` cycles, chosen by eye from the ten the offline explorer
+# renders (`explore_cloud_scaffold.py`).  Tokens compose with '+', so a
+# combination needs no new constant and the ones not in this list — `walls`,
+# `gnomon` — stay reachable from the explorer without shipping as a stop.
+#
+#   ground   the horizon reading: a ruled floor and the library's cast shadow.
+#            A point's distance from its own shadow is its height.
+#   box      the enclosure reading: all twelve edges plus the ruled axes through
+#            the origin, ticked every 1σ.
+#   marks    the light-touch middle: crop-mark corners over the floor, with the
+#            ticked axes, and no shadow mass under it.
+SCAFFOLD_MODES: Tuple[str, ...] = (
+    "off", "floor+shadow", "cage+triad", "corners+floor+triad")
+
+# What the panel opens with.  A frame rather than `off`, because the reason the
+# scaffold exists is that the bare cloud is hard to read while it turns — opening
+# on the unreadable state and asking the listener to discover `[B]` would keep the
+# defect as the default.  `off` stays one keypress away, first in the ring.
+SCAFFOLD_DEFAULT = "floor+shadow"
 
 # Bright, full-brightness contrasting colours for the markers — each drawn as a
 # single dot on top of the (depth-shaded) library so it stands out.  Packed
@@ -193,15 +247,18 @@ class Frame:
     """
     The result of projecting the cloud for one camera pose, as dense grids.
 
-    All three are `(rows, cols)` arrays: `bits` is the OR of the Braille dot bits
+    All four are `(rows, cols)` arrays: `bits` is the OR of the Braille dot bits
     lit in each character cell; `color` is the packed 0xRRGGBB of the front-most
     thing there (−1 = empty); `hit` is the index of the front-most *library* point
     whose dot falls there (−1 = none / a mark), so a click resolves to a track,
-    never to the comet.  Dense rather than dict because the rasteriser fills them
-    with vectorised numpy, and the markup builder and hit-test read them directly.
+    never to the comet; `glyph` is a codepoint that **replaces** the Braille glyph
+    in that cell (−1 = use the dots), which is how the axis labels are drawn into
+    the same grid without a second widget.  Dense rather than dict because the
+    rasteriser fills them with vectorised numpy, and the markup builder and
+    hit-test read them directly.
     """
 
-    __slots__ = ("bits", "color", "hit", "cols", "rows")
+    __slots__ = ("bits", "color", "hit", "glyph", "cols", "rows")
 
     def __init__(self, cols: int, rows: int):
         self.cols = cols
@@ -209,6 +266,225 @@ class Frame:
         self.bits = np.zeros((rows, cols), dtype=np.uint8)
         self.color = np.full((rows, cols), -1, dtype=np.int32)
         self.hit = np.full((rows, cols), -1, dtype=np.int32)
+        self.glyph = np.full((rows, cols), -1, dtype=np.int32)
+
+
+# ── Scaffold geometry ─────────────────────────────────────────────────────────
+#
+# Everything is expressed as world-space line segments and then **sampled into
+# points**, so the scaffold rides the existing projection, depth sort and
+# rasteriser rather than needing a line drawer of its own.  Projection is
+# orthographic, so evenly spaced samples in world space stay evenly spaced in
+# dot space — a sample step derived from `scale` gives an exact dot pitch.
+
+
+Segment = Tuple[Tuple[float, float, float], Tuple[float, float, float]]
+
+
+def _cube_edges(e: float) -> List[Segment]:
+    """The 12 edges of the cube [−e, e]³."""
+    corners = [(x, y, z) for x in (-e, e) for y in (-e, e) for z in (-e, e)]
+    segs: List[Segment] = []
+    for i, p in enumerate(corners):
+        for q in corners[i + 1:]:
+            if sum(abs(p[k] - q[k]) > 1e-9 for k in range(3)) == 1:
+                segs.append((p, q))
+    return segs
+
+
+def _corner_brackets(e: float, fraction: float = 0.28) -> List[Segment]:
+    """Only the ends of each edge — eight crop-mark corners.
+
+    Reads as a box for a third of the ink of a full cage, and leaves the middle
+    of the view (where the cloud is densest) completely clear.
+    """
+    d = 2 * e * fraction
+    segs: List[Segment] = []
+    for corner in [(x, y, z) for x in (-e, e) for y in (-e, e) for z in (-e, e)]:
+        for k in range(3):
+            end = list(corner)
+            end[k] += -d if corner[k] > 0 else d
+            segs.append((corner, tuple(end)))
+    return segs
+
+
+def _plane_grid(axis: int, value: float, e: float, div: int) -> List[Segment]:
+    """A `div`×`div` grid ruled on the plane `axis = value`."""
+    others = [k for k in range(3) if k != axis]
+    steps = np.linspace(-e, e, div + 1)
+    segs: List[Segment] = []
+    for fixed, varying in (others, others[::-1]):
+        for s in steps:
+            a, b = [0.0, 0.0, 0.0], [0.0, 0.0, 0.0]
+            a[axis] = b[axis] = value
+            a[fixed] = b[fixed] = float(s)
+            a[varying], b[varying] = -e, e
+            segs.append((tuple(a), tuple(b)))
+    return segs
+
+
+def _far_walls(R: np.ndarray, e: float, div: int) -> List[Segment]:
+    """The three faces currently *behind* the cloud, ruled as grids.
+
+    matplotlib's 3-D axes do exactly this and it is why they read as a box: the
+    back walls give parallax and a horizon, and because they are chosen per frame
+    by which side is farther from the camera they can never cross in front of the
+    data.  A rotation past 90° swaps a wall — the switch is visible, and it is
+    the same switch the eye already expects from the corner it is watching.
+    """
+    segs: List[Segment] = []
+    for axis in range(3):
+        # projected z of the +unit vector on this axis; farther = smaller z.
+        sign = -1.0 if R[2, axis] > 0 else 1.0
+        segs.extend(_plane_grid(axis, sign * e, e, div))
+    return segs
+
+
+def _axis_triad(e: float, tick: float = 0.12) -> List[Segment]:
+    """Three ruled axes through the origin, with a tick every 1σ.
+
+    The "3-axis graph" reading of the problem: instead of bounding the volume,
+    name it.  Each tick is one z-score, so the frame doubles as the scale the
+    readout line quotes.
+    """
+    segs: List[Segment] = []
+    for axis in range(3):
+        a, b = [0.0, 0.0, 0.0], [0.0, 0.0, 0.0]
+        a[axis], b[axis] = -e, e
+        segs.append((tuple(a), tuple(b)))
+        for t in np.arange(-math.floor(e), math.floor(e) + 1):
+            if abs(t) < 1e-9:
+                continue
+            for cross in [k for k in range(3) if k != axis]:
+                p, q = [0.0, 0.0, 0.0], [0.0, 0.0, 0.0]
+                p[axis] = q[axis] = float(t)
+                p[cross], q[cross] = -tick, tick
+                segs.append((tuple(p), tuple(q)))
+    return segs
+
+
+def _sample_segments(segs: Sequence[Segment], scale: float,
+                     spacing: float) -> np.ndarray:
+    """Segments → `(M, 3)` sample points, one every `spacing` **dots**.
+
+    `spacing = 1` is a solid line; 2 lights every other dot (the stipple that
+    stands in for opacity); 3 is a faint dotted rule.
+    """
+    out: List[np.ndarray] = []
+    for a, b in segs:
+        p = np.asarray(a, dtype=np.float64)
+        q = np.asarray(b, dtype=np.float64)
+        length = float(np.linalg.norm(q - p))
+        n = max(2, int(length * scale / max(0.25, spacing)) + 1)
+        t = np.linspace(0.0, 1.0, n)[:, None]
+        out.append(p + (q - p) * t)
+    return np.concatenate(out) if out else np.zeros((0, 3))
+
+
+def scaffold_points(mode: str,
+                    R: np.ndarray,
+                    scale: float,
+                    coords: Optional[np.ndarray] = None,
+                    extent: float = SCAFFOLD_EXTENT,
+                    div: int = SCAFFOLD_DIV,
+                    spacing: float = SCAFFOLD_SPACING
+                    ) -> Tuple[np.ndarray, np.ndarray]:
+    """
+    `(M, 3)` world-space dots for a scaffold `mode`, and their `(M,)` weights.
+
+    The weight scales how bright a dot is allowed to get at the near end of the
+    depth ramp — 1.0 for ruled lines, less for the shadow, which is a large solid
+    mass and would otherwise out-shout the frame it sits in.
+
+    `mode` is a '+'-joined set of tokens so combinations need no new constant:
+
+        corners   the eight crop-mark cube corners  (least ink)
+        cage      all twelve cube edges
+        walls     the three rear faces, ruled as grids  (matplotlib's frame)
+        floor     one ruled grid under the cloud
+        shadow    the library flattened onto the floor plane — the strongest
+                  depth cue available, since a point's distance from its own
+                  shadow *is* its height
+        triad     three ruled axes through the origin, ticked every 1σ
+    """
+    empty = (np.zeros((0, 3)), np.zeros(0))
+    tokens = {t for t in str(mode).split("+") if t and t != "off"}
+    if not tokens:
+        return empty
+
+    segs: List[Segment] = []
+    if "corners" in tokens:
+        segs += _corner_brackets(extent)
+    if "cage" in tokens:
+        segs += _cube_edges(extent)
+    if "walls" in tokens:
+        segs += _far_walls(R, extent, div)
+    if "floor" in tokens:
+        segs += _plane_grid(1, -extent, extent, div)
+    if "triad" in tokens:
+        segs += _axis_triad(extent)
+
+    parts: List[np.ndarray] = []
+    weights: List[np.ndarray] = []
+    if segs:
+        pts = _sample_segments(segs, scale, spacing)
+        parts.append(pts)
+        weights.append(np.ones(len(pts)))
+    if "shadow" in tokens and coords is not None and len(coords):
+        flat = np.asarray(coords, dtype=np.float64).copy()
+        flat[:, 1] = -extent
+        parts.append(flat)
+        weights.append(np.full(len(flat), SHADOW_WEIGHT))
+    if not parts:
+        return empty
+    return np.concatenate(parts), np.concatenate(weights)
+
+
+def gnomon_dots(R: np.ndarray, cols: int, rows: int,
+                labels: Optional[Sequence[str]] = None
+                ) -> Tuple[np.ndarray, np.ndarray, np.ndarray,
+                           List[Tuple[int, int, str]]]:
+    """
+    A small screen-anchored axis cross for the bottom-left corner.
+
+    The other scaffolds live in the scene; this one does not.  It is the
+    orientation instrument every 3-D editor puts in a corner: three arms rotating
+    with the camera, each shaded by whether it points **toward** the viewer or
+    away, so "which way am I looking" is answerable without reading the cloud at
+    all.  Sized in cells, unaffected by zoom, and it never occludes the data
+    because the data is never in that corner.
+
+    Returns `(dot_x, dot_y, packed_colour, [(col, row, letter)])`.
+    """
+    arm = GNOMON_CELLS * 4                       # dots; a dot is ~square on screen
+    x0 = GNOMON_MARGIN * 2 + arm
+    y0 = 4 * rows - GNOMON_MARGIN * 4 - arm
+    xs, ys, cs = [], [], []
+    text: List[Tuple[int, int, str]] = []
+    names = list(labels) if labels else ["x", "y", "z"]
+    for axis in range(3):
+        vx, vy, vz = R[0, axis], R[1, axis], R[2, axis]
+        t = np.linspace(0.0, 1.0, arm)
+        dx = np.round(x0 + vx * arm * t).astype(np.int32)
+        dy = np.round(y0 - vy * arm * t).astype(np.int32)
+        # Depth along the arm, not per dot: the whole arm is one thing pointing
+        # somewhere, and a gradient down its length would read as bending.
+        shade = np.full(len(t), (float(vz) + 1.0) / 2.0)
+        xs.append(dx)
+        ys.append(dy)
+        cs.append(_shade_between(shade, COL_SCAFFOLD_FAR, COL_SCAFFOLD_NEAR))
+        tip_col = int(round(x0 + vx * (arm + 3))) // 2
+        tip_row = int(round(y0 - vy * (arm + 3))) // 4
+        letter = (names[axis][:1].upper() if axis < len(names) else "?")
+        text.append((tip_col, tip_row, letter))
+    return (np.concatenate(xs), np.concatenate(ys), np.concatenate(cs), text)
+
+
+def _shade_between(t: np.ndarray, far: int, near: int) -> np.ndarray:
+    """Packed colours interpolated far→near by `t` ∈ [0, 1], vectorised."""
+    lo = np.array([(far >> 16) & 0xFF, (far >> 8) & 0xFF, far & 0xFF], float)
+    hi = np.array([(near >> 16) & 0xFF, (near >> 8) & 0xFF, near & 0xFF], float)
+    return _rgb_to_packed(lo[None, :] + (hi - lo)[None, :] * t[:, None])
 
 
 def compute_frame(coords: np.ndarray,
@@ -221,7 +497,9 @@ def compute_frame(coords: np.ndarray,
                   comet: Optional[np.ndarray] = None,
                   current_idx: Optional[int] = None,
                   selected_idx: Optional[int] = None,
-                  shade: bool = True) -> Frame:
+                  shade: bool = True,
+                  scaffold: str = "off",
+                  axis_labels: Optional[Sequence[str]] = None) -> Frame:
     """
     Project `coords` (N, 3) into a Braille grid of `cols`×`rows` character cells.
 
@@ -242,8 +520,27 @@ def compute_frame(coords: np.ndarray,
         return frame
 
     dot_w, dot_h = 2 * cols, 4 * rows
-    scale = (min(dot_w, dot_h) / 2.0) / BASE_HALF_EXTENT * zoom
+    half_dots = min(dot_w, dot_h) / 2.0
+    scale = half_dots / BASE_HALF_EXTENT
     cx0, cy0 = dot_w / 2.0, dot_h / 2.0
+
+    tokens = {t for t in str(scaffold).split("+") if t and t != "off"}
+    if tokens & {"cage", "corners", "walls", "floor"}:
+        # Shrink just enough that the box **closes** on screen at zoom 1.  A cube
+        # corner reaches `e·(|cos tilt| + √2·|sin tilt|)` from centre, which at the
+        # default tilt is 3.11σ against the panel's 3.0 — so without this the top
+        # and bottom corners are always cut and the frame reads as a wall, not a
+        # box.  The budget is `half_dots − 1`, not `half_dots`: the far corner
+        # sits at `cy0 + reach·scale`, and a dot rounded exactly onto `dot_h` is
+        # one past the last index and silently vanishes — a corner missing from
+        # the cube for one dot of greed.  Applied to the
+        # base scale and *then* multiplied by zoom, so zooming in still overflows
+        # the panel as it should — this fits the box, it does not cage the camera.
+        reach = SCAFFOLD_EXTENT * (abs(math.cos(tilt))
+                                   + math.sqrt(2.0) * abs(math.sin(tilt)))
+        if reach * scale > half_dots - 1.0:
+            scale = (half_dots - 1.0) / reach
+    scale *= zoom
 
     R = rotation_matrix(azimuth, tilt)          # once, reused for cloud + comet
 
@@ -265,6 +562,34 @@ def compute_frame(coords: np.ndarray,
                        else np.full(m, int(colour), dtype=np.int32))
         idxs.append(np.asarray(idx, dtype=np.int32) if np.ndim(idx)
                     else np.full(m, int(idx), dtype=np.int32))
+
+    def splat_dots(dx, dy, colour, depth: float) -> None:
+        """Add dots already in dot coordinates (the screen-anchored gnomon)."""
+        if len(dx) == 0:
+            return
+        xs.append(np.asarray(dx, dtype=np.int32))
+        ys.append(np.asarray(dy, dtype=np.int32))
+        depths.append(np.full(len(dx), depth, dtype=np.float64))
+        colours.append(np.asarray(colour, dtype=np.int32))
+        idxs.append(np.full(len(dx), -1, dtype=np.int32))
+
+    # The scaffold first, and with a large *negative* bump: its dots are OR'd
+    # into the Braille cells like anything else, but it loses every colour
+    # contest, so a cell holding a library point shows the point's colour.  The
+    # frame sits behind the data by construction, not by tuning.
+    gnomon_text: List[Tuple[int, int, str]] = []
+    if "gnomon" in tokens:
+        gx, gy, gc, gnomon_text = gnomon_dots(R, cols, rows, axis_labels)
+        splat_dots(gx, gy, gc, -99.0)
+
+    scaf, scaf_w = scaffold_points(scaffold, R, scale, coords)
+    if len(scaf):
+        sproj = scaf @ R.T
+        sz = sproj[:, 2]
+        span = float(sz.max() - sz.min())
+        t = ((sz - sz.min()) / span) if span > 1e-9 else np.full(len(sz), 0.5)
+        splat(sproj, _shade_between(t * scaf_w, COL_SCAFFOLD_FAR,
+                                    COL_SCAFFOLD_NEAR), -1, -100.0)
 
     projected = coords @ R.T
 
@@ -326,7 +651,38 @@ def compute_frame(coords: np.ndarray,
     if lib.any():
         lorder = np.argsort(alld[lib], kind="stable")
         frame.hit.reshape(-1)[cell[lib][lorder]] = alli[lib][lorder]
+
+    for col, row, letter in gnomon_text:
+        if 0 <= col < frame.cols and 0 <= row < frame.rows:
+            frame.glyph[row, col] = ord(letter)
+            frame.color[row, col] = COL_SCAFFOLD_LABEL
+    if axis_labels is not None and tokens - {"gnomon"}:
+        _place_axis_labels(frame, axis_labels, R, scale, cx0, cy0)
     return frame
+
+
+def _place_axis_labels(frame: Frame, labels: Sequence[str], R: np.ndarray,
+                       scale: float, cx0: float, cy0: float,
+                       extent: float = SCAFFOLD_EXTENT) -> None:
+    """Write each axis name at that axis's positive tip, in the same grid.
+
+    A label is a glyph override on the cell, so it costs no extra widget and no
+    extra pass — but it *does* replace whatever dots were there, which is why it
+    is drawn last and kept to a short word.  Nothing is written where the tip
+    falls off the panel.
+    """
+    tips = np.eye(3) * (extent * 1.22)
+    for axis, name in enumerate(list(labels)[:3]):
+        p = tips[axis] @ R.T
+        col = int(round((p[0] * scale + cx0)) // 2)
+        row = int(round((cy0 - p[1] * scale)) // 4)
+        text = str(name)[:10]
+        col = max(0, min(frame.cols - len(text), col - len(text) // 2))
+        if not (0 <= row < frame.rows) or frame.cols < len(text):
+            continue
+        for i, ch in enumerate(text):
+            frame.glyph[row, col + i] = ord(ch)
+            frame.color[row, col + i] = COL_SCAFFOLD_LABEL
 
 
 def hit_test(frame: Frame, col: int, row: int, radius: int = 2) -> Optional[int]:
@@ -413,6 +769,9 @@ if URWID_AVAILABLE:
             # animation alarm can skip a repaint when nothing moved enough.
             self._rendered_pose: Optional[Tuple[float, float, float]] = None
 
+            # Which spatial frame is drawn behind the cloud (`[B]` cycles it).
+            self.scaffold = SCAFFOLD_DEFAULT
+
             self.comet: List[np.ndarray] = []
             self._comet_arr: Optional[np.ndarray] = None   # cached stack of comet
             self.current_idx: Optional[int] = None
@@ -480,6 +839,16 @@ if URWID_AVAILABLE:
             self.target_tilt = DEFAULT_TILT
             self.target_zoom = 1.0
             self.selected_idx = None
+
+        def cycle_scaffold(self, step: int = 1) -> str:
+            """Advance to the next scaffold preset and return its name."""
+            try:
+                i = SCAFFOLD_MODES.index(self.scaffold)
+            except ValueError:                             # a custom combination
+                i = -1
+            self.scaffold = SCAFFOLD_MODES[(i + step) % len(SCAFFOLD_MODES)]
+            self._rendered_pose = None                     # force one repaint
+            return self.scaffold
 
         def pose_changed(self) -> bool:
             """True if the camera has moved enough since the last render to be
@@ -594,7 +963,9 @@ if URWID_AVAILABLE:
                 self.azimuth, self.tilt, self.zoom,
                 comet=self._comet_array(),
                 current_idx=self.current_idx,
-                selected_idx=self.selected_idx)
+                selected_idx=self.selected_idx,
+                scaffold=self.scaffold,
+                axis_labels=self.axis_labels)
             self._last_frame = frame
             self._rendered_pose = (self.azimuth, self.tilt, self.zoom)
 
@@ -639,10 +1010,12 @@ if URWID_AVAILABLE:
             """
             bits_grid = frame.bits
             color_grid = frame.color
+            glyph_grid = frame.glyph
             markup: list = []
             for cy in range(rows):
                 row_bits = bits_grid[cy]
                 row_color = color_grid[cy]
+                row_glyph = glyph_grid[cy]
                 run_text: List[str] = []
                 run_code: Optional[int] = None
                 gap = 0
@@ -654,7 +1027,8 @@ if URWID_AVAILABLE:
 
                 for cx in range(cols):
                     bits = int(row_bits[cx])
-                    if bits == 0:
+                    over = int(row_glyph[cx])
+                    if bits == 0 and over < 0:
                         flush_run()
                         run_code = None
                         gap += 1
@@ -665,7 +1039,9 @@ if URWID_AVAILABLE:
                     code = int(row_color[cx])
                     if code < 0:
                         code = 0xFFFFFF
-                    glyph = chr(BRAILLE_BASE + bits)
+                    # A glyph override (an axis label) replaces the dots in its
+                    # cell — drawn last in `compute_frame`, so it wins here too.
+                    glyph = chr(over) if over >= 0 else chr(BRAILLE_BASE + bits)
                     if run_code is None or code == run_code:
                         run_code = code
                         run_text.append(glyph)

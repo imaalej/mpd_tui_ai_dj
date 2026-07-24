@@ -121,6 +121,7 @@ mpc status   # should show your track count
 | `↑` / `↓` | Move the cursor through the session history |
 | `+` / `−` | Zoom the cloud in / out |
 | `Enter` | **Over the cloud:** reset the view. **Over the history:** replay the track under the cursor — it becomes `↓ next:` |
+| `B` | Cycle the frame drawn behind the cloud: none → ground → box + axes → marks + ground + axes |
 | `T` | Cycle the body pane: cloud → history → console → cloud |
 | `F1` / `F2` / `F3` | Jump straight to the cloud / history / console pane |
 | `,` / `.` | Volume down / up |

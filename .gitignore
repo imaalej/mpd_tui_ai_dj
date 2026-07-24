@@ -46,6 +46,10 @@ Thumbs.db
 # `test_*.py`, which meant a fresh clone had zero tests while the three
 # untracked phase-test files reported "66 passing" locally (audit M1).
 
+# Throwaway output from the offline explorers (`scratch_vibe_terminal.html`,
+# `scratch_scaffold/`).  The scripts are tracked; what they render is not.
+scratch_*
+
 # Logs
 *.log
 

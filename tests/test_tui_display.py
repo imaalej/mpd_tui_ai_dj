@@ -484,7 +484,7 @@ def test_the_footer_advertises_exactly_the_keys_that_are_bound(tui):
     """
     footer = tui.frame.footer.base_widget.text
     for advertised in ("[SPACE]", "[N]", "[V]", "[L]", "[↑↓]", "[ENTER]",
-                       "[+−]", "[T]", "[,.]", "[←→]", "[I]", "[Q]"):
+                       "[+−]", "[B]", "[T]", "[,.]", "[←→]", "[I]", "[Q]"):
         assert advertised in footer
 
     # Every advertised key reaches a distinct dispatch target.  Recorded through
@@ -497,13 +497,14 @@ def test_the_footer_advertises_exactly_the_keys_that_are_bound(tui):
     fired = []
     for name in ('_toggle_play_pause', '_skip_track', '_pass_track',
                  '_like_track', '_arrow_up', '_arrow_down', '_zoom_in',
-                 '_zoom_out', '_enter_action', '_toggle_pane', '_volume_down',
+                 '_zoom_out', '_enter_action', '_cycle_scaffold',
+                 '_toggle_pane', '_volume_down',
                  '_volume_up', '_seek_backward', '_seek_forward',
                  '_show_model_info', '_quit'):
         monkeypatched = (lambda n: lambda *a, **k: fired.append(n))(name)
         setattr(tui, name, monkeypatched)
 
-    for key in (" ", "n", "v", "l", "up", "down", "+", "-", "enter", "t",
+    for key in (" ", "n", "v", "l", "up", "down", "+", "-", "enter", "b", "t",
                 ",", ".", "left", "right", "i", "q"):
         before = len(fired)
         tui._handle_input(key)
@@ -511,7 +512,8 @@ def test_the_footer_advertises_exactly_the_keys_that_are_bound(tui):
 
     assert fired == ['_toggle_play_pause', '_skip_track', '_pass_track',
                      '_like_track', '_arrow_up', '_arrow_down', '_zoom_in',
-                     '_zoom_out', '_enter_action', '_toggle_pane', '_volume_down',
+                     '_zoom_out', '_enter_action', '_cycle_scaffold',
+                     '_toggle_pane', '_volume_down',
                      '_volume_up', '_seek_backward', '_seek_forward',
                      '_show_model_info', '_quit']
 

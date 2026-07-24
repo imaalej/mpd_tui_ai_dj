@@ -548,7 +548,7 @@ class AdaptiveDJTUI:
         # urwid mode had them unbound.  One set of bindings now, everywhere.
         footer_text = urwid.Text(
             "[SPACE] Pause  [N] Skip  [V] Pass  [L] Like  [↑↓] History  "
-            "[ENTER] Reset/Replay  [+−] Zoom  [T] Pane  "
+            "[ENTER] Reset/Replay  [+−] Zoom  [B] Frame  [T] Pane  "
             "[,.] Vol  [←→] Seek  [I] Info  [Q] Quit",
             align="center",
         )
@@ -683,6 +683,8 @@ class AdaptiveDJTUI:
             self._like_track()
         elif key_lower == "i":
             self._show_model_info()
+        elif key_lower == "b":
+            self._cycle_scaffold()
         elif key_lower == "t":
             self._toggle_pane()
         elif key == "f1":
@@ -729,6 +731,18 @@ class AdaptiveDJTUI:
             self.cloud.reset_view()
         else:
             self._replay_focused()
+
+    def _cycle_scaffold(self):
+        """[B].  Cycle the spatial frame drawn behind the cloud.
+
+        Only over the cloud, like the other camera keys — and it prints the mode
+        it moved to, because the frame is a view setting with no other readout.
+        """
+        if not self._cloud_focused() or self.cloud is None:
+            return
+        mode = self.cloud.cycle_scaffold()
+        self.cloud._invalidate()
+        print(f"Cloud frame: {mode}", file=sys.stderr)
 
     def _zoom_in(self):
         if self._cloud_focused():
