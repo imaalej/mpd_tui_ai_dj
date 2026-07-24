@@ -2,7 +2,7 @@
 <style>
   :root {
     color-scheme: dark;
-    --term-bg: #05070b;
+    --term-bg: #15141b;
     --term-chrome: #0e131a;
     --edge: #1b2734;
     --ink: #93a3b2;
@@ -123,8 +123,10 @@
       <b>vibe_cloud.compute_frame</b> — the same Braille grid, the same painter's
       sort, the same 24-bit colours the TUI panel emits. It is checked, not
       trusted: 33 poses × 2,880 cells diffed against the Python renderer,
-      <b>0 dots and 0 glyphs differing</b>. Drag the panel to orbit it, and switch
-      frames on the right.</p>
+      <b>0 dots and 0 glyphs differing</b>. The panel sits on the terminal's real
+      background — <b>#15141b</b>, not a flattering near-black — because the frame's
+      faint end is only meaningful against the ground it is actually drawn on.
+      Drag the panel to orbit it, and switch frames on the right.</p>
   </header>
 
   <div class="stage">

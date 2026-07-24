@@ -261,6 +261,17 @@ projected back with `snap()` = `normalise(mean(top-25 library embeddings by dot(
   contest** — a cell holding a track keeps the track's colour. It carries index −1, so
   it can never claim a click either. Both are silent when broken: a frame that won
   would repaint tracks grey and nothing would raise.
+- **The frame's colours are derived from the terminal background, not chosen.**
+  They were first picked against the near-black `#05070b` of an archived browser
+  mock, which put `COL_SCAFFOLD_FAR` at **0.93×** the luminance of the real
+  terminal's background (`#15141b`) — the far half of the frame was *darker than
+  the ground it sat on*, i.e. invisible, and on this terminal it was. `_lift()`
+  now solves the blend exactly (luminance is linear in it) for a stated contrast
+  ratio over `TERMINAL_BACKGROUND`, with an absolute floor so a pure-black
+  terminal still gets a visible frame. **Change `TERMINAL_BACKGROUND` and the
+  three colours re-derive.** The cloud's own points were checked at the same time
+  and need nothing: the library's darkest track is luminance 75.9, so even
+  depth-shaded to `SHADE_MIN` it clears this background by 1.47×.
 - **"Lower opacity" is a dim colour plus stippling.** Braille has no alpha and eight
   dots share one cell colour. So a faint line is 24-bit's near-background grey
   (`COL_SCAFFOLD_FAR/NEAR`, depth-interpolated) *and* `SCAFFOLD_SPACING` — one sample
@@ -725,8 +736,17 @@ on.
 - Fedora, Python 3.14.6, numpy 1.26.4, urwid 3.0.5, transformers 5.1.0, torch/torchaudio.
 - Terminal: **Alacritty 0.17** inside **tmux 3.7b**. tmux reports the client as RGB-capable
   (`terminal-features` includes `RGB`) even though the inner `TERM` is `screen-256color`, so 24-bit
-  colour passes through. Alacritty supports neither sixel nor the kitty graphics protocol — which is
-  why album art needs an `ueberzugpp` X11 overlay.
+  colour passes through — verified, not assumed. Alacritty supports neither sixel nor the kitty
+  graphics protocol — which is why album art needs an `ueberzugpp` X11 overlay.
+- **Background `#15141b`** (Alacritty + the Aura theme). It is not decoration: the vibe cloud's
+  frame is derived from it (§4), and a screenshot taken on a darker ground flatters every dim
+  colour in the panel by a factor of three.
+- **The terminal font must cover U+2800–U+28FF**, or every cell of the cloud is drawn by whatever
+  fontconfig falls back to. Two common defaults do **not** cover it — `Noto Sans Mono` (the system
+  monospace default here, so an Alacritty with no `font.normal.family` set renders the whole cloud
+  through a fallback) and `DejaVu Sans Mono`. `Iosevka Nerd Font Mono` does, and its 0.5 em advance
+  against Noto's 0.6 em also packs the dots ~17% tighter, which is most of the difference between a
+  cloud that reads as a mass and one that reads as scattered specks.
 - MPD's real `music_directory` is `/mnt/storage/music`, read from `~/.config/mpd/mpd.conf` by
   `music_directory.py` rather than assumed. `/var/lib/mpd/music` is a symlink to it — the reason the
   old hardcoded default worked, and the reason it hid.

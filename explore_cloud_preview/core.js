@@ -15,9 +15,11 @@ export const SCAFFOLD_SPACING = 2.0;
 export const SHADOW_WEIGHT = 0.55;
 export const GNOMON_CELLS = 5;
 export const GNOMON_MARGIN = 3;
-export const COL_SCAFFOLD_FAR = 0x0f141a;
-export const COL_SCAFFOLD_NEAR = 0x55697e;
-export const COL_SCAFFOLD_LABEL = 0x7a8b9c;
+// Derived in Python from the terminal background (see `_lift`) and pasted here;
+// verify.mjs fails loudly if the two ever drift.
+export const COL_SCAFFOLD_FAR = 0x292931;
+export const COL_SCAFFOLD_NEAR = 0x777d87;
+export const COL_SCAFFOLD_LABEL = 0x8a929c;
 export const COL_COMET_HEAD = 0xffffff;
 export const COL_COMET_TRAIL = [0xffd7af, 0xffaf87, 0xff875f, 0xff5f00];
 export const COL_CURRENT = 0x00ffff;

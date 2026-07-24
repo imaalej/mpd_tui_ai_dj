@@ -133,9 +133,53 @@ COMET_MOVE_EPSILON = 0.05
 SCAFFOLD_EXTENT = 2.0
 SCAFFOLD_DIV = 4               # grid subdivisions per wall/floor
 SCAFFOLD_SPACING = 2.0         # dots between line samples: 1 = solid, 2 = dotted
-COL_SCAFFOLD_FAR = 0x0f141a    # the far side of the frame, barely above the bg
-COL_SCAFFOLD_NEAR = 0x55697e   # the near side — still well under any point
-COL_SCAFFOLD_LABEL = 0x7a8b9c  # axis names
+
+# **The frame's colours are derived from the terminal background, not chosen.**
+#
+# They were chosen once, against the near-black `#05070b` an archived browser mock
+# used, and the result was `COL_SCAFFOLD_FAR` at 0.93× the luminance of the real
+# terminal's background — the far half of the frame rendered *darker than the
+# ground it sat on*, which is invisible, and on this listener's terminal it was.
+# Exactly the §1 defect: a constant calibrated against a scale nobody measured.
+#
+# So state the background and the contrast wanted, and let the value follow.  The
+# floors are what keep the frame visible on a pure-black terminal, where any ratio
+# times zero is still zero.  (The cloud's own points were checked at the same
+# time and need nothing: the library's darkest track is luminance 75.9, so even
+# depth-shaded to `SHADE_MIN` it clears this background by 1.47×.)
+TERMINAL_BACKGROUND = 0x15141b   # §11: Alacritty + the Aura theme
+_SCAFFOLD_TINT = 0xC8D4E0        # the cool grey the frame blends toward
+
+
+def _luminance(colour: int) -> float:
+    """Rec. 709 relative luminance of a packed 0xRRGGBB, in 0–255."""
+    return (0.2126 * ((colour >> 16) & 0xFF)
+            + 0.7152 * ((colour >> 8) & 0xFF)
+            + 0.0722 * (colour & 0xFF))
+
+
+def _lift(background: int, ratio: float, floor: float) -> int:
+    """The background blended toward `_SCAFFOLD_TINT` until it reaches `ratio`×
+    its own luminance (never below `floor`).
+
+    Luminance is linear in the blend, so this solves exactly rather than
+    iterating — one line, and it re-derives itself if the background changes.
+    """
+    base = _luminance(background)
+    span = _luminance(_SCAFFOLD_TINT) - base
+    target = max(ratio * base, floor)
+    t = 0.0 if span <= 0 else min(1.0, max(0.0, (target - base) / span))
+    channels = []
+    for shift in (16, 8, 0):
+        lo = (background >> shift) & 0xFF
+        hi = (_SCAFFOLD_TINT >> shift) & 0xFF
+        channels.append(int(round(lo + (hi - lo) * t)))
+    return (channels[0] << 16) | (channels[1] << 8) | channels[2]
+
+
+COL_SCAFFOLD_FAR = _lift(TERMINAL_BACKGROUND, 2.0, 26.0)     # the far side
+COL_SCAFFOLD_NEAR = _lift(TERMINAL_BACKGROUND, 6.0, 100.0)   # the near side
+COL_SCAFFOLD_LABEL = _lift(TERMINAL_BACKGROUND, 7.0, 130.0)  # axis names
 # The gnomon is screen-anchored, so it is sized in **cells** rather than σ, and
 # it never depth-shades: it is an instrument, not part of the scene.
 GNOMON_CELLS = 5               # arm length, in character cells

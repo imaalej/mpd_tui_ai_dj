@@ -30,7 +30,13 @@ from vibe_cloud import (BRAILLE_BASE, SCAFFOLD_MODES, compute_frame,  # noqa: E4
                         point_rgb)
 
 OUT = Path(__file__).parent / "scratch_scaffold"
-BG = (8, 11, 17)
+
+# The *real* terminal background (§11: Alacritty, Aura theme, `#15141b`), not the
+# near-black the archived browser mock used.  A still rendered on #05070b flatters
+# every dim colour in the frame by a factor of three and hides the one question
+# that matters — whether the faint end of the scaffold clears the background at
+# all.  Override with --bg to check another theme.
+BG = (0x15, 0x14, 0x1b)
 
 # The presets to compare, plus a couple of combinations the cycle list does not
 # carry — the point of an exploration is to see more than the shipping options.
@@ -90,14 +96,14 @@ def cells(frame, cols, rows):
 PNG_FONT = "/home/gumibo/.local/share/fonts/IosevkaNerdFontMono-Regular.ttf"
 
 
-def to_png(grid, path, font_px=22):
+def to_png(grid, path, font_px=22, bg=None):
     from PIL import Image, ImageDraw, ImageFont
     font = ImageFont.truetype(PNG_FONT, font_px)
     # Cell size from the font's own metrics, so the mock has the terminal's
     # aspect ratio (a Braille dot is 2× taller than wide) rather than a guess.
     cell_px = (int(round(font.getlength("M"))), int(round(font_px * 1.16)))
     w, h = cell_px[0] * len(grid[0]), cell_px[1] * len(grid)
-    img = Image.new("RGB", (w, h), BG)
+    img = Image.new("RGB", (w, h), bg or BG)
     draw = ImageDraw.Draw(img)
     for cy, row in enumerate(grid):
         for cx, cell in enumerate(row):
@@ -176,7 +182,14 @@ def main():
     ap.add_argument("--rows", type=int, default=30)
     ap.add_argument("--frames", type=int, default=4, help="unused; kept for scripts")
     ap.add_argument("--tilt", type=float, default=0.5)
+    ap.add_argument("--bg", default=None,
+                    help="terminal background as #rrggbb (default: the Aura bg)")
     args = ap.parse_args()
+
+    global BG
+    if args.bg:
+        v = int(args.bg.lstrip("#"), 16)
+        BG = ((v >> 16) & 0xFF, (v >> 8) & 0xFF, v & 0xFF)
 
     coords, rgb, labels = load_cloud()
     comet = simulate_comet(coords)

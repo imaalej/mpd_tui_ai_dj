@@ -261,3 +261,41 @@ def test_b_is_case_insensitive_like_every_other_binding(tui):
     _cloud_ready(tui)
     tui._handle_input("B")
     assert tui.cloud.scaffold != vc.SCAFFOLD_DEFAULT
+
+
+# ── The frame has to clear the ground it is drawn on ──────────────────────────
+
+
+def test_the_frame_clears_the_terminal_background():
+    """The first cut of these colours was picked against a near-black browser
+    mock and came out at 0.93× the real terminal background's luminance — the far
+    half of the frame was darker than the ground it sat on, which is invisible.
+    The ratios are the claim; this is the test of it."""
+    bg = vc._luminance(vc.TERMINAL_BACKGROUND)
+    assert vc._luminance(vc.COL_SCAFFOLD_FAR) / bg == pytest.approx(2.0, abs=0.05)
+    assert vc._luminance(vc.COL_SCAFFOLD_NEAR) / bg == pytest.approx(6.0, abs=0.05)
+    assert vc._luminance(vc.COL_SCAFFOLD_LABEL) > vc._luminance(vc.COL_SCAFFOLD_NEAR)
+
+
+def test_the_frame_stays_visible_on_any_background():
+    """Derived, so it must re-derive — including on a pure black terminal, where
+    a pure ratio collapses to zero and the floor is the only thing left."""
+    for bg in (0x000000, 0x15141b, 0x1e1e2e, 0x2b3038):
+        far = vc._lift(bg, 2.0, 26.0)
+        near = vc._lift(bg, 6.0, 100.0)
+        assert vc._luminance(far) >= max(1.9 * vc._luminance(bg), 25.0)
+        assert vc._luminance(near) > vc._luminance(far) + 40
+        for shift in (16, 8, 0):
+            assert 0 <= (far >> shift) & 0xFF <= 255
+
+
+def test_the_shading_ramp_never_dips_below_the_far_colour(scene):
+    """`_shade_between` interpolates far→near, and the shadow's weight scales the
+    *near* end down — it must not push a dot below the far end, which is the
+    visibility floor everything else rests on."""
+    for w in (vc.SHADOW_WEIGHT, 1.0):
+        ramp = vc._shade_between(np.linspace(0, 1, 32) * w,
+                                 vc.COL_SCAFFOLD_FAR, vc.COL_SCAFFOLD_NEAR)
+        lums = [vc._luminance(int(c)) for c in ramp]
+        assert min(lums) >= vc._luminance(vc.COL_SCAFFOLD_FAR) - 0.5
+        assert lums == sorted(lums)
