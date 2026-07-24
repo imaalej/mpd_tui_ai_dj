@@ -41,6 +41,12 @@ A terminal-based DJ that learns your taste in real time and curates a continuous
   claim it, and nothing had ever been run there. `start.sh` no longer uses any bash 4+ syntax, so it
   should survive the bash 3.2 macOS ships, but album art will not work: the only two working
   renderers are `ueberzug` and `ueberzugpp`, and both draw into an X11/Wayland surface.
+- **Album art under tmux with more than one attached client is not supported.** ueberzug/ueberzugpp
+  position the cover in absolute terminal coordinates against a single output surface; tmux multiplexing
+  across clients of differing geometry has no single truth for where a given cell is, so the cover
+  renders in one client only and attaching or detaching another can knock it out until a resize brings
+  it back. This is a limitation of overlay image protocols under tmux, not something the app can fix —
+  a single attached client (tmux or not) is the supported case.
 - **About 1.3 GB of free disk** for the first run — 1.15 GB of model cache and a 46 MB embedding file.
   See "First run" below for where that goes.
 - A GPU is optional. See the table below for what it costs without one.
