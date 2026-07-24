@@ -83,6 +83,39 @@ def test_centroid_shape_is_checked(make_artifact):
     assert not result['valid'] and 'centroid is' in result['error']
 
 
+def test_a_stale_centroid_of_the_right_shape_is_refused(make_artifact):
+    """
+    inspection D4: the exact C5 failure a shape-only check misses.  A centroid
+    that is the right length but not the mean of the embeddings passes every
+    structural test and then centres every downstream vector on the wrong
+    origin — silently, which is worse than an error.
+    """
+    result = validate_embeddings(make_artifact(centroid=np.ones(512, np.float32)))
+    assert not result['valid']
+    assert 'centroid is not the mean' in result['error']
+
+
+def test_non_monotonic_window_offsets_are_refused(make_artifact):
+    """
+    inspection D4: offsets that run backwards would hand one track's windows to
+    another and still satisfy the length and end-position checks.
+    """
+    bad = np.array([0, 3, 6, 9, 12, 15, 18, 21, 24, 27, 33, 30, 36], dtype=np.int32)
+    result = validate_embeddings(make_artifact(window_offsets=bad))
+    assert not result['valid']
+    assert 'monotonic' in result['error']
+
+
+def test_unnormalised_windows_are_refused(make_artifact):
+    """
+    inspection D4: only the pooled embeddings were norm-checked; the per-window
+    matrix is L2-normalised at generation and the pooling assumes it.
+    """
+    result = validate_embeddings(make_artifact(windows=np.full((36, 512), 0.5, np.float32)))
+    assert not result['valid']
+    assert 'windows not normalised' in result['error']
+
+
 def test_a_missing_file_is_an_error_not_an_exception(tmp_path):
     result = validate_embeddings(tmp_path / 'nothing.npz')
     assert not result['valid'] and 'failed to validate' in result['error']

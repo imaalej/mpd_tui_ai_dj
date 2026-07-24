@@ -336,9 +336,28 @@ building it separately invites the two to drift apart.
 | `prompts` | `(D,)` unicode | The rendered prompt (`"This is a recording of {} music."`), kept so the template is auditable. |
 | `text_embeddings` | `(D, 512)` float32 | CLAP text-tower output, L2-normalised. |
 | `mean`, `std` | `(D,)` float32 | Per-descriptor over the centred library — the z-score baseline. Stored rather than computed at startup so the correct path is the only path. |
+| `axis_labels` | `(3,)` unicode | **Mood axes** for the vibe cloud (Phase 3, inspection G3). The auto-selected legible triad — on this library **Tone · Saturation · Organic**. |
+| `axis_directions` | `(3, D)` float32 | Unit directions in the centred audio space, each `normalise(mean(high-pole text) − mean(low-pole text))`. |
+| `axis_mean`, `axis_std` | `(3,)` float32 | Raw-projection calibration over the library, so a runtime coordinate is `(v·dir − mean)/std` — the vibe's z-score on that axis. |
+
+The four `axis_*` keys are **additive**: `descriptor_bank.SCHEMA_VERSION` is unchanged, an older bank
+without them still loads for the readout, and `MoodAxes.load()` (in `mood_axes.py`) returns `None`
+(reported) when they are absent. They are selected and calibrated **against this library** — like the
+`mean`/`std` above — and stored beside the descriptors because they derive from the text vectors plus the
+centred library and so re-fit with a cheap `--descriptors-only` rebuild, no audio re-embedding. The
+choice of triad is per-user: another library can favour a different one (here Intensity and Saturation
+correlate 0.98, so only one of the pair can be used). `explore_mood_axes.py` imports the same selection.
 
 **No `anchors` key.** Nothing needs them. They are one line to derive if free-text steering is ever
 built; do not add them speculatively.
+
+`embeddings_io.validate_embeddings()` was strengthened in Phase 3 (inspection D4) beyond shape checks:
+the **centroid must equal `mean(embeddings)`** (a stale one would silently centre on the wrong origin —
+the C5 failure the schema exists to prevent), `window_offsets` must be **monotonic non-decreasing** (a
+backwards index would hand one track's windows to another and still validate), and the **per-window rows
+must be L2-normalised**, not only the pooled embeddings. The artifact writes (`_save_embeddings`, the
+partial checkpoint, the descriptor bank) all go through `embeddings_io.atomic_savez` (temp-then-rename),
+so a killed or full-disk write never corrupts a completed file in place (inspection D3).
 
 ---
 
@@ -450,7 +469,7 @@ CPU mel extraction, so `--workers` matters more than `--batch-size`; on CPU the 
 
 ## 8 · Testing
 
-`python3 -m pytest tests` — **603 tests, green, ~19 s.** (591 after Phase 1, 542 before it.)
+`python3 -m pytest tests` — **618 tests, green, ~19 s.** (603 after Phase 2, 591 after Phase 1, 542 before it.)
 
 The suite is behavioural, not existence checks. Two of the worst defects in this project's history
 survived a green suite of the latter. What that means in practice, and what to preserve:

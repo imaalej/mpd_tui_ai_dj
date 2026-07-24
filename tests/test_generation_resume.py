@@ -15,7 +15,11 @@ speed line divided by a duration that can be zero.
 import numpy as np
 import pytest
 
-from embedding_generator import CLAP_AVAILABLE, CLAPEmbeddingGenerator
+from embedding_generator import (
+    CLAP_AVAILABLE,
+    CLAPEmbeddingGenerator,
+    EmbeddingGenerationError,
+)
 
 pytestmark = pytest.mark.skipif(
     not CLAP_AVAILABLE, reason="torch/transformers not installed"
@@ -47,9 +51,12 @@ def test_a_partial_round_trips_exactly(generator, tmp_path, fake_results):
     path = tmp_path / 'partial.npz'
     generator._save_partial(pooled, windows, order, path)
 
-    restored_pooled, restored_windows = generator._load_partial(path)
+    restored_pooled, restored_windows, restored_batch = generator._load_partial(path)
 
     assert list(restored_pooled) == order
+    # inspection D2: the batch size the checkpoint was built under is recorded so
+    # a resume can refuse a different one.
+    assert restored_batch == generator.batch_size
     for name in order:
         assert np.array_equal(restored_pooled[name], pooled[name])
         assert np.array_equal(restored_windows[name], windows[name])
@@ -92,13 +99,19 @@ def test_a_partial_listing_tracks_the_run_does_not_want_is_ignored(generator, fa
     assert names == ['a.flac', 'c.flac']
 
 
-def test_a_corrupt_partial_is_survived_rather_than_fatal(generator, tmp_path):
+def test_a_corrupt_partial_is_a_hard_error(generator, tmp_path):
+    """
+    inspection D3: the old behaviour warned and returned empty, so a truncated
+    partial silently discarded every already-embedded track and looked like a
+    normal slow run.  With atomic writes a partial can no longer be truncated by
+    an interrupted save, so an unreadable one is real damage — it must stop the
+    run and name the file, not quietly start over.
+    """
     path = tmp_path / 'partial.npz'
     path.write_bytes(b'not an npz at all')
 
-    with pytest.warns(UserWarning):
-        pooled, windows = generator._load_partial(path)
-    assert pooled == {} and windows == {}
+    with pytest.raises(EmbeddingGenerationError, match="unreadable"):
+        generator._load_partial(path)
 
 
 def test_stacking_nothing_does_not_crash_the_run(generator):
@@ -150,8 +163,89 @@ def test_an_interrupt_checkpoints_before_it_propagates(generator, tmp_path, monk
     assert not out.exists(), "an interrupted run must not write a truncated library"
     assert partial.exists(), "the two completed tracks were thrown away"
 
-    pooled, _ = generator._load_partial(partial)
+    pooled, _, _ = generator._load_partial(partial)
     assert list(pooled) == ['a.flac', 'b.flac']
+
+
+def test_atomic_save_leaves_no_temp_files_and_no_partial_on_failure(
+        generator, tmp_path, monkeypatch):
+    """
+    inspection D3: a save must be all-or-nothing.  A clean save leaves only the
+    destination (no stray temp), and a save that raises mid-write must leave the
+    destination and directory untouched rather than a truncated file — and must
+    not leak the temp file it was writing to.
+    """
+    import numpy as np
+
+    good = {'x': np.arange(4, dtype=np.float32)}
+    dest = tmp_path / 'ok.npz'
+    generator._atomic_savez(dest, good)
+    assert dest.exists()
+    assert [p.name for p in tmp_path.iterdir()] == ['ok.npz'], "a temp file leaked"
+
+    # A saver that dies mid-write: the destination must not appear and the temp
+    # file must be cleaned up.
+    def boom(*a, **k):
+        raise RuntimeError("disk full")
+
+    monkeypatch.setattr(np, 'savez', boom)
+    dest2 = tmp_path / 'bad.npz'
+    with pytest.raises(RuntimeError, match="disk full"):
+        generator._atomic_savez(dest2, good)
+    assert not dest2.exists()
+    assert [p.name for p in tmp_path.iterdir()] == ['ok.npz'], "a temp file leaked on failure"
+
+
+def test_resume_refuses_a_different_batch_size(tmp_path, monkeypatch):
+    """
+    inspection D2: rows from two batch sizes are not bit-identical, so splicing
+    them into one artifact is silent corruption.  A resume under a different
+    --batch-size must refuse rather than proceed.
+    """
+    import numpy as np
+
+    gen32 = CLAPEmbeddingGenerator(device='cpu', batch_size=32)
+    out = tmp_path / 'library.npz'
+    partial = tmp_path / 'library.partial.npz'
+
+    matrix = np.full((1, 4), 0.5, dtype=np.float32)
+    gen32._save_partial({'a.flac': CLAPEmbeddingGenerator.pool(matrix)},
+                        {'a.flac': matrix}, ['a.flac'], partial)
+
+    gen16 = CLAPEmbeddingGenerator(device='cpu', batch_size=16)
+    monkeypatch.setattr(gen16, 'load_model', lambda *a, **k: None)
+    with pytest.raises(EmbeddingGenerationError, match="batch-size"):
+        gen16.generate_library(['a.flac', 'b.flac'], tmp_path, out, resume=True)
+
+
+def test_resume_accepts_the_same_batch_size(tmp_path, monkeypatch):
+    """The other half of D2: a matching batch size resumes without complaint."""
+    import numpy as np
+
+    from embedding_generator import PreparedTrack
+
+    gen = CLAPEmbeddingGenerator(device='cpu', batch_size=32)
+    out = tmp_path / 'library.npz'
+    partial = tmp_path / 'library.partial.npz'
+
+    matrix = np.full((1, 4), 0.5, dtype=np.float32)
+    gen._save_partial({'a.flac': CLAPEmbeddingGenerator.pool(matrix)},
+                      {'a.flac': matrix}, ['a.flac'], partial)
+
+    def fake_prepare(track_file, music_dir):
+        return PreparedTrack(track_file=track_file, n_windows_total=1)
+
+    def fake_embed(prepared):
+        return np.full((1, 4), 0.25, dtype=np.float32)
+
+    monkeypatch.setattr(gen, 'load_model', lambda *a, **k: None)
+    monkeypatch.setattr(gen, 'prepare_track', fake_prepare)
+    monkeypatch.setattr(gen, 'embed_prepared', fake_embed)
+
+    stats = gen.generate_library(['a.flac', 'b.flac'], tmp_path, out, resume=True)
+    assert stats['resumed'] == 1
+    assert out.exists()
+    assert not partial.exists(), "a completed run should clean up its partial"
 
 
 def test_pooling_a_single_window_track_is_that_window(rng):

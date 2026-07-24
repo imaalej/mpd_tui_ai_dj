@@ -42,32 +42,14 @@ from pathlib import Path
 
 import numpy as np
 
-
-# ── Candidate axes, poles drawn only from the descriptor bank's own words ──────
-#
-# (low pole → high pole).  Missing words are dropped with a warning; an axis
-# survives as long as each pole keeps at least one word.
-CANDIDATE_AXES = {
-    "Intensity":  (["calm", "gentle", "mellow", "serene"],
-                   ["aggressive", "intense", "frenetic", "energetic"]),
-    "Tone":       (["melancholic", "sombre", "wistful", "menacing"],
-                   ["uplifting", "joyful", "triumphant", "sunlit"]),
-    "Saturation": (["sparse", "spacious", "polished"],
-                   ["dense", "distorted", "gritty"]),
-    "Organic":    (["acoustic", "orchestral", "guitar-driven", "piano-led"],
-                   ["electronic", "synth-heavy"]),
-    "Warmth":     (["cold"],
-                   ["warm"]),
-    "Groove":     (["free-time", "halftime"],
-                   ["danceable", "groovy", "motorik"]),
-    "Brightness": (["nocturnal", "cavernous"],
-                   ["sunlit", "shimmering"]),
-    "Drama":      (["intimate"],
-                   ["cinematic", "cavernous"]),
-}
-
-# The triad the humans currently like — reported alongside the auto pick.
-PREFERRED = ("Intensity", "Tone", "Saturation")
+# The candidate axes, the pole→direction construction and the balanced selection
+# are the *production* code now (mood_axes.py, under src/), computed once at
+# embedding-generation time and stored beside the descriptors.  This script is
+# the offline proof of that path, so it imports the same logic rather than
+# carrying a second copy that could drift from what actually ships.
+sys.path.insert(0, str(Path(__file__).resolve().parent / "src"))
+import mood_axes  # noqa: E402
+from mood_axes import CANDIDATE_AXES, PREFERRED, build_axis  # noqa: E402
 
 
 def load_centred_library(path: Path):
@@ -90,25 +72,6 @@ def load_bank(path: Path):
     norms[norms < 1e-12] = 1.0
     text = text / norms
     return {lab: text[i] for i, lab in enumerate(labels)}
-
-
-def build_axis(name, low, high, bank):
-    """Unit direction for one axis, or None if a pole has no words in the bank."""
-    def pole(words):
-        vecs = [bank[w] for w in words if w in bank]
-        missing = [w for w in words if w not in bank]
-        if missing:
-            print(f"  [{name}] not in bank, skipped: {', '.join(missing)}",
-                  file=sys.stderr)
-        return (np.mean(vecs, axis=0) if vecs else None)
-
-    lo, hi = pole(low), pole(high)
-    if lo is None or hi is None:
-        print(f"  [{name}] dropped — a pole ended up empty", file=sys.stderr)
-        return None
-    d = hi - lo
-    n = np.linalg.norm(d)
-    return d / n if n > 1e-12 else None
 
 
 def ascii_scatter(x, y, xlabel, ylabel, w=46, h=15):
@@ -215,7 +178,12 @@ def main():
         return det * (strength / 3.0)
 
     ranked_bal = sorted(triads, key=balanced, reverse=True)
-    recommended = ranked_bal[0]
+    # The pick that actually ships: computed by the production selector, not by
+    # this script's own copy, so the "← recommended" tag can never disagree with
+    # what generation stores in descriptors.npz.
+    _labels = list(bank)
+    _text = np.stack([bank[lab] for lab in _labels])
+    recommended = tuple(mood_axes.select_axes(_text, _labels, library).labels)
 
     print("\n── Most-orthogonal triads (det of correlation submatrix)")
     for tri in ranked[:5]:

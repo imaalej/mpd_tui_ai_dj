@@ -24,6 +24,7 @@ from typing import List, Optional, Sequence
 import numpy as np
 
 import descriptor_bank
+import mood_axes
 from config import config
 from embedding_generator import (
     CLAPEmbeddingGenerator,
@@ -31,6 +32,7 @@ from embedding_generator import (
     check_clap_available,
 )
 from embeddings_io import (
+    atomic_savez,
     centre,
     get_embedding_stats,
     similarity_report,
@@ -198,8 +200,21 @@ def build_descriptor_bank(
     else:
         print("\n  dropped: none — every descriptor discriminates this library")
 
-    output_file.parent.mkdir(parents=True, exist_ok=True)
-    np.savez_compressed(output_file, **bank)
+    # Mood axes for the vibe cloud (Phase 4).  Selected against *this* library
+    # and calibrated here, in the same run as the descriptor mean/std, so the two
+    # cannot drift apart — and stored beside them (additive keys, bank schema
+    # unchanged; see mood_axes.py).  Derived purely from the bank's text vectors
+    # and the centred library, so a `--descriptors-only` rebuild refreshes them
+    # without re-embedding any audio.
+    selection = mood_axes.select_axes(bank['text_embeddings'], bank['labels'], library)
+    bank.update(mood_axes.selection_arrays(selection))
+    print(f"\n  mood axes (auto-selected legible triad, z-scored per library):")
+    print(f"    {' · '.join(selection.labels)}")
+    for name, score in selection.diagnostics['balanced_top'][:3]:
+        tag = "   ← chosen" if name == selection.labels else ""
+        print(f"      balanced {score:.3f}   {' · '.join(name)}{tag}")
+
+    atomic_savez(output_file, bank, compressed=True)
     print(f"\n✓ Descriptor bank written to {output_file} "
           f"({format_size(output_file.stat().st_size)})")
     return 0

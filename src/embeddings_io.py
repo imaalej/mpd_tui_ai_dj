@@ -20,6 +20,8 @@ The artifact is the contract between the generation run and everything else
 """
 
 import json
+import os
+import tempfile
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, Sequence, Tuple
@@ -27,6 +29,39 @@ from typing import Any, Dict, Sequence, Tuple
 import numpy as np
 
 SCHEMA_VERSION = 2
+
+
+def atomic_savez(path: Path, arrays: Dict[str, Any], compressed: bool = False) -> None:
+    """
+    Write an `.npz` all-or-nothing (inspection D3).
+
+    Phase 2 added `album_art._atomic_write_bytes`, but that helper is bytes-only
+    and cannot wrap `np.savez`.  This mirrors the *pattern* rather than reusing
+    it: save to a uniquely-named temp file in the destination directory, then
+    `os.replace` onto the destination.  A same-directory rename is the atomic
+    step, so a reader ever sees only the old complete file or the new complete
+    file — never a half-written one that a kill or a full disk left behind.
+
+    Lives here, in the pure-numpy half, so both the generator (`track_embeddings`,
+    the partial checkpoint) and the descriptor-bank writer can share it without
+    the player having to import torch.
+    """
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    saver = np.savez_compressed if compressed else np.savez
+    # mkstemp with a .npz suffix so np.savez does not append a second one.
+    fd, tmp_name = tempfile.mkstemp(dir=str(path.parent), suffix='.npz')
+    os.close(fd)
+    tmp = Path(tmp_name)
+    try:
+        saver(tmp, **arrays)
+        os.replace(tmp, path)
+    except BaseException:
+        # Includes KeyboardInterrupt: leave the destination untouched and drop
+        # the incomplete temp rather than leaking it.
+        if tmp.exists():
+            tmp.unlink()
+        raise
 
 REQUIRED_KEYS = (
     'schema_version', 'track_files', 'embeddings', 'centroid',
@@ -122,6 +157,16 @@ def validate_embeddings(embeddings_file: Path) -> Dict[str, Any]:
                     'error': (f'window_offsets ends at {int(offsets[-1])} but there are '
                               f'{windows.shape[0]} windows'),
                 }
+            # inspection D4: the CSR index must not run backwards.  A shape-only
+            # check would accept offsets that hand one track's windows to
+            # another — the same class of silent, valid-looking corruption the
+            # partial-resume round-trip test guards against, but on the final
+            # artifact.
+            if np.any(np.diff(offsets.astype(np.int64)) < 0):
+                return {
+                    'valid': False,
+                    'error': 'window_offsets is not monotonic non-decreasing',
+                }
             if windows.shape[0] and windows.shape[1] != embeddings.shape[1]:
                 return {
                     'valid': False,
@@ -136,6 +181,38 @@ def validate_embeddings(embeddings_file: Path) -> Dict[str, Any]:
                     'error': (f'embeddings not normalised '
                               f'(norms {norms.min():.3f} – {norms.max():.3f})'),
                 }
+
+            # inspection D4: the centroid is applied on load as `E − centroid`
+            # (C5).  Its *shape* was checked above, but a stale or hand-edited
+            # centroid would silently centre every downstream vector on the wrong
+            # origin — exactly the anisotropy failure the schema exists to
+            # prevent — while validating.  So it must actually be the mean of the
+            # stored embeddings.  Checked after the norm gate so an unnormalised
+            # file reports that first.
+            expected_centroid = np.asarray(embeddings, dtype=np.float64).mean(axis=0)
+            centroid_dev = float(np.abs(np.asarray(centroid, dtype=np.float64)
+                                        - expected_centroid).max())
+            if centroid_dev > 1e-4:
+                return {
+                    'valid': False,
+                    'error': (f'centroid is not the mean of embeddings '
+                              f'(max deviation {centroid_dev:.4g}) — a stale centroid '
+                              f'would centre on the wrong origin (C5)'),
+                }
+
+            # inspection D4: only the pooled embeddings were checked for unit
+            # length; the per-window matrix is L2-normalised at generation and
+            # everything that reasons over it (pooling, any future per-window
+            # retrieval) assumes so.
+            if windows.shape[0]:
+                window_norms = np.linalg.norm(windows, axis=1)
+                if not np.allclose(window_norms, 1.0, atol=0.01):
+                    return {
+                        'valid': False,
+                        'error': (f'windows not normalised '
+                                  f'(norms {window_norms.min():.3f} – '
+                                  f'{window_norms.max():.3f})'),
+                    }
 
             return {
                 'valid': True,
