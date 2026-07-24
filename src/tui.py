@@ -902,6 +902,13 @@ class AdaptiveDJTUI:
         )
         orig = self.loop.widget
         self.loop.widget = overlay
+        # The album art is a separate X11/Wayland surface, not part of urwid's
+        # canvas — so the overlay box draws *over* the TUI but leaves the cover
+        # sitting on top of the inspector (inspection F3).  Take it down while `[I]`
+        # is open (nothing in the loop below re-sends it), and mark it dirty on
+        # the way out so the next tick repaints it in place.
+        if self.show_album_art:
+            self.album_art_renderer.clear()
         # Wake even with no keypress.  This loop owns the thread that runs the
         # session bookkeeping, and the overlay can stay open indefinitely now
         # that ↑↓ no longer dismiss it — without a timeout, a track that starts
@@ -935,6 +942,11 @@ class AdaptiveDJTUI:
             except Exception:
                 pass
             self.loop.widget = orig
+            # Force the cover back on the next `_render_art`: `clear()` above
+            # already dropped the render key, but a window resize while `[I]`
+            # was open could otherwise leave it stale.
+            if self.show_album_art:
+                self.album_art_renderer.force_redraw()
         return lines
 
     # ── Periodic update ───────────────────────────────────────────────────────
