@@ -213,7 +213,11 @@ projected back with `snap()` = `normalise(mean(top-25 library embeddings by dot(
 - **The album-art geometry is derived from the widget tree,** not hand-counted. Two of the four
   original constants were wrong. Same for the `[I]` overlay's inner size, which asks
   `Overlay.calculate_padding_filler()` / `top_w_size()` rather than recomputing the `("relative", 70)`
-  arithmetic.
+  arithmetic. **The footer is a flow widget and its `rows()` feeds `_art_geometry()`**, so its wrapped
+  height is part of the derivation. Phase 1's `[V] Pass` binding lengthened the footer, which now wraps
+  to an extra row at ~100–120 cols and at < 60 cols (unchanged at 80×24) — the art region is one row
+  shorter at those widths. This is derived, not broken, but Phase 2's resize/geometry work (C2) should
+  expect footer height to vary with width.
 - **The drift figure is a count of held words, not a cosine.** The cosine has p10 = 0.948 and median
   = 0.989 over 40 real sessions, so it reads as "0.99" forever — the same compressed-scale defect the
   readout exists to fix. The cosine is still computed and shown in `[I]` with its distribution beside
@@ -431,10 +435,16 @@ CPU mel extraction, so `--workers` matters more than `--batch-size`; on CPU the 
 
 ## 8 · Testing
 
-`python3 -m pytest tests` — **542 tests, green, ~18 s.**
+`python3 -m pytest tests` — **591 tests, green, ~19 s.** (542 before Phase 1.)
 
 The suite is behavioural, not existence checks. Two of the worst defects in this project's history
 survived a green suite of the latter. What that means in practice, and what to preserve:
+
+- **Modules live in `src/` now (G2).** `conftest.py` puts `src/` on `sys.path`, so the flat imports
+  (`from album_art import …`) still work. But a test that reads a module's **source** off disk — for an
+  AST or regex check — must resolve `parent.parent / "src" / "<module>.py"`, not `parent.parent /
+  "<module>.py"`. `test_mpd_controller` and `test_tui_display` were fixed this way; a new one (e.g. an
+  `album_art.py` source check in Phase 2) has to follow suit.
 
 - **`FakeMPD` is itself under test.** `tests/test_fake_mpd.py` asserts the double against §5 row by
   row. It has already earned that: a fixture defaulting to `consume off` silently put every component
