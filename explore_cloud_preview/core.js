@@ -12,6 +12,8 @@ export const BASE_HALF_EXTENT = 3.0;
 export const SCAFFOLD_EXTENT = 2.0;
 export const SCAFFOLD_MARGIN = 1.04;
 export const SCAFFOLD_EXTENT_FLOOR = 0.5;
+export const DEFAULT_TILT = 0.5;
+export const FIT_TILT = DEFAULT_TILT;   // the pose the box is fitted at, once
 const WORLD_SCAFFOLDS = ["cage", "corners", "walls", "floor", "triad", "shadow"];
 export const SCAFFOLD_DIV = 4;
 export const SCAFFOLD_SPACING = 2.0;
@@ -237,12 +239,15 @@ export function computeFrame(data, cols, rows, azimuth, tilt, zoom, scaffold, op
   const tokens = new Set(String(scaffold).split("+").filter((t) => t && t !== "off"));
   const ext = asExtent(opts.extent, data.coords);
   if (WORLD_SCAFFOLDS.some((t) => tokens.has(t))) {
-    // Worst case over azimuth, not this frame's — a scale that tracked the
-    // current angle would make the cloud pulse as it spins.
+    // **`tilt` must not appear here.**  Fitting at the current tilt rescaled the
+    // scene continuously as you dragged — a 70% swing between the stops, which
+    // reads as a lurching dolly and makes people queasy.  The box is fitted once
+    // at the reference pose and held; rotation is rotation.  Azimuth is likewise
+    // worst-cased into the x–z diagonal so a spin cannot pulse it.
     const diagonal = Math.hypot(ext[0], ext[2]);
     const reachX = Math.max(diagonal, 1e-6);
-    const reachY = Math.max(Math.abs(Math.cos(tilt)) * ext[1]
-                            + Math.abs(Math.sin(tilt)) * diagonal, 1e-6);
+    const reachY = Math.max(Math.abs(Math.cos(FIT_TILT)) * ext[1]
+                            + Math.abs(Math.sin(FIT_TILT)) * diagonal, 1e-6);
     scale = Math.min((dotW / 2 - 1) / reachX, (dotH / 2 - 1) / reachY);
   }
   scale *= zoom;

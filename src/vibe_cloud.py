@@ -202,6 +202,12 @@ SHADOW_WEIGHT = 0.55           # the cast shadow, relative to a ruled line
 _WORLD_SCAFFOLDS = frozenset(
     {"cage", "corners", "walls", "floor", "triad", "shadow"})
 
+# The pose the box is fitted at, once, and then held.  It is `DEFAULT_TILT` — the
+# tilt the view opens at and returns to on `[ENTER]` — so the frame exactly fills
+# the panel in the view you actually sit in, and a tilt away from it rotates
+# rather than zooms.  See `frame_scale`.
+FIT_TILT = DEFAULT_TILT
+
 # The presets `[B]` cycles, chosen by eye from the ten the offline explorer
 # renders (`explore_cloud_scaffold.py`).  Tokens compose with '+', so a
 # combination needs no new constant and the ones not in this list — `walls`,
@@ -567,6 +573,46 @@ def gnomon_dots(R: np.ndarray, cols: int, rows: int,
     return (np.concatenate(xs), np.concatenate(ys), np.concatenate(cs), text)
 
 
+def frame_scale(cols: int, rows: int, zoom: float = 1.0,
+                scaffold: str = "off", extent=None,
+                coords: Optional[np.ndarray] = None) -> float:
+    """
+    Dots per z-score unit for this panel — **deliberately blind to the camera**.
+
+    The camera does not appear in the signature, and that is the point.  When the
+    fit was evaluated at the *current* tilt the scene rescaled continuously as you
+    dragged: tilting from flat to the stop zoomed the whole cloud out by 41%, so a
+    rotation read as a lurching dolly and made people queasy.  Rotation must be
+    rotation.  A 3-D viewer's projection scale is a property of the scene and the
+    viewport, never of where the camera happens to be looking from.
+
+    So the box is fitted once, at the **reference pose** (`FIT_TILT`, the tilt the
+    view opens and resets to), and held.  At that pose the box exactly fills the
+    panel; tilt far past it and its corners leave the frame, which is what looking
+    at a box from a steep angle is supposed to do.
+
+    The reaches are the worst case over azimuth — `x' = cos·x + sin·z` makes that
+    the x–z diagonal — so a spin cannot pulse it either.  Fitting per axis is what
+    earns the non-cubic box: the panel is 192×120 dots, so a wide flat box spends
+    the width instead of paying for it in height.  The budget is `half − 1`, not
+    `half`: a dot rounded exactly onto `dot_h` is one index past the end and
+    vanishes, a corner missing for one dot of greed.  Zoom multiplies afterwards,
+    because zooming *is* meant to change the scale.
+    """
+    dot_w, dot_h = 2 * cols, 4 * rows
+    base = (min(dot_w, dot_h) / 2.0) / BASE_HALF_EXTENT
+    tokens = {t for t in str(scaffold).split("+") if t and t != "off"}
+    if not (tokens & _WORLD_SCAFFOLDS):
+        return base * zoom
+    e = _as_extent(extent, coords)
+    diagonal = math.hypot(e[0], e[2])
+    reach_x = max(diagonal, 1e-6)
+    reach_y = max(abs(math.cos(FIT_TILT)) * e[1]
+                  + abs(math.sin(FIT_TILT)) * diagonal, 1e-6)
+    return min((dot_w / 2.0 - 1.0) / reach_x,
+               (dot_h / 2.0 - 1.0) / reach_y) * zoom
+
+
 def _shade_between(t: np.ndarray, far: int, near: int) -> np.ndarray:
     """Packed colours interpolated far→near by `t` ∈ [0, 1], vectorised."""
     lo = np.array([(far >> 16) & 0xFF, (far >> 8) & 0xFF, far & 0xFF], float)
@@ -608,32 +654,12 @@ def compute_frame(coords: np.ndarray,
         return frame
 
     dot_w, dot_h = 2 * cols, 4 * rows
-    half_dots = min(dot_w, dot_h) / 2.0
-    scale = half_dots / BASE_HALF_EXTENT
     cx0, cy0 = dot_w / 2.0, dot_h / 2.0
 
     extent3 = _as_extent(extent, coords)
     tokens = {t for t in str(scaffold).split("+") if t and t != "off"}
-    if tokens & _WORLD_SCAFFOLDS:
-        # **Fit the box to the panel** at zoom 1, so it always closes on screen.
-        # Both reaches are the worst case *over azimuth*, not this frame's — a
-        # scale that tracked the current angle would make the cloud pulse as it
-        # spins.  With `x' = cos·x + sin·z` that worst case is the x–z diagonal,
-        # and the vertical adds the tilted y.  Fitting per axis is what makes a
-        # non-cubic box worth having: the panel is 192×120 dots, so a box that is
-        # wide and flat can use the width instead of paying for it in height.
-        #
-        # The budget is `half − 1`, not `half`: the far corner sits at
-        # `centre + reach·scale`, and a dot rounded exactly onto `dot_h` is one
-        # past the last index and silently vanishes — a corner missing from the
-        # box for one dot of greed.  Zoom is applied *after*, so zooming in still
-        # overflows the panel as it should: this fits the box, not the camera.
-        diagonal = math.hypot(extent3[0], extent3[2])
-        reach_x = max(diagonal, 1e-6)
-        reach_y = max(abs(math.cos(tilt)) * extent3[1]
-                      + abs(math.sin(tilt)) * diagonal, 1e-6)
-        scale = min((dot_w / 2.0 - 1.0) / reach_x, (dot_h / 2.0 - 1.0) / reach_y)
-    scale *= zoom
+    # The scale is the camera's business only through `zoom`: see `frame_scale`.
+    scale = frame_scale(cols, rows, zoom, scaffold, extent3)
 
     R = rotation_matrix(azimuth, tilt)          # once, reused for cloud + comet
 

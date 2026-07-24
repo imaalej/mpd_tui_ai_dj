@@ -98,31 +98,60 @@ def test_every_mode_keeps_hits_pointing_at_real_tracks(scene):
         assert seen.size and seen.max() < len(coords)
 
 
-def test_the_box_closes_on_screen_at_every_tilt():
-    """Drive the real projection with the eight cube corners *as* the cloud: if a
-    corner is clipped it never reaches the hit map, which is exactly the failure
-    the fit shrink exists to prevent."""
-    e = vc.SCAFFOLD_EXTENT
-    corners = np.array([[x, y, z] for x in (-e, e) for y in (-e, e)
-                        for z in (-e, e)], dtype=float)
-    rgb = np.full((8, 3), 200, dtype=np.uint8)
-    for tilt in np.linspace(vc.TILT_MIN, vc.TILT_MAX, 15):
-        for azimuth in np.linspace(0, 2 * np.pi, 9):
-            R = vc.rotation_matrix(float(azimuth), float(tilt))
-            flat = np.round(corners @ R.T, 9)
-            # Head-on, a back corner sits exactly behind a front one and loses the
-            # cell — occlusion, not clipping.  So the assertion is over the corners
-            # that *can* be seen: the front-most of each coincident screen pair.
-            expected = set()
-            for key in {tuple(p[:2]) for p in flat}:
-                same = [i for i, p in enumerate(flat) if tuple(p[:2]) == key]
-                expected.add(max(same, key=lambda i: flat[i][2]))
+def test_rotating_the_camera_never_rescales_the_scene():
+    """**The one that makes people queasy.**  The fit used to be evaluated at the
+    current tilt, so dragging up and down zoomed the whole cloud — 11.5 to 19.5
+    dots/σ between the stops, a 70% swing under the hand, and a rotation read as a
+    lurching dolly.
 
-            frame = vc.compute_frame(corners, rgb, 96, 30, float(azimuth),
-                                     float(tilt), scaffold="cage")
-            visible = set(int(i) for i in frame.hit[frame.hit >= 0])
-            assert expected <= visible, \
-                f"corner clipped at tilt={tilt:.2f} azimuth={azimuth:.2f}"
+    Measured through the render, not the arithmetic: at azimuth 0 a point's screen
+    x is `cos·x + sin·z = x`, independent of tilt, so two points on the x axis must
+    keep exactly the same column separation at every tilt if the scale is fixed.
+    """
+    probe = np.array([[-2.5, 0.0, 0.0], [2.5, 0.0, 0.0]])
+    rgb = np.full((2, 3), 220, dtype=np.uint8)
+    spans = set()
+    for mode in ("off",) + tuple(BOXED):
+        for tilt in np.linspace(vc.TILT_MIN, vc.TILT_MAX, 15):
+            frame = vc.compute_frame(probe, rgb, 96, 30, 0.0, float(tilt),
+                                     scaffold=mode, extent=np.array([3.9, 2.0, 2.9]))
+            cols = np.where((frame.hit >= 0).any(axis=0))[0]
+            spans.add((mode, int(cols.max() - cols.min())))
+        widths = {w for m, w in spans if m == mode}
+        assert len(widths) == 1, \
+            f"{mode}: tilting rescaled the scene ({sorted(widths)} cells wide)"
+
+
+def test_zoom_is_the_only_thing_that_changes_the_scale():
+    """The corollary: `zoom` must still work, or the fix has frozen the camera."""
+    e = np.array([3.9, 2.0, 2.9])
+    base = vc.frame_scale(96, 30, 1.0, "cage", e)
+    assert vc.frame_scale(96, 30, 2.0, "cage", e) == pytest.approx(2 * base)
+    assert vc.frame_scale(96, 30, 0.5, "cage", e) == pytest.approx(0.5 * base)
+
+
+def test_the_box_closes_on_screen_at_the_pose_it_is_fitted_at():
+    """It is fitted once, at the tilt the view opens and resets to, and held.  So
+    that is the pose where the whole box has to be on the panel — at every
+    azimuth, since a spin must not change anything either."""
+    e = np.array([3.2, 1.5, 2.4])
+    corners = np.array([[x, y, z] for x in (-e[0], e[0]) for y in (-e[1], e[1])
+                        for z in (-e[2], e[2])], dtype=float)
+    rgb = np.full((8, 3), 200, dtype=np.uint8)
+    for azimuth in np.linspace(0, 2 * np.pi, 17):
+        R = vc.rotation_matrix(float(azimuth), vc.FIT_TILT)
+        flat = np.round(corners @ R.T, 9)
+        # Head-on, a back corner sits exactly behind a front one and loses the
+        # cell — occlusion, not clipping.  Assert over what *can* be seen.
+        expected = set()
+        for key in {tuple(p[:2]) for p in flat}:
+            same = [i for i, p in enumerate(flat) if tuple(p[:2]) == key]
+            expected.add(max(same, key=lambda i: flat[i][2]))
+
+        frame = vc.compute_frame(corners, rgb, 96, 30, float(azimuth),
+                                 vc.FIT_TILT, scaffold="cage", extent=e)
+        visible = set(int(i) for i in frame.hit[frame.hit >= 0])
+        assert expected <= visible, f"corner clipped at azimuth={azimuth:.2f}"
 
 
 def test_each_wall_is_the_far_face_of_its_pair():
@@ -350,6 +379,9 @@ def test_no_track_is_clipped_off_the_panel_when_a_box_is_up(rng):
     Only the six extreme tracks are rendered, at the extent measured from the
     whole cloud: with 300 points on a 96×30 grid an absent point is far more
     likely to be occluded than clipped, and the test has to tell those apart.
+    At the fitted pose, since that is where the box is guaranteed to fit — past
+    it, a steep tilt is allowed to take corners off the panel rather than pull
+    the scene smaller under the hand.
     """
     coords = rng.standard_normal((300, 3)) * [3.4, 1.8, 2.6]
     extent = vc.library_extent(coords)
@@ -357,10 +389,9 @@ def test_no_track_is_clipped_off_the_panel_when_a_box_is_up(rng):
                    for f in (np.argmin, np.argmax)})
     probe = coords[edge]
     rgb = vc.point_rgb(probe)
-    for tilt in (-1.2, 0.0, 0.5, 1.2):
-        for azimuth in np.linspace(0, 2 * np.pi, 8):
-            frame = vc.compute_frame(probe, rgb, 96, 30, float(azimuth),
-                                     float(tilt), scaffold="cage", extent=extent)
-            visible = set(int(i) for i in frame.hit[frame.hit >= 0])
-            assert visible == set(range(len(probe))), \
-                f"an outermost track was clipped at tilt={tilt:.1f}"
+    for azimuth in np.linspace(0, 2 * np.pi, 8):
+        frame = vc.compute_frame(probe, rgb, 96, 30, float(azimuth),
+                                 vc.FIT_TILT, scaffold="cage", extent=extent)
+        visible = set(int(i) for i in frame.hit[frame.hit >= 0])
+        assert visible == set(range(len(probe))), \
+            f"an outermost track was clipped at azimuth={azimuth:.2f}"

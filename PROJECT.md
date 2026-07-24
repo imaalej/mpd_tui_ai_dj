@@ -285,13 +285,20 @@ projected back with `snap()` = `normalise(mean(top-25 library embeddings by dot(
   a containing cube costs 52% of the old scale, the measured box 76%. `library_extent()`
   measures it once per library (`max|coord| × 1.04`, floored so a degenerate cloud cannot
   divide by zero) and it re-fits as the collection grows.
-  The fit uses **both** panel dimensions and the worst case *over azimuth* — never this
-  frame's angle, which would make the cloud pulse as it spins: `reach_x` is the x–z
-  diagonal, `reach_y` adds the tilted y. Fitting per axis is what makes a non-cubic box
-  worth having — a wide flat box uses the panel's width (73%, was 56%) instead of paying
-  for it in height. The budget is `half − 1`, not `half`: a dot rounded exactly onto
-  `dot_h` is one index past the end and vanishes, a corner missing for one dot of greed.
-  Zoom is applied after, so zooming in still overflows the panel, as it should.
+- **`frame_scale()` is blind to the camera, and that is the invariant.** The camera is
+  not in its signature. When the fit was evaluated at the *current* tilt, dragging up and
+  down rescaled the whole scene — 11.5 → 19.5 dots/σ between the stops, a 70% swing under
+  the hand — and a rotation read as a lurching dolly. It was reported as motion sickness,
+  which is exactly what it was. **Rotation must be rotation:** a 3-D viewer's projection
+  scale is a property of the scene and the viewport, never of where the camera is looking
+  from. So the box is fitted once at the reference pose (`FIT_TILT` = `DEFAULT_TILT`, the
+  tilt the view opens and resets to) and held; tilt far past it and the box's corners
+  leave the panel, which is what looking at a box from a steep angle should do. Azimuth
+  is worst-cased into the x–z diagonal for the same reason. **Only `zoom` may scale.**
+  The fit uses **both** panel dimensions, which is what makes a non-cubic box worth
+  having — a wide flat box uses the panel's width (73%, was 56%) instead of paying for it
+  in height. The budget is `half − 1`, not `half`: a dot rounded exactly onto `dot_h` is
+  one index past the end and vanishes, a corner missing for one dot of greed.
 - **The panel opens on a frame, not on `off`.** Opening bare would ship the unreadable
   state as the default and make the fix a discovery. `off` is the first stop in the
   `[B]` ring.
