@@ -235,7 +235,7 @@ This replaced an "Upcoming Queue" panel that listed ten tracks read from `mpc pl
 
 Exactly **one** track sits in the queue ahead of the current one, refilled as each song ends so playback never stops. That depth is deliberate: with ten queued tracks, every one of them had been scored under the weights that existed ten songs ago, so a skip or a like was inaudible until they drained. At depth one, feedback changes what plays *next*.
 
-Candidates are drawn from a pool of 100 nearest neighbours in embedding space and re-ranked by the full scoring function. The winner is not simply the top-scoring track — one is drawn by Boltzmann sampling over **rank**, `p(i) ∝ exp(−i/τ)`, with `τ` set by the exploration value and readable in `[I]` as "choosing from ~top 8". A strict argmax would replay the identical evening from the same starting state every time, which for a system built around an evolving session is the failure mode. Recently played tracks are excluded for at least 20 songs, and that exclusion now survives a restart.
+Candidates are drawn from a pool of 100 nearest neighbours in embedding space and re-ranked by the full scoring function. The winner is not simply the top-scoring track — one is drawn by Boltzmann sampling over **rank**, `p(i) ∝ exp(−i/τ)`, with `τ` set by the exploration value and readable in `[I]` as "choosing from ~top 8". A strict argmax would replay the identical evening from the same starting state every time, which for a system built around an evolving session is the failure mode. Recently played tracks — the last 50 selections — are excluded from the candidate pool outright, and that exclusion now survives a restart.
 
 ### What Persists Between Sessions
 

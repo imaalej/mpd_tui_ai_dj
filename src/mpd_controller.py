@@ -11,6 +11,23 @@ from pathlib import Path
 from config import config
 
 
+def parse_mpc_clock(clock: str) -> int:
+    """
+    Turn one `mpc` time field into whole seconds.
+
+    Handles `M:SS` *and* `H:MM:SS` (audit F2): `mpc status` prints the hours
+    field for a track over an hour, e.g. `1:05:30/1:23:45`, which the old
+    `(\\d+):(\\d+)` pattern could not read — it matched a garbage substring and
+    left position and duration wrong, so completion never fired (or fired at
+    once) for any hour-plus track.  Folding on `:` is base-60 and length-agnostic,
+    so `S`, `M:SS` and `H:MM:SS` all parse correctly.
+    """
+    seconds = 0
+    for part in clock.split(':'):
+        seconds = seconds * 60 + int(part)
+    return seconds
+
+
 class MPDController:
     """Manages all interaction with MPD via MPC commands."""
     
@@ -97,29 +114,8 @@ class MPDController:
             
             # Parse status output
             if status_result.returncode == 0:
-                status_output = status_result.stdout
-                
-                # Parse state
-                if '[playing]' in status_output:
-                    status['state'] = 'playing'
-                elif '[paused]' in status_output:
-                    status['state'] = 'paused'
-                else:
-                    status['state'] = 'stopped'
-                
-                # Parse position and duration (format: #1/10 0:05/3:45)
-                # Look for pattern like "0:05/3:45" or "1:23/4:56"
-                time_match = re.search(r'(\d+):(\d+)/(\d+):(\d+)', status_output)
-                if time_match:
-                    pos_min, pos_sec, dur_min, dur_sec = map(int, time_match.groups())
-                    status['position'] = pos_min * 60 + pos_sec
-                    status['duration'] = dur_min * 60 + dur_sec
-                
-                # Parse volume
-                volume_match = re.search(r'volume:\s*(\d+)%', status_output)
-                if volume_match:
-                    status['volume'] = int(volume_match.group(1))
-            
+                status.update(self._parse_status_fields(status_result.stdout))
+
             self._last_status = status
             return status
             
@@ -129,6 +125,38 @@ class MPDController:
             print(f"Error getting MPD status: {e}", file=sys.stderr)
             return self._last_status if self._last_status else {'state': 'error'}
     
+    @staticmethod
+    def _parse_status_fields(status_output: str) -> Dict:
+        """
+        Extract state / position / duration / volume from `mpc status` output.
+
+        Split out so the position/duration parsing is testable without a live
+        MPD — in particular the `H:MM:SS` form MPD prints for a track over an
+        hour (audit F2), which the old `(\\d+):(\\d+)` pattern could not read.
+        """
+        fields: Dict = {}
+
+        if '[playing]' in status_output:
+            fields['state'] = 'playing'
+        elif '[paused]' in status_output:
+            fields['state'] = 'paused'
+        else:
+            fields['state'] = 'stopped'
+
+        # Position and duration: `#1/10 0:05/3:45`, or `1:05:30/1:23:45` over an
+        # hour.  Each side is one-or-two colons; parse_mpc_clock folds either.
+        time_match = re.search(
+            r'(\d+(?::\d+){1,2})/(\d+(?::\d+){1,2})', status_output)
+        if time_match:
+            fields['position'] = parse_mpc_clock(time_match.group(1))
+            fields['duration'] = parse_mpc_clock(time_match.group(2))
+
+        volume_match = re.search(r'volume:\s*(\d+)%', status_output)
+        if volume_match:
+            fields['volume'] = int(volume_match.group(1))
+
+        return fields
+
     def previous_track(self):
         """
         Go to previous track.

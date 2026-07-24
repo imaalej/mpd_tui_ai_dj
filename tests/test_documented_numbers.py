@@ -159,6 +159,43 @@ def test_start_sh_uses_no_bash_4_only_syntax():
     assert offenders == []
 
 
+def test_the_start_sh_control_banner_lists_every_binding():
+    """
+    E1: the launcher's control banner was a third, drifted copy of the binding
+    list — it omitted `[↑↓] History` and `[ENTER] Replay`, the exact L9/M7 drift
+    the rewrite prides itself on closing, while `project_state.md` claimed "the
+    footer, the README table and both interfaces advertise exactly this list."
+    Bind the banner to the full set here so it cannot drift again — and so a new
+    binding (the `[V]` pass, G1) has to be added to the launcher too.
+    """
+    banner = _start_sh()
+    required = [
+        "Play / Pause",   # SPACE
+        "Skip",           # N
+        "Pass",           # V (G1)
+        "Like",           # L
+        "history",        # ↑ / ↓  (the E1 omission)
+        "Replay",         # ENTER  (the E1 omission)
+        "Volume",         # , / .
+        "Seek",           # ← / →
+        "Model info",     # I
+        "Quit",           # Q
+    ]
+    missing = [r for r in required if r not in banner]
+    assert missing == [], f"start.sh control banner is missing: {missing}"
+
+
+def test_the_pass_binding_is_advertised_on_every_user_facing_surface():
+    """
+    G1's binding must appear wherever the controls are listed, or the surfaces
+    drift the way E1 documents.  (The footer and both interfaces are driven
+    through the real key handler by the TUI tests; these are the two prose
+    surfaces a test can read directly.)
+    """
+    assert "[V] Pass" in _readme() or "| `V` |" in _readme()
+    assert "Pass" in _start_sh()
+
+
 def test_the_readme_says_what_unliking_does_to_the_model():
     """
     §8's trap 1: whichever of the two designs is chosen, the README has to say

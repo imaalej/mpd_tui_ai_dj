@@ -40,6 +40,18 @@ def test_play_history_round_trips(library, tmp_path):
     assert list(restored.recent_history) == list(original.recent_history)
 
 
+def test_the_hard_exclusion_dominates_the_soft_floor():
+    """
+    E2: the exclusion the README describes is `recent_history_size` (50), the
+    hard drop from the candidate pool — not `minimum_replay_gap` (20), the soft
+    penalty floor.  Because 50 > 20, a track that reaches `_calculate_anti_
+    repetition` at all was played more than 50 selections ago, so the
+    `< minimum_replay_gap` branch is unreachable via normal selection.  Keeping
+    the two constants in this order is what makes the reconciled docs true.
+    """
+    assert config.recent_history_size > config.minimum_replay_gap
+
+
 def test_the_replay_gap_is_still_closed_after_a_restart(library, tmp_path):
     """
     The behavioural version, which is the one that matters: a track played just

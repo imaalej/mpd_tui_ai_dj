@@ -509,8 +509,9 @@ Delete `data/state/` before measuring anything about a cold start.
 | `I` | Model state (descriptors, sampling, taste, exploration, weights); `↑↓` scrolls |
 | `Q` | Quit |
 
-The footer, the README table and both interfaces advertise exactly this list, and tests drive every
-row through the real key handler.
+The footer, the README table, `start.sh`'s launch banner and both interfaces advertise exactly this
+list. Tests drive every row through the real key handler, and `test_documented_numbers` guards the
+`start.sh` banner so it cannot drift again (audit E1).
 
 ---
 

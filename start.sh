@@ -138,7 +138,9 @@ else
     exit 1
   fi
   export MPD_MUSIC_DIR="$MUSIC_DIR"
-  success "Using $MUSIC_DIR (set MPD_MUSIC_DIR to make this permanent)"
+  success "Using $MUSIC_DIR for this run"
+  info "This only applies to the current launch. To make it stick, add"
+  info "  export MPD_MUSIC_DIR=\"$MUSIC_DIR\"   to your shell profile."
 fi
 
 # ── 5. Embeddings check ───────────────────────────────────────────────────────

@@ -245,6 +245,16 @@ class TrackSelector:
         """
         Calculate anti-repetition score based on time since last played.
         Returns value in [0, 1] where higher means played longer ago.
+
+        Note the two numbers, and that they do not contradict each other (audit
+        E2).  The *hard* exclusion is `recent_history` (`recent_history_size` = 50
+        entries), applied in `select_track` before scoring: a track played within
+        the last 50 selections is dropped from the candidate pool outright and
+        never reaches this method.  `minimum_replay_gap` = 20 is the softer floor
+        below.  Because 50 > 20, the `< minimum_replay_gap` branch is unreachable
+        *via normal selection* — any track that gets here was played > 50 ago — so
+        it is a defensive floor for direct callers (and its contract is pinned by
+        test_play_history_persistence), not the exclusion the README describes.
         """
         if track_file not in self.play_history:
             return 1.0  # Never played = maximum score
@@ -253,12 +263,17 @@ class TrackSelector:
         tracks_since = self.current_index - last_play_index
 
         if tracks_since < config.minimum_replay_gap:
-            # Strong penalty for recent replays
+            # Strong penalty for a track inside the soft floor.  Normal selection
+            # never lands here (the 50-track hard exclusion is stronger); this
+            # guards direct calls to the scoring primitive.
             return 0.1
 
-        # Logarithmic decay
-        # After minimum gap, score increases slowly
-        score = min(1.0, 0.5 + 0.5 * np.log(tracks_since - config.minimum_replay_gap + 1) / 5)
+        # Logarithmic decay: score rises slowly the longer ago a track played.
+        # The `- minimum_replay_gap` offset keeps the argument positive across the
+        # reachable range (tracks_since > 50); the `max(1, …)` makes that explicit
+        # rather than relying on the invariant holding forever.
+        gap = max(1, tracks_since - config.minimum_replay_gap + 1)
+        score = min(1.0, 0.5 + 0.5 * np.log(gap) / 5)
 
         return score
 
@@ -274,8 +289,9 @@ class TrackSelector:
 
         At queue depth 1 a selection is normally a play, but two paths break
         that: a skip drops the lookahead and re-picks it, and MPD can refuse an
-        `add`.  Left recorded, those tracks would sit inside the 20-track replay
-        gap having never been heard, and `total_selections` would claim more
+        `add`.  Left recorded, those tracks would sit inside the 50-track
+        replay-exclusion window having never been heard, and `total_selections`
+        would claim more
         music than the session actually played — a number the user reads in the
         `[I]` inspector that the system cannot back up.
 
@@ -304,10 +320,11 @@ class TrackSelector:
         Persist the anti-repetition state.
 
         Without this, `recent_history` and `play_history` were rebuilt empty on
-        every launch, so the README's "recently played tracks are excluded for at
-        least 20 songs" quietly meant "until you restart".  `recent_history` is
-        saved alongside the two the audit names because it is the half that does
-        the actual excluding — `play_history` only shapes the score.
+        every launch, so the README's promise that recently played tracks stay
+        excluded quietly meant "until you restart".  `recent_history` is saved
+        alongside the two the audit names because it is the half that does the
+        actual excluding (the last `recent_history_size` = 50 selections) —
+        `play_history` only shapes the score.
         """
         if filepath is None:
             filepath = config.play_history_file
