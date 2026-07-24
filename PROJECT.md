@@ -1,41 +1,27 @@
-# Adaptive Session AI DJ — Project State
+# Adaptive Session AI DJ
 
-A terminal DJ for MPD that selects tracks from CLAP audio embeddings and adapts to feedback within a
-listening session. Python + urwid TUI, MPD driven via `mpc` subprocesses.
+A terminal DJ for MPD that picks tracks from CLAP audio embeddings and adapts to your feedback
+*within* a listening session. Python + urwid TUI; MPD driven through `mpc` subprocesses.
 
-**Status: the five-stage rewrite is complete, and the four-phase inspection follow-up (Phases 1–4) has
-landed — the vibe cloud is the TUI's centrepiece.** 651 tests, green, ~20 s. Every finding from the
-original audit is closed. The application plays continuously, adapts on the next track, says what it
-is playing, restores the user's MPD state on every exit path, shows the whole library as a rotating
-3-D mood cloud with a session comet, and has coverage on all three interfaces (player, urwid display,
-fallback text mode).
+**Goal.** Put on music and have it follow you — no genre tags, no playlists, no rules you have to
+write. Everything is derived from what the audio actually sounds like, and everything the interface
+tells you has to be something the system can back up.
 
----
+**Status.** Feature-complete and stable. 668 tests, green, ~20 s. It plays continuously, adapts on
+the next track, says what it is playing, restores your MPD state on every exit path, and shows the
+whole library as a rotating 3-D mood cloud with a session comet. Coverage on all three interfaces
+(player, urwid display, fallback text mode).
 
-## What this document is
-
-This replaces `PROJECT_AUDIT.md` (a 3,900-line audit of defects that are now all fixed) and
-`CLAUDE.md`. It carries forward only what is still load-bearing:
-
-- the invariants that are **easy to undo and were learned the hard way** (§4) — the single most
-  valuable section
-- the **verified MPD semantics** that `FakeMPD` is built to (§5)
-- the **measured numbers** downstream work depends on (§7)
-- the **finding-ID glossary** (§10), because ~450 code comments cite IDs like `C4` and `L9`
-- what is deliberately **deferred or left open** (§11)
-
-It does **not** narrate the defects that were fixed — they are fixed, and the narrative was the bloat.
-If you need it, both files are in git history:
-
-```sh
-git log --oneline --follow -- PROJECT_AUDIT.md   # every version, newest first
-git show 82abf60:PROJECT_AUDIT.md                # FINAL, 4,005 lines — Stage 4 log, §10e, corrected L1
-git show 82abf60:CLAUDE.md                       # FINAL, 234 lines
-git show dcb1a64:PROJECT_AUDIT.md                # through Stage 3, 3,531 lines
-git show 16c4286:PROJECT_AUDIT.md                # the original audit, 1,768 lines
-```
-
-`82abf60` is the Stage 4 commit — the last one that contained either file.
+> This file replaces `project_state.md` and `inspection_findings.md`, which recorded a rewrite and an
+> inspection whose findings are all closed. Both are in git history at `c599ab7` — the last commit
+> that held them — if you ever need the narrative:
+> `git show c599ab7:project_state.md`, `git show c599ab7:inspection_findings.md`.
+>
+> **Reading the code comments:** roughly 450 of them cite finding IDs — `(audit C4)`, `(audit L9)`,
+> `(inspection D3)`, `(G3)`. All are closed; they are provenance, not open work. The decoder tables
+> are in the two archived files (`project_state.md` §10 for `audit`, `inspection_findings.md` for
+> `inspection`). **The two ID spaces collide** — `audit C1` and `inspection C1` are different findings
+> — which is why the prefix in the comment matters.
 
 ---
 
@@ -48,17 +34,15 @@ hear. A similarity scale compressed into its top third.
 
 So: **derive constants from the library's actual distribution, or delete them.** A constant may stay
 if it shapes behaviour without asserting a fact. It goes if it produces a claim the user reads that
-the system cannot back up.
+the system cannot back up. Prefer scale-invariant formulations — rank-based sampling over
+score-based, z-scores over raw similarities, measured pool-turnover over a declared magnitude — so
+nothing needs recalibration when the weights or the embedding space move.
 
-Concretely, prefer scale-invariant formulations — rank-based sampling over score-based, z-scores over
-raw similarities, measured pool-turnover over a declared magnitude — so nothing needs recalibration
-when the weights or the embedding space move.
-
-**The corollary, learned in Stage 4 and worth more than the principle itself: an observation is not a
-conclusion.** The audit recorded a correct measurement of the SIGWINCH handler and drew the wrong
-inference from it. Acting on that inference broke the application, under nine unit tests that all
-passed because they ran against a double built from the same assumption. Before trusting any claim in
-this file, check that the observation behind it still supports it.
+**The corollary, worth more than the principle: an observation is not a conclusion.** A correct
+measurement of the SIGWINCH handler once produced the wrong inference, and acting on it broke the
+application under nine unit tests that all passed — because they ran against a double built from the
+same assumption. Before trusting any claim in this file, check that the observation behind it still
+supports it.
 
 ---
 
@@ -68,10 +52,9 @@ Everything is driven by 512-dimensional CLAP audio embeddings, one per track, st
 `data/embeddings/track_embeddings.npz`. All similarity is a dot product **on centred vectors**. No
 genre tags or metadata enter the selection logic.
 
-**All application modules live under `src/`** (audit G2); the module names in the diagram below are
-`src/…` on disk. `data/`, `tests/`, `README.md`, `start.sh` and this file stay at the repo root, and
-`config.data_dir` is anchored to the repo root (the parent of `src/`) so the layout move changed no
-path. `start.sh` invokes `python3 src/main_tui.py`.
+All application modules live under `src/`; imports are flat (`from config import config`) with `src/`
+on `sys.path`. `data/`, `tests/`, `README.md`, `start.sh` and this file stay at the repo root, and
+`config.data_dir` is anchored to the repo root (the parent of `src/`).
 
 ```
 start.sh  ──▶ src/main_tui.py (AdaptiveDJWithTUI)  the only entry point
@@ -87,7 +70,7 @@ tui.py         background thread                mpd_controller.py
    ├──▶ vibe_readout.py     descriptor_bank.py → top-3 z-scores + drift
    ├──▶ session_history.py  what played · ♥ ⏭ ✓ » · the ↑↓ cursor
    ├──▶ vibe_cloud.py       mood_axes.py → rotating 3-D Braille point cloud +
-   │        session comet; single-dot depth-shaded points, eased camera; own alarm (Phase 4)
+   │        session comet; single-dot depth-shaded points, eased camera; own alarm
    │        (all three display-only: nothing behind the display reads them)
    ▼
 feedback_handler.py ──┬──▶ session_state.py   short-term vibe vector
@@ -113,21 +96,17 @@ feedback_handler.py ──┬──▶ session_state.py   short-term vibe vector
 5. `QueueManager.ensure_one_ahead()` keeps exactly one track ahead, with `consume on` so MPD pops
    finished tracks itself — making the refill condition `len(playlist) < 2`.
 
-On a **cold** start both vectors are zero and step 1 returns an empty pool, so the opening picks are
-uniform random draws rather than an arbitrary `argpartition` ordering. Two nuances that the plain
-"the first track is uniform" claim glosses over (audit B3/B4):
+**Cold start.** Both vectors are zero, step 1 returns an empty pool, and the opening picks are uniform
+random draws. Two known nuances:
 
-- **The first *two* tracks are both uniform, not one.** `start_session` pre-queues `1 + queue_lookahead`
-  (= 2) tracks while the session vector is still zero, so the lookahead is drawn independently of track
-  1. Selection first reflects the seeded session at track 3. This is inherent to depth-1 gapless
-  startup — the lookahead has to exist before track 1 plays, and nothing has seeded the vibe yet. It is
-  accepted rather than fixed: deferring the lookahead until track 1 seeds the session would improve
-  exactly one track at the cost of a startup-gap edge case, not worth it. Documented so it is a known
-  choice, not a surprise.
-- **On a *warm* restart it is not uniform at all.** A persisted taste model seeds `taste_vector`, so
-  `get_candidate_pool` opens its taste half and the first track is drawn from taste neighbours. This is
-  the desirable behaviour (the README promises taste anchoring across sessions); the "first track is
-  uniform" invariant only ever described the cold start.
+- **The first *two* tracks are both uniform.** `start_session` pre-queues `1 + queue_lookahead` (= 2)
+  while the session vector is still zero, so the lookahead is drawn independently of track 1.
+  Selection first reflects the seeded session at track 3. Inherent to depth-1 gapless startup and
+  accepted: deferring the lookahead until track 1 seeds the session improves exactly one track at the
+  cost of a startup-gap edge case.
+- **A *warm* restart is not uniform at all.** A persisted taste model seeds `taste_vector`, so
+  `get_candidate_pool` opens its taste half and the first track is drawn from taste neighbours. This
+  is the desired behaviour (taste anchoring across sessions).
 
 ### What feeds back
 
@@ -135,7 +114,7 @@ uniform random draws rather than an arbitrary `argpartition` ordering. Two nuanc
 |---|---|---|
 | **Full listen** | ≥75% of duration played (`config.full_listen_fraction`) | Session vector updated (the primary driver). Taste +0.02. Exploration −0.02. The only thing that increments `tracks_played`. |
 | **Skip `[N]`** | Keypress | Taste −0.05. Exploration +0.05. Session vector repelled from the consecutive-skip-run centroid by a magnitude **solved for a pool-turnover target that escalates with run length** (5% → 20% → 50% → 85%), projected back onto the manifold from the second consecutive press. Lookahead replaced, then exactly one advance. Measured turnover printed to the console. |
-| **Pass `[V]`** | Keypress | **Nothing to the model** (audit G1): no session repel, no taste penalty, no exploration change, no escalation counter. Advances into the already-queued lookahead — add-before-advance, exactly one advance, no `play()` — and marks the passed track `»`. "Not this song, keep the vibe." |
+| **Pass `[V]`** | Keypress | **Nothing to the model**: no session repel, no taste penalty, no exploration change, no escalation counter. Advances into the already-queued lookahead — add-before-advance, exactly one advance, no `play()` — and marks the track `»`. "Not this song, keep the vibe." |
 | **Like `[L]`** | Keypress | Taste +0.10, saved immediately. Adds `♥`. |
 | **Un-like `[L]`** | Keypress on an already-liked track | Removes the like from `feedback_history` and **recomputes** the taste model from what remains. See §4. |
 
@@ -148,14 +127,14 @@ checkpointed every `config.checkpoint_every_n_tracks` (5) full listens, not only
 
 **Nothing in `data/state/` is worth preserving.** It is all regenerated by listening and none of it is
 committed. Do not write migration code, backward-compat shims, or "reset carefully" logic for it.
-`data/embeddings/` is different — it is a five-minute rebuild (`python3 src/generate_embeddings.py --force`),
-not a throwaway.
+`data/embeddings/` is different — it is a five-minute rebuild
+(`python3 src/generate_embeddings.py --force`), not a throwaway.
 
 ---
 
 ## 3 · The vector space
 
-Settled and not to be re-derived without re-measuring everything downstream:
+Settled; do not re-derive without re-measuring everything downstream.
 
 - **674 tracks**, 512-d, full-coverage deterministic windows (consecutive 10 s, last aligned to the
   end), mean-pooled. Embedding the same file twice gives a bit-identical vector for a fixed batch size.
@@ -171,41 +150,41 @@ Settled and not to be re-derived without re-measuring everything downstream:
 
 ## 4 · Invariants — what is easy to undo
 
-**This is the section to read before changing anything.** Each of these cost real debugging to
-establish, and each would silently regress.
+**Read this before changing anything.** Each cost real debugging to establish, and each would silently
+regress.
 
 ### MPD is the user's machine
 
 - **Playback modes are the user's state.** The app forces `random`/`repeat`/`single` off and
   `consume` on, but it must log what it changed and restore the originals on *every* exit path
-  including SIGTERM. Wired into `_shutdown()`, the signal handler **and** an `atexit` hook. Leaving
-  someone's MPD in consume mode is a real side effect on their system.
+  including SIGTERM. Wired into `_shutdown()`, the signal handler **and** an `atexit` hook.
 - **`mpc listall` is the single source of truth for track keys.** Do not enumerate the filesystem for
   anything MPD will be asked to play. The embeddings are stored under these exact strings.
 - **A skip must add the replacement *before* it advances.** `mpc next` off the last remaining track
   empties the queue and stops MPD, and a later `mpc add` does *not* restart it. Advance-then-add kills
   the session silently, and the only recovery is a `play()` call that the skip path forbids. There is
-  no `play()` anywhere in `skip_current_track()`, which is what makes the double-advance impossible by
+  no `play()` anywhere in `skip_current_track()`, which makes the double-advance impossible by
   construction rather than by care.
-- **The album-art child process must be terminated explicitly.** `clear()` removes the image and
-  leaves `ueberzugpp` running. `AlbumArtRenderer.shutdown()` is called from `_shutdown()` and from the
-  signal handler, and **cannot raise** — it runs before `request_exit()`, the call that unblocks urwid
-  and makes the rest of the shutdown reachable. It also tears down the extracted-cover cache dir
-  (`cleanup_cover_cache()`), because `atexit` does not fire on a default SIGTERM (Phase 2, inspection C4).
-- **A broken pipe to the overlay child must respawn, not disable art.** The protocol keeps one
-  long-lived `ueberzugpp` child on a stdin pipe. A single `BrokenPipeError` used to null the handle and
-  return before the respawn branch could run, so one choked write — a resize command was enough —
-  killed album art for the whole session while `is_available()` still said True (Phase 2, inspection
-  C1/C2). `ImageProtocol.render()` now drops the dead child and retries once against a fresh layer in
-  the same call, and returns a bool the renderer reads. **`protocol.available` goes False only on a
-  confirmed-missing binary (`FileNotFoundError`), never on a transient spawn failure** — otherwise one
-  mid-resize hiccup would permanently disable art (the C2 "finagle until it's back" symptom by another
-  route). The renderer's flicker-skip guard (`key == self._render_key`) is now also gated on
-  `protocol.is_alive()`: skipping a re-send is only safe while a child is actually holding the image, or
-  a dead frame freezes on screen.
-- **The `[I]` overlay takes the cover down while open.** The art is a separate X11/Wayland surface urwid
-  does not paint over, so it sat on top of the inspector (Phase 2, inspection F3). `_show_model_info()`
-  clears it on open and `force_redraw()`s on close so the next tick repaints it in place.
+
+### Album art
+
+- **The `ueberzugpp` child must be terminated explicitly.** `clear()` removes the image and leaves the
+  process running. `AlbumArtRenderer.shutdown()` is called from `_shutdown()` and from the signal
+  handler, and **cannot raise** — it runs before `request_exit()`, the call that unblocks urwid and
+  makes the rest of the shutdown reachable. It also tears down the extracted-cover cache dir
+  (`cleanup_cover_cache()`), because `atexit` does not fire on a default SIGTERM.
+- **A broken pipe to the overlay child must respawn, not disable art.** One long-lived `ueberzugpp`
+  child sits on a stdin pipe. `ImageProtocol.render()` drops a dead child and retries once against a
+  fresh layer *in the same call*, and returns a bool the renderer reads. **`protocol.available` goes
+  False only on a confirmed-missing binary (`FileNotFoundError`), never on a transient spawn failure**
+  — otherwise one mid-resize hiccup permanently disables art. The renderer's flicker-skip guard
+  (`key == self._render_key`) is gated on `protocol.is_alive()`: skipping a re-send is only safe while
+  a child is actually holding the image, or a dead frame freezes on screen.
+- **The `[I]` overlay takes the cover down while open.** The art is a separate X11/Wayland surface
+  urwid does not paint over. `_show_model_info()` clears it on open and `force_redraw()`s on close.
+- **Only ueberzugpp / classic ueberzug work.** The kitty and sixel paths were deleted — they fought
+  urwid for the screen. Under tmux with multiple attached clients the cover renders in one terminal
+  only; that is inherent to absolute-coordinate overlays, documented in the README, not a bug to fix.
 
 ### The manifold
 
@@ -229,18 +208,15 @@ projected back with `snap()` = `normalise(mean(top-25 library embeddings by dot(
   on every terminal shorter than 33 rows — a defect that shipped through three stages and 311 tests
   because nothing had ever called `render()`. Packing also makes the panel's height independent of the
   terminal, which is what the derived album-art geometry rests on.
-- **The album-art geometry is derived from the widget tree,** not hand-counted. Two of the four
-  original constants were wrong. Same for the `[I]` overlay's inner size, which asks
-  `Overlay.calculate_padding_filler()` / `top_w_size()` rather than recomputing the `("relative", 70)`
-  arithmetic. **The footer is a flow widget and its `rows()` feeds `_art_geometry()`**, so its wrapped
-  height is part of the derivation. Phase 1's `[V] Pass` binding lengthened the footer, which now wraps
-  to an extra row at ~100–120 cols and at < 60 cols (unchanged at 80×24) — the art region is one row
-  shorter at those widths. This is derived, not broken, but Phase 2's resize/geometry work (C2) should
-  expect footer height to vary with width.
+- **The album-art geometry is derived from the widget tree,** not hand-counted. Two of four original
+  hand-counted constants were wrong. Same for the `[I]` overlay's inner size, which asks
+  `Overlay.calculate_padding_filler()` / `top_w_size()` rather than recomputing the arithmetic.
+  **The footer is a flow widget and its `rows()` feeds `_art_geometry()`**, so its wrapped height —
+  which varies with terminal width — is part of the derivation.
 - **The drift figure is a count of held words, not a cosine.** The cosine has p10 = 0.948 and median
   = 0.989 over 40 real sessions, so it reads as "0.99" forever — the same compressed-scale defect the
   readout exists to fix. The cosine is still computed and shown in `[I]` with its distribution beside
-  it. See §7 before changing this back.
+  it. See §6 before changing this back.
 - **The display layer owns its own state, deliberately.** `vibe_readout.py` and `session_history.py`
   are pure modules that nothing behind the display reads. Putting either behind the display would
   split a display concern across a component that cannot see it.
@@ -251,31 +227,37 @@ projected back with `snap()` = `normalise(mean(top-25 library embeddings by dot(
 - **Both interfaces share one binding table.** `decode_key()`/`decode_keys()` turn terminal bytes into
   urwid's key names and `_handle_input` dispatches for both. A binding cannot exist in one interface
   and not the other. Do not reintroduce a second `if key == …` ladder.
-- **The vibe cloud's camera orbits ambient; its comet moves only on data (Phase 4, inspection G3).**
-  `_animate` (a fast alarm — up to ~144 fps — separate from the 0.5 s poll) advances only the camera and
-  redraws just the cloud, and **only when the camera moved enough to matter** (`cloud.pose_changed()`): a
-  slow ambient spin repaints a few times a second, an active drag/zoom every frame — cheap when idle,
-  buttery when moving.  The camera **eases** toward a mouse-set target rather than snapping, and both the
-  spin and the ease are in real time (`advance(dt)`), so the framerate is free to change without changing
-  the feel — this is what fixed a tilt-drag reading choppier than a left/right spin (the tilt had no
-  per-frame animation, only discrete mouse-event jumps).  urwid's canvas cache makes it a panel-only
-  redraw, so it never starves `_sync_session_state`
-  (a full listen between frames is still recorded, and the comet updates from the 2 Hz observe even while
-  `[I]` blocks the loop). `note_session` lays a comet bead only when the session vector actually moved, so
-  ambient rotation and data motion never blur. **Never drive the comet from the animation alarm, and never
-  put session bookkeeping on it.**
-- **The camera is a mouse instrument; the arrows are for the history.** Orbit is **right-drag** (moved off
-  the left button so the left is free), zoom is **scroll**, and an on-panel **orbit-speed slider** (0 =
-  static, starts slow) is set by left-click/drag. So `↑/↓` always move the history cursor — never the
-  camera. `ENTER` is the one focus-dependent key: `_handle_input` routes it to one method (`_enter_action`)
-  that resets the cloud when the cloud is up and replays the focused track when the history is up — still
-  one binding table (the key→method map is fixed). `[T]` cycles the body pane (cloud → history → console);
-  `F1/F2/F3` jump straight to one (unadvertised). `←/→` stay seek; `+/−` zoom. The footer, README,
-  `start.sh` and the fallback advertise this, held together by tests.
-- **The cloud paints 256-colour `AttrSpec`s and needs `set_terminal_properties(colors=256)`.** Without it
-  urwid down-converts every colour to the nearest of 16 and the cloud goes muddy — declare the capability,
-  never emit raw ANSI into the text. Absent mood axes are not fatal: `MoodAxes.load()` returns `None` and
-  the widget draws a rebuild message while the rest of the app plays on.
+
+### The vibe cloud
+
+- **The camera orbits ambient; the comet moves only on data.** `_animate` (a fast alarm, up to ~144 fps,
+  separate from the 0.5 s poll) advances only the camera and redraws just the cloud, and **only when
+  the camera moved enough to matter** (`cloud.pose_changed()`). The camera **eases** toward a mouse-set
+  target rather than snapping, and both the spin and the ease are in real time (`advance(dt)`), so the
+  framerate is free to change without changing the feel. urwid's canvas cache makes it a panel-only
+  redraw, so it never starves `_sync_session_state`. `note_session` lays a comet bead only when the
+  session vector actually moved. **Never drive the comet from the animation alarm, and never put
+  session bookkeeping on it.**
+- **The camera is a mouse instrument; the arrows are for the history.** Orbit is **right-drag** (left
+  is free for picking), zoom is **scroll**, and an on-panel **orbit-speed slider** (0 = static, starts
+  slow) is set by left-click/drag. So `↑/↓` always move the history cursor. `ENTER` is the one
+  focus-dependent key: `_handle_input` routes it to a single method (`_enter_action`) that resets the
+  cloud when the cloud is up and replays the focused track when the history is up — still one binding
+  table. `[T]` cycles the body pane (cloud → history → console); `F1/F2/F3` jump straight to one
+  (unadvertised). `←/→` stay seek; `+/−` zoom.
+- **The cloud paints 24-bit `AttrSpec`s and needs `set_terminal_properties(colors=TRUECOLOR)`.**
+  Without it urwid down-converts every colour to the nearest of 16 and the cloud goes muddy — declare
+  the capability, never emit raw ANSI into the text. **256 is not enough**: its 6×6×6 cube collapsed
+  the 648 colours a depth-shaded library wants into 32, so a point fading far→near arrived in six
+  visible steps and the depth cue read as banding. Colours are packed `0xRRGGBB` throughout
+  (`Frame.color`, the `COL_*` marker constants). `_spec()` quantises its **cache key** to 5 bits per
+  channel — 24-bit is continuous, so an exact-keyed cache would grow without bound in a long session;
+  32 levels per channel caps it at 32,768 and is imperceptible.
+- **Absent mood axes are not fatal.** `MoodAxes.load()` returns `None` and the widget draws a rebuild
+  message while the rest of the app plays on.
+- **Markers are single dots distinguished by colour, never by size.** Fatter billboarded markers
+  (squares, discs, rings) always face the camera, which flattens the cloud into a swimming plane. Depth
+  is carried by shading; clicking uses a nearest-within-radius search, not a bigger target.
 
 ### The taste model
 
@@ -292,13 +274,11 @@ projected back with `snap()` = `normalise(mean(top-25 library embeddings by dot(
 - **A skip cannot seed the taste model.** From zero, one negative update normalises to `−track` at
   unit length: a full-strength claim from a single rejection. This did **not** become redundant when
   the β ramp landed — β gates the *score*, never *retrieval*, and the candidate pool opens its taste
-  half on `np.any(taste_vector)`. Retiring the guard would hand half the pool to "the tracks least
-  like the one song you rejected".
+  half on `np.any(taste_vector)`.
 - **A zero taste vector is inert in retrieval, not just scoring.** An all-zero query to `find_similar`
   returns an arbitrary slice of the library. Do not reverse this when β ramps in.
 - **Loads are atomic.** `ExplorationController.load()` and `UserTaste.load()` read every field before
-  assigning any. Assigning as they went left a truncated file half-applied while returning `False`,
-  so the caller believed nothing had been read.
+  assigning any. Assigning as they went left a truncated file half-applied while returning `False`.
 
 ### Diagnostics
 
@@ -337,7 +317,9 @@ at depth 2 in 30 of 30 mid-track samples during a live 30-track run.
 
 Both produced by one generation run and validated on load. `embeddings_io.validate_embeddings()`
 enforces every row; `TrackLibrary` refuses a file that fails it; `tests/test_embeddings_io.py` breaks
-each field in turn to prove the check is real.
+each field in turn to prove the check is real. All artifact writes go through
+`embeddings_io.atomic_savez` (temp-then-rename), so a killed or full-disk write never corrupts a
+completed file in place.
 
 ### `data/embeddings/track_embeddings.npz` — 45.5 MB
 
@@ -351,7 +333,10 @@ each field in turn to prove the check is real.
 | `windows` | `(ΣW, 512)` float32 | Per-window embeddings, L2-normalised. 24,494 rows. Lets pooling be re-decided without regenerating. |
 | `metadata` | JSON string | Model, transformers/torch versions, date, device, window scheme, timing, window-RMS percentiles. **JSON, not a dict** — a dict in an `.npz` is a pickled object array and forces `allow_pickle=True` on every read. |
 
-Also written: `data/embeddings/failed.txt`, one line per failure with its exception.
+Validation is behavioural, not shape-only: the **centroid must equal `mean(embeddings)`** (a stale one
+would silently centre on the wrong origin), `window_offsets` must be **monotonic non-decreasing** (a
+backwards index would hand one track's windows to another and still validate), and **per-window rows
+must be L2-normalised**, not only the pooled embeddings.
 
 ### `data/embeddings/descriptors.npz` — 93 KB
 
@@ -365,28 +350,26 @@ building it separately invites the two to drift apart.
 | `prompts` | `(D,)` unicode | The rendered prompt (`"This is a recording of {} music."`), kept so the template is auditable. |
 | `text_embeddings` | `(D, 512)` float32 | CLAP text-tower output, L2-normalised. |
 | `mean`, `std` | `(D,)` float32 | Per-descriptor over the centred library — the z-score baseline. Stored rather than computed at startup so the correct path is the only path. |
-| `axis_labels` | `(3,)` unicode | **Mood axes** for the vibe cloud (Phase 3, inspection G3). The auto-selected legible triad — on this library **Tone · Saturation · Organic**. |
+| `axis_labels` | `(3,)` unicode | **Mood axes** for the vibe cloud. The auto-selected legible triad — on this library **Tone · Saturation · Organic**. |
 | `axis_directions` | `(3, D)` float32 | Unit directions in the centred audio space, each `normalise(mean(high-pole text) − mean(low-pole text))`. |
 | `axis_mean`, `axis_std` | `(3,)` float32 | Raw-projection calibration over the library, so a runtime coordinate is `(v·dir − mean)/std` — the vibe's z-score on that axis. |
 
 The four `axis_*` keys are **additive**: `descriptor_bank.SCHEMA_VERSION` is unchanged, an older bank
-without them still loads for the readout, and `MoodAxes.load()` (in `mood_axes.py`) returns `None`
-(reported) when they are absent. They are selected and calibrated **against this library** — like the
-`mean`/`std` above — and stored beside the descriptors because they derive from the text vectors plus the
-centred library and so re-fit with a cheap `--descriptors-only` rebuild, no audio re-embedding. The
-choice of triad is per-user: another library can favour a different one (here Intensity and Saturation
-correlate 0.98, so only one of the pair can be used). `explore_mood_axes.py` imports the same selection.
+without them still loads for the readout, and `MoodAxes.load()` returns `None` (reported) when they
+are absent. They are selected and calibrated **against this library** and re-fit with a cheap
+`--descriptors-only` rebuild — seconds, text tower only, no audio re-embedding. The choice of triad is
+per-user: another library can favour a different one (here Intensity and Saturation correlate 0.98, so
+only one of the pair can be used). `explore_mood_axes.py` imports the same selection from
+`mood_axes.py`, so the offline diagnostic and the stored artifact cannot drift.
+
+**Reading the axes:** `from mood_axes import MoodAxes; axes = MoodAxes.load()` → `axes.labels`,
+`axes.directions`, `axes.coordinates(v)`. `coordinates` takes **either** a single `(512,)` centred
+vector → `(3,)` (the session comet) **or** the whole centred library `(N, 512)` → `(N, 3)` in one call
+(the point cloud). It unit-normalises rows and returns **z-scored** coordinates, so the cloud is
+already centred on the origin with ~unit spread per axis.
 
 **No `anchors` key.** Nothing needs them. They are one line to derive if free-text steering is ever
 built; do not add them speculatively.
-
-`embeddings_io.validate_embeddings()` was strengthened in Phase 3 (inspection D4) beyond shape checks:
-the **centroid must equal `mean(embeddings)`** (a stale one would silently centre on the wrong origin —
-the C5 failure the schema exists to prevent), `window_offsets` must be **monotonic non-decreasing** (a
-backwards index would hand one track's windows to another and still validate), and the **per-window rows
-must be L2-normalised**, not only the pooled embeddings. The artifact writes (`_save_embeddings`, the
-partial checkpoint, the descriptor bank) all go through `embeddings_io.atomic_savez` (temp-then-rename),
-so a killed or full-disk write never corrupts a completed file in place (inspection D3).
 
 ---
 
@@ -487,31 +470,40 @@ orders of magnitude of margin.
 
 The cache is twice the model's size because the repo's `main` carries only `pytorch_model.bin`
 (614.5 MB) and transformers ≥ 5 also fetches the safetensors conversion from `refs/pr/3` (614.4 MB).
-Both stay cached. `EmbeddingGenerator.MODEL_CACHE_MB` / `ARTIFACT_MB` are derived from this, and
+`EmbeddingGenerator.MODEL_CACHE_MB` / `ARTIFACT_MB` are derived from this, and
 `tests/test_documented_numbers.py` holds the README, `start.sh` and the pre-flight check together —
 they originally stated three different sizes because nothing bound them.
 
 Throughput detail: batching buys ~30%, threading the mel extraction buys 2×. On GPU the bottleneck is
 CPU mel extraction, so `--workers` matters more than `--batch-size`; on CPU the encoder dominates.
 
+### Vibe-cloud render cost (96×30 panel, 674 points, Braille)
+
+```
+  compute_frame (numpy raster)     0.11 ms
+  markup build (python per-cell)   0.26 ms
+  urwid.Text(markup).render()      1.08 ms   ← the largest single stage
+  widget.render() total            1.71 ms
+  loop.draw_screen() end-to-end    2.40 ms   -> ~415 fps ceiling
+  terminal bytes                   6.8 KB/frame  (~400 KiB/s at 60 fps)
+```
+
+Scaling: 1.5 ms at 96×28 → 7.1 ms at 300×80 (cells dominate); `compute_frame` is 0.1 ms at 674 points
+and 9.4 ms at 50,000 (so the library size is nowhere near a limit).
+
 ---
 
 ## 8 · Testing
 
-`python3 -m pytest tests` — **651 tests, green, ~20 s.** (619 after Phase 3, 603 after Phase 2, 591 after
-Phase 1, 542 before it. Phase 4 adds `tests/test_vibe_cloud.py` — 32 — and updates the body-layout
-coupling in `test_tui_display`/`test_simple_mode`/`test_art_geometry` to reveal the history before
-asserting on it, since the cloud is the default view now.)
+`python3 -m pytest tests` — **668 tests, green, ~20 s** (measured 2026-07-24; the archived docs
+said 651, which had drifted).
 
 The suite is behavioural, not existence checks. Two of the worst defects in this project's history
 survived a green suite of the latter. What that means in practice, and what to preserve:
 
-- **Modules live in `src/` now (G2).** `conftest.py` puts `src/` on `sys.path`, so the flat imports
-  (`from album_art import …`) still work. But a test that reads a module's **source** off disk — for an
-  AST or regex check — must resolve `parent.parent / "src" / "<module>.py"`, not `parent.parent /
-  "<module>.py"`. `test_mpd_controller` and `test_tui_display` were fixed this way; a new one (e.g. an
-  `album_art.py` source check in Phase 2) has to follow suit.
-
+- **Modules live in `src/`.** `conftest.py` puts `src/` on `sys.path`, so the flat imports still work.
+  But a test that reads a module's **source** off disk — for an AST or regex check — must resolve
+  `parent.parent / "src" / "<module>.py"`.
 - **`FakeMPD` is itself under test.** `tests/test_fake_mpd.py` asserts the double against §5 row by
   row. It has already earned that: a fixture defaulting to `consume off` silently put every component
   back in the broken world, and the replay-gap test caught it.
@@ -525,6 +517,7 @@ survived a green suite of the latter. What that means in practice, and what to p
 - **Rendering is the point.** `test_art_geometry.py` renders the real frame at seven terminal sizes
   and *locates the art placeholder in the canvas* rather than asserting the arithmetic back at itself.
   The first test ever to call `render()` found a crash on every terminal under 33 rows.
+  `test_vibe_cloud.py` follows the same discipline: real canvases at six sizes including degenerate.
 - **The fallback text mode is driven through a pty.** Two traps if you extend it: `tty.setcbreak` uses
   `TCSAFLUSH`, so keys written before the loop starts are **discarded** — send them from the first
   tick; and a burst is consumed by one read, so a key meant to dismiss `[I]` must arrive *after* the
@@ -557,15 +550,15 @@ child) · `_isolate_state_files` and `_restore_stderr` (both autouse).
 ## 9 · Running and verifying it
 
 ```sh
-./start.sh                                                # the only entry point; launches src/main_tui.py
+./start.sh                                                # the only entry point
 python3 src/generate_embeddings.py --help
 python3 src/generate_embeddings.py --stats                # raw vs centred similarity distributions
 python3 src/generate_embeddings.py --describe "Bathory"   # top descriptors for a track
-python3 src/generate_embeddings.py --compare-templates    # re-run the prompt-template measurement
+python3 src/generate_embeddings.py --descriptors-only     # re-fit descriptors + mood axes (seconds)
 ```
 
 A full regeneration takes ~5.5 minutes and **must not be run casually while testing** — it rewrites
-the artifact every downstream number depends on.
+the artifact every downstream number depends on. `--descriptors-only` is safe and cheap.
 
 `main_tui.py` is the only orchestrator. There is no demo/random-embedding path anywhere; it was
 removed on purpose, because random vectors make every similarity, novelty score and learned preference
@@ -589,7 +582,7 @@ Delete `data/state/` before measuring anything about a cold start.
 |---|---|
 | `Space` | Play / Pause |
 | `N` | Skip — a rejection; escalates if you keep pressing it |
-| `V` | Pass — advance without changing the vibe; marks the track `»`, moves nothing in the model |
+| `V` | Pass — advance without changing the vibe; marks the track `»` |
 | `L` | Like; press again on a liked track to un-like |
 | `↑` / `↓` | Move the cursor through the session history |
 | `+` / `−` | Zoom the cloud in / out |
@@ -602,70 +595,23 @@ Delete `data/state/` before measuring anything about a cold start.
 | `Q` | Quit |
 | mouse | Over the cloud: right-drag to orbit, scroll to zoom, left-click a point to inspect it, drag the orbit-speed slider |
 
-The footer, the README table, `start.sh`'s launch banner and both interfaces advertise this list (F1–F3
-are a deliberately unadvertised convenience — only `[T]` is in the footer). Tests drive every row through
-the real key handler, and `test_documented_numbers` guards the `start.sh` banner so it cannot drift again
-(audit E1). The camera is a **mouse** instrument — right-drag orbit, scroll zoom, and an on-panel
-orbit-speed slider that starts slow — which frees the arrows to always mean "history cursor". `Enter` is
-the one focus-dependent key (reset over the cloud, replay over the history): one dispatch method whose
-effect follows `body_view`, not a second binding table (§4). The **Now Playing header carries a `Next:`
-line** so the lookahead is visible without opening the history.
+The footer, the README table, `start.sh`'s launch banner and both interfaces advertise this list
+(F1–F3 are a deliberately unadvertised convenience). Tests drive every row through the real key
+handler, and `test_documented_numbers` guards the `start.sh` banner so it cannot drift.
 
 ---
 
-## 10 · Finding-ID glossary
+## 10 · Open, deferred, and declined
 
-Roughly 450 code comments cite these IDs. This is what each one meant. **All are closed.**
-
-| ID | What it was |
-|---|---|
-| **C1** | The queue never refilled; playback stopped dead after 10 tracks. |
-| **C2** | MPD's `random` mode silently discarded every ordering decision the DJ made. |
-| **C3** | Audio fingerprints were non-deterministic ~10 s random crops, not track representations. |
-| **C4** | `[V]` always threw away the first track of the new vibe (double advance). Dissolved with `[V]`; its "one advance, no `play()`" constraint is still enforced and tested. |
-| **C5** | The similarity scale was compressed (anisotropy); every scoring constant was calibrated against a range that did not exist. |
-| **H1** | The mood word in every vibe description was mathematically pinned to "eclectic". |
-| **H2** | The "Upcoming Queue" panel listed tracks that had already played. |
-| **H3** | Ctrl-C and SIGTERM neither exited nor saved. |
-| **H4** | Skipping did not change what played next. Dissolved by D1. |
-| **H5** | The day-of-week exploration modifier was dead code. |
-| **H6** | Selection was strictly greedy — "exploration" never explored. |
-| **H7** | `mpd_controller.py` defined eight methods twice; the surviving `add_track` swallowed failures. |
-| **H8** | Album-art geometry was hardcoded to a layout that was about to change. |
-| **H9** | Neither `[V]` nor `[N]` changed much of what you heard, and `[V]` aimed off the manifold. |
-| **N1** | The layout raised `WidgetError` on any terminal shorter than 33 rows. Found in Stage 3; predates the audit. |
-| **M1** | The test suite was green theatre and not in the repository. (a: untracked/phase files, b: no `FakeMPD`, c: no round-trips, no fallback-mode coverage.) |
-| **M2** | Two divergent orchestrators; the stale one was what the setup helper told you to run. |
-| **M3** | `mpd_music_directory` was an undocumented, unvalidated requirement that worked by accident. |
-| **M4** | Two different sources of truth for track keys, with no reconciliation. |
-| **M5** | No embedding-dimension validation on load. |
-| **M6** | (a) State file misnamed; (b) anti-repetition history never persisted despite a comment claiming it was. |
-| **M7** | Setup documentation contradicted itself on every number; macOS was claimed but unsupported. |
-| **M8** | `--batch-size` was advertised, accepted, and completely ignored. |
-| **L1** | "The SIGWINCH handler is never invoked." **The finding's conclusion was wrong** — urwid 3.0.5 chains to the previous handler rather than replacing it, so it had been running all along. Acting on the fix direction closed a recursion. |
-| **L2** | Kitty and sixel album art fought urwid for the screen; only ueberzug works. Both paths deleted. |
-| **L3** | Album-art geometry hardcoded. Elevated to H8. |
-| **L4** | Hearts vanished on restart even though likes were already on disk. |
-| **L5** | No log file, and stderr was swallowed while the TUI ran. |
-| **L6** | Polling instead of `mpc idle`. **Declined**, not fixed — see §11. |
-| **L7** | Cold start injected a random direction at 30% weight. |
-| **L8** | Dead API surface across most modules; also, no way to un-like. |
-| **L9** | Assorted small traps: `validate()` built on `assert`, the weight invariant, a dead `[I]`, `select_track` mutating its caller's set, disagreeing keybinding docs, `.gitkeep` scaffolding that did not ship, and an orphaned ueberzugpp child. |
-| **D1–D8** | Design decisions taken before the rewrite: queue depth 10 → 1 (D1), force `consume on` (D2), discard existing embeddings and learned state (D3), delete invented heuristics rather than recalibrate them (D4), use the CLAP text encoder (D5), remove the time-context subsystem (D6), significant refactoring is in scope (D7), delete `[V]` and escalate `[N]` instead (D8). |
-
----
-
-## 11 · Deferred, declined, and open observations
-
-Nothing here is a defect with a known fix being ignored. These are the things a future reviewer should
-know were seen and decided on.
+Nothing here is a defect with a known fix being ignored. These are things that were seen and decided
+on.
 
 ### Deferred by choice
 
 1. **Free-text steering.** "Something nocturnal and sparse": embed the text, take its top-20 library
    tracks, blend toward that centroid. The descriptor machinery already does this mechanically. **The
-   same trap applies** — blend toward the *audio* centroid of matching tracks, never toward the raw
-   text vector.
+   manifold trap applies** — blend toward the *audio* centroid of matching tracks, never toward the
+   raw text vector.
 2. **Per-window representations.** The full window matrix is persisted specifically so this can be
    revisited without regenerating. Medoid clustering or max-over-windows would let a track match on
    one section — better recall, more whiplash. Worth an A/B.
@@ -680,38 +626,46 @@ know were seen and decided on.
 
 ### Declined
 
-- **L6 — `mpc idle`.** Steady state is ~12 `mpc` spawns/sec at 0.8 ms each, about 1% of one core. It
-  matters only against a remote `MPD_HOST`, where each call is a TCP round trip. At depth 1 the one
-  queued track gives the 2 s poll minutes of runway.
-- **A1 — a lock around selector/queue mutation.** The two threads share mutable state, but correctness
-  does not rest on a lock: the GIL makes each `deque`/`dict`/reference op atomic, and the one fatal
-  outcome (advance into an empty queue) is prevented *by construction* — every skip variant adds before
-  it advances, which holds under any interleaving. The realistic residual race briefly makes the queue
+- **`mpc idle` instead of polling.** Steady state is ~12 `mpc` spawns/sec at 0.8 ms each, about 1% of
+  one core. It matters only against a remote `MPD_HOST`, where each call is a TCP round trip. At depth
+  1 the one queued track gives the 2 s poll minutes of runway.
+- **A lock around selector/queue mutation.** The two threads share mutable state, but correctness does
+  not rest on a lock: the GIL makes each `deque`/`dict`/reference op atomic, and the one fatal outcome
+  (advance into an empty queue) is prevented *by construction* — every skip variant adds before it
+  advances, which holds under any interleaving. The realistic residual race briefly makes the queue
   one entry deeper and self-corrects. A lock is cheap insurance, not a fix; adding one now risks a
-  deadlock between the skip path and the background loop for no observed misbehaviour. Deferred until a
-  real race is seen, or added opportunistically.
-- **F1 — MPD reconnection.** `MPDController.connected` is a one-time startup gate that never reverts.
-  This reads like a missing reconnect, but there is no persistent connection to lose: **every operation
-  is a fresh `mpc` subprocess**, so if MPD restarts mid-session the calls fail only while it is down and
-  succeed again on their own once it returns — the app self-heals without any reconnect logic. The flag
-  is a startup check, not a liveness signal, and is not consulted to gate ongoing playback commands.
+  deadlock between the skip path and the background loop for no observed misbehaviour.
+- **MPD reconnection.** `MPDController.connected` is a one-time startup gate that never reverts. This
+  reads like a missing reconnect, but there is no persistent connection to lose: **every operation is
+  a fresh `mpc` subprocess**, so if MPD restarts mid-session the calls fail only while it is down and
+  succeed again on their own once it returns. The flag is a startup check, not a liveness signal.
 
 ### Open observations — measured, not fixed
 
 - **The turnover schedule means little until the session settles.** The first `[N]` press turns over
   **100%** of the pool against its 5% target on a cold session. Consistent with the settling curve in
-  §7, but it is the extreme of it, and it was the first time the escalation had been driven from a
-  genuinely empty `data/state/`. **Worth a measurement of its own before the schedule is ever
-  retuned.**
-- **The Session panel draws no content rows at 80×24.** The header, the packed Now Playing box, the
-  console and the two-row footer consume all 24. The layout renders — nothing crashes — but the panel
-  is a border. Fixing it means re-weighting a tree whose packing *is* the fix for N1.
-- **macOS is untested.** `start.sh` no longer uses any bash 4+ syntax, so it would probably run, but
-  nothing has been run there and album art cannot work (ueberzug/ueberzugpp are X11/Wayland only). The
-  README says Linux and says macOS is untested rather than claiming support.
+  §7, but it is the extreme of it. **Worth a measurement of its own before the schedule is retuned.**
+- **The Session panel draws no content rows at 80×24** when it is the visible pane. The header, the
+  packed Now Playing box and the two-row footer consume all 24. The layout renders — nothing crashes —
+  but the panel is a border.
+- **macOS is untested.** `start.sh` uses no bash 4+ syntax so it would probably run, but nothing has
+  been run there and album art cannot work (ueberzug is X11/Wayland only). The README says Linux.
 - **`[I]`'s fallback page and the urwid overlay are two pieces of code.** They agree on content; only
   the urwid one runs the session bookkeeping while open, because the fallback's own loop is the thing
   that would be blocked.
+- **The Braille grid is the floor on render quality, and it was measured.** At 96×26 the grid is
+  192×104 dots; at the default 0.15 rad/s orbit **95% of points are frozen in any 60 fps frame** and
+  the 5% that move teleport a whole dot, because the median point moves 0.10 dots per repaint. More
+  frames cannot subdivide a step the grid will not subdivide, and Braille cannot be anti-aliased in
+  space — a dot is on or off, and eight dots share one colour (**53% of on-screen points render in
+  another point's colour**). Solid block characters (half blocks, sextants) buy AA and per-subpixel
+  colour and **look far worse** — a filled rectangle is a mosaic tile, and the cloud's appeal is small
+  crisp specks. **Braille has both the finest grid and the smallest mark; it is the right primitive
+  and close to the ceiling.** The browser preview in `archive/` is ~20–40× more pixels; only real
+  pixels close that, and Alacritty has neither sixel nor the kitty protocol, so the sole route is an
+  `ueberzugpp` overlay — at which point the cloud stops being a urwid widget (no clipping, no
+  z-order, broken under tmux multi-client). Not pursued. Do not re-derive this by switching
+  primitives.
 
 ### Reversal notes for the non-obvious decisions
 
@@ -722,8 +676,8 @@ know were seen and decided on.
 | Turnover reported against the skip run's start, not the previous press | "How much has changed since I started skipping" is the question actually being asked. | Trivial — one stored anchor vector. |
 | Drift as a word count, not the cosine | The cosine's p10 is 0.948 over 40 real sessions. | Trivial — `drift()` returns both. Re-read §7 first: the reason is the distribution, not the presentation. |
 | Drift and history stores live in the display layer | Neither is read by selection. Putting a display concern behind the display splits state across a component that cannot see it. | Low, but there is no reason to. |
-| `QueueManager.requeue_next()` adds before it deletes | It already knows its track, so it has nothing to exclude. Appending first means a refusal from MPD leaves the session untouched. | Trivial, but it reintroduces a window where a failed add leaves the queue one deep. `replace_next()` **cannot** use this order — it has to exclude the entry it is dropping. |
-| `skip_turnover_schedule = (0.05, 0.20, 0.50, 0.85)` | The only *input* to the escalation — λ is solved for it at every press. Stated in units the listener can verify. | Trivial, and it is the right knob: add a row rather than fudging λ. The console prints what each press measured. |
+| `QueueManager.requeue_next()` adds before it deletes | It already knows its track, so it has nothing to exclude. Appending first means a refusal from MPD leaves the queue untouched. | Trivial, but it reintroduces a window where a failed add leaves the queue one deep. `replace_next()` **cannot** use this order — it has to exclude the entry it is dropping. |
+| `skip_turnover_schedule = (0.05, 0.20, 0.50, 0.85)` | The only *input* to the escalation — λ is solved for it at every press. Stated in units the listener can verify. | Trivial, and it is the right knob: add a row rather than fudging λ. |
 | `skip_snap_from_run_length = 2` | Both directions measured: below it `snap()` overshoots; at and above it an unguarded λ for the 85% target lands below the library's p1 floor 100% of the time. | Low, but re-measure before moving it — both failure modes are silent. |
 | `RMS_GATE = 0.01` | Not chosen — the window-RMS distribution is bimodal and the gate sits in the empty band. | Trivial, and re-measurable: the distribution is printed by the run and stored in the artifact metadata. |
 | `STD_FLOOR_FRACTION = 0.5` | Relative to the library's own median std, so it needs no recalibration when the model, template or collection changes. | Trivial. The run prints every descriptor's std. |
@@ -731,38 +685,33 @@ know were seen and decided on.
 
 ---
 
-## 12 · Environment
+## 11 · Environment
 
-- Fedora, Python 3.14.6, numpy 1.26.4, urwid 3.0.5, transformers 5.1.0, torch/torchaudio
+- Fedora, Python 3.14.6, numpy 1.26.4, urwid 3.0.5, transformers 5.1.0, torch/torchaudio.
+- Terminal: **Alacritty 0.17** inside **tmux 3.7b**. tmux reports the client as RGB-capable
+  (`terminal-features` includes `RGB`) even though the inner `TERM` is `screen-256color`, so 24-bit
+  colour passes through. Alacritty supports neither sixel nor the kitty graphics protocol — which is
+  why album art needs an `ueberzugpp` X11 overlay.
 - MPD's real `music_directory` is `/mnt/storage/music`, read from `~/.config/mpd/mpd.conf` by
   `music_directory.py` rather than assumed. `/var/lib/mpd/music` is a symlink to it — the reason the
   old hardcoded default worked, and the reason it hid.
 - Embedding generation runs on an RTX 3070 in ~5.5 minutes.
-- **Album art works only via ueberzugpp** (or classic ueberzug). The kitty and sixel paths are
-  deleted; that user is told what to install.
 
 ---
 
-## 13 · How it got here
+## 12 · Repo layout
 
-| Stage | What it did |
-|---|---|
-| **0** | Cleared the ground: deleted the second orchestrator, the time-context subsystem, the invented heuristics and the demo-embedding paths; tracked `tests/`; added `data/dj.log`. |
-| **1** | Rebuilt the signal: full-coverage deterministic embeddings, the centroid, schema validation, `mpc listall` as the only key source, the 49-word descriptor bank. |
-| **2** | Made it play: depth-1 queue with `consume on`, the one skip path, mode force/restore across every exit, rank-Boltzmann sampling, the solved-λ escalation. |
-| **3** | Made it legible: descriptor readout, Session panel, derived album-art geometry, the first tests that render — which immediately found N1. |
-| **4** | Made it durable: persistence round-trips, the fallback mode under a pty with a shared binding table, un-like as a replay, kitty/sixel deleted, the ueberzugpp child terminated, the setup numbers measured and bound by a test. |
-
-Each stage re-measured rather than inheriting, and each time it changed something material. Stage 4
-was the first where the thing that turned out to be wrong was a *finding* rather than a number — see
-§1's corollary.
-
-After the rewrite, an independent inspection (`inspection_findings.md`) reopened the codebase and drew a
-four-phase follow-up:
-
-| Phase | What it did |
-|---|---|
-| **1** | Foundation: moved every module under `src/`, the `[V]` neutral skip, the 75% full-listen threshold, and the doc/dead-code reconciliations. |
-| **2** | Album-art lifecycle: one `ImageProtocol` base that respawns a dead ueberzugpp child mid-call, honest `available`, cache cleanup on SIGTERM, atomic cache writes. |
-| **3** | Generation durability (CUDA determinism flags, batch-size-pinned resume, atomic `.npz` writes, stronger `validate_embeddings`) and the stored, per-library **mood axes** (`mood_axes.py`) the cloud needs. |
-| **4** | The **vibe cloud** (`vibe_cloud.py`): the rotating 3-D Braille + 256-colour point cloud as the TUI centrepiece — a vectorised rasteriser (each point a single Braille dot, **depth-shaded** — near bright, far dim — so rotation reads as 3-D without billboarded markers; clicking uses a nearest-within-radius search) with an **eased, framerate-independent camera** on its own up-to-144 fps panel-only alarm that only repaints when the view moved, with a data-only session comet, an on-panel orbit-speed slider, a `Next:` line in the header, panes on `[T]`/F-keys, and mouse right-drag/scroll/click — all through the one shared binding table. |
+```
+start.sh                  the only entry point
+PROJECT.md                this file
+README.md                 user-facing setup + usage
+src/                      every application module (flat imports, src/ on sys.path)
+tests/                    668 tests; conftest.py owns the fixtures and the state isolation
+data/embeddings/          track_embeddings.npz, descriptors.npz, failed.txt  (not committed)
+data/state/               learned state; regenerated by listening  (not committed)
+data/dj.log               the durable diagnostic copy
+archive/                  frozen design references — do not edit
+explore_mood_axes.py      offline: pick and analyse the mood-axis triad for a library
+vibe_cloud_demo.py        offline: the Braille render as a standalone script
+render_terminal_frames.py offline: baked-frame terminal mock
+```

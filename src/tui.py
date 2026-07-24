@@ -58,7 +58,7 @@ from album_art import get_album_art_renderer
 from session_history import SessionHistory
 from vibe_readout import VibeReadout, format_descriptors
 from mood_axes import MoodAxes
-from vibe_cloud import VibeCloudWidget, point_rgb
+from vibe_cloud import TRUECOLOR, VibeCloudWidget, point_rgb
 
 
 # ─── Console log interceptor ────────────────────────────────────────────────
@@ -570,13 +570,15 @@ class AdaptiveDJTUI:
             unhandled_input=self._handle_input,
         )
 
-        # The vibe cloud paints in 256-colour `AttrSpec`s (G3).  Without this urwid
+        # The vibe cloud paints in 24-bit `AttrSpec`s (G3).  Without this urwid
         # down-converts every one to the nearest of 16 and the cloud goes muddy —
         # so declare the high-colour capability rather than emitting raw ANSI.
-        # Harmless on a 16-colour terminal (urwid still down-converts there); this
-        # only unlocks the full cube where the terminal supports it.
+        # Harmless where the terminal has less (urwid still down-converts); this
+        # only unlocks the full range where it is supported.  256 was not enough:
+        # its 6×6×6 cube collapsed the 648 colours a depth-shaded library wants
+        # into 32, so a point fading far→near arrived in six visible steps.
         try:
-            self.loop.screen.set_terminal_properties(colors=256)
+            self.loop.screen.set_terminal_properties(colors=TRUECOLOR)
         except Exception:                                  # noqa: BLE001
             pass
 

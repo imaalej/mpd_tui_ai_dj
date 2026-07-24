@@ -1,6 +1,6 @@
 """
 The vibe cloud — Phase 4's centrepiece, a rotating 3-D point cloud of the library
-in mood space, drawn in the terminal with Braille + 256 colour.
+in mood space, drawn in the terminal with Braille + 24-bit colour.
 
 Two halves live here, split so the arithmetic is testable without a tty:
 
@@ -58,6 +58,11 @@ BRAILLE_BASE = 0x2800
 BRAILLE_LUT = np.array([BRAILLE_BITS[(i // 4, i % 4)] for i in range(8)],
                        dtype=np.uint8)
 
+# urwid's colour-depth selector for 24-bit.  The cloud's colours are packed
+# 0xRRGGBB throughout (`Frame.color`, the marker constants) and are handed to
+# `AttrSpec` as '#rrggbb'.  `tui.py` declares the same depth on the screen.
+TRUECOLOR = 1 << 24
+
 # Every point and every marker is a single Braille dot.  Fatter markers
 # (squares/discs/rings) are billboarded — always facing the camera — which
 # flattens the cloud into a swimming plane; a 1-dot mark has no facing.  So depth
@@ -104,11 +109,13 @@ COMET_MAX = 48
 COMET_MOVE_EPSILON = 0.05
 
 # Bright, full-brightness contrasting colours for the markers — each drawn as a
-# single dot on top of the (depth-shaded) library so it stands out.
-COL_COMET_HEAD = 231          # white — the session's current position
-COL_COMET_TRAIL = (223, 216, 209, 202)   # warm amber → orange, tail → head
-COL_CURRENT = 51              # bright cyan — the playing track
-COL_SELECTED = 201            # bright magenta — a clicked point
+# single dot on top of the (depth-shaded) library so it stands out.  Packed
+# 0xRRGGBB, like everything else in `Frame.color`; the values are the exact RGB
+# the xterm-256 codes these replace resolved to, so the palette is unchanged.
+COL_COMET_HEAD = 0xFFFFFF     # white — the session's current position (was 231)
+COL_COMET_TRAIL = (0xFFD7AF, 0xFFAF87, 0xFF875F, 0xFF5F00)  # amber → orange
+COL_CURRENT = 0x00FFFF        # bright cyan — the playing track (was 51)
+COL_SELECTED = 0xFF00FF       # bright magenta — a clicked point (was 201)
 
 
 # ── Colour ────────────────────────────────────────────────────────────────────
@@ -156,10 +163,18 @@ def point_rgb(coords: np.ndarray) -> np.ndarray:
     return _hsv_to_rgb(hue, sat, val)
 
 
-def _rgb_to_256_array(rgb: np.ndarray) -> np.ndarray:
-    """`(N, 3)` RGB → `(N,)` xterm-256 codes (the 6×6×6 cube), vectorised."""
-    q = np.round(np.asarray(rgb, dtype=np.float64) / 255 * 5).astype(np.int32)
-    return (16 + 36 * q[:, 0] + 6 * q[:, 1] + q[:, 2]).astype(np.int32)
+def _rgb_to_packed(rgb: np.ndarray) -> np.ndarray:
+    """
+    `(N, 3)` RGB → `(N,)` packed 0xRRGGBB, vectorised.
+
+    This used to quantise to the xterm-256 cube (6 levels per channel), which
+    collapsed the 648 distinct colours a depth-shaded library wants into 32 —
+    a single point fading far→near got **six** steps, so the depth cue arrived
+    banded.  24-bit keeps all of them; `VibeCloudWidget._spec` declares the
+    capability and urwid still down-converts on a terminal that lacks it.
+    """
+    v = np.clip(np.asarray(rgb, dtype=np.float64), 0, 255).astype(np.int32)
+    return (v[:, 0] << 16) | (v[:, 1] << 8) | v[:, 2]
 
 
 # ── Geometry ──────────────────────────────────────────────────────────────────
@@ -179,7 +194,7 @@ class Frame:
     The result of projecting the cloud for one camera pose, as dense grids.
 
     All three are `(rows, cols)` arrays: `bits` is the OR of the Braille dot bits
-    lit in each character cell; `color` is the 256-colour code of the front-most
+    lit in each character cell; `color` is the packed 0xRRGGBB of the front-most
     thing there (−1 = empty); `hit` is the index of the front-most *library* point
     whose dot falls there (−1 = none / a mark), so a click resolves to a track,
     never to the comet.  Dense rather than dict because the rasteriser fills them
@@ -258,12 +273,12 @@ def compute_frame(coords: np.ndarray,
     if shade and len(z) and float(z.max() - z.min()) > 1e-9:
         t = (z - z.min()) / (z.max() - z.min())
         factor = SHADE_MIN + (1.0 - SHADE_MIN) * t
-        color256 = _rgb_to_256_array(
+        packed = _rgb_to_packed(
             np.clip(np.asarray(rgb, dtype=np.float64) * factor[:, None], 0, 255))
     else:
-        color256 = _rgb_to_256_array(rgb)
+        packed = _rgb_to_packed(rgb)
 
-    splat(projected, color256, np.arange(len(coords), dtype=np.int32), 0.0)
+    splat(projected, packed, np.arange(len(coords), dtype=np.int32), 0.0)
 
     # The current track: a single bright-cyan dot on top (index −1: a mark).
     if current_idx is not None and 0 <= current_idx < len(coords):
@@ -355,7 +370,7 @@ def hit_test(frame: Frame, col: int, row: int, radius: int = 2) -> Optional[int]
 
 if URWID_AVAILABLE:
 
-    _READOUT_SPEC = urwid.AttrSpec("h250", "default", 256)
+    _READOUT_SPEC = urwid.AttrSpec("#bcbcbc", "default", TRUECOLOR)
 
     class VibeCloudWidget(urwid.Widget):
         """
@@ -601,10 +616,19 @@ if URWID_AVAILABLE:
             return canvas
 
         def _spec(self, code: int):
-            spec = self._spec_cache.get(code)
+            """An `AttrSpec` for a packed 0xRRGGBB colour, cached.
+
+            The cache key is quantised to 5 bits per channel.  With the 256-cube
+            the key space was 256 entries; 24-bit colour is continuous, so an
+            exact-keyed cache in a session that runs all night would grow without
+            bound.  32 levels per channel caps it at 32,768 — still five times the
+            cube's resolution per channel, and the step is imperceptible.
+            """
+            key = code & 0xF8F8F8
+            spec = self._spec_cache.get(key)
             if spec is None:
-                spec = urwid.AttrSpec(f"h{code}", "default", 256)
-                self._spec_cache[code] = spec
+                spec = urwid.AttrSpec(f"#{key:06x}", "default", TRUECOLOR)
+                self._spec_cache[key] = spec
             return spec
 
         def _frame_markup(self, frame: Frame, cols: int, rows: int) -> list:
@@ -640,7 +664,7 @@ if URWID_AVAILABLE:
                         gap = 0
                     code = int(row_color[cx])
                     if code < 0:
-                        code = 231
+                        code = 0xFFFFFF
                     glyph = chr(BRAILLE_BASE + bits)
                     if run_code is None or code == run_code:
                         run_code = code
@@ -698,7 +722,7 @@ if URWID_AVAILABLE:
             x0 = len(label) + 1                                # inside the '['
             self._slider = (row_index, x0, track_w)
             return [(_READOUT_SPEC, label + "["),
-                    (self._spec(51 if frac > 0.001 else 244), track),
+                    (self._spec(0x00FFFF if frac > 0.001 else 0x808080), track),
                     (_READOUT_SPEC, "]" + suffix.ljust(
                         max(0, cols - len(label) - 1 - track_w - 1)))]
 

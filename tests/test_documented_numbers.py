@@ -163,8 +163,8 @@ def test_the_start_sh_control_banner_lists_every_binding():
     """
     E1: the launcher's control banner was a third, drifted copy of the binding
     list — it omitted `[↑↓] History` and `[ENTER] Replay`, the exact L9/M7 drift
-    the rewrite prides itself on closing, while `project_state.md` claimed "the
-    footer, the README table and both interfaces advertise exactly this list."
+    the rewrite prides itself on closing, while the docs claimed "the footer, the
+    README table and both interfaces advertise exactly this list."
     Bind the banner to the full set here so it cannot drift again — and so a new
     binding (the `[V]` pass, G1) has to be added to the launcher too.
     """

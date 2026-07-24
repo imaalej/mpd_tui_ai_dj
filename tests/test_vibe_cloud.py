@@ -70,14 +70,30 @@ def test_distinct_regions_get_distinct_colours(rng):
     """A cloud drawn in one colour would defeat the point — position and hue
     agree, so a spread of positions yields a spread of hues."""
     coords = rng.standard_normal((200, 3)) * 1.5
-    codes = vc._rgb_to_256_array(vc.point_rgb(coords))
+    codes = vc._rgb_to_packed(vc.point_rgb(coords))
     assert len(set(codes.tolist())) > 10
 
 
-def test_rgb_to_256_maps_corners_sensibly():
-    corners = vc._rgb_to_256_array(np.array([[0, 0, 0], [255, 255, 255]]))
-    assert corners[0] == 16 and corners[1] == 231
-    assert (corners >= 16).all() and (corners <= 231).all()
+def test_rgb_to_packed_round_trips_every_channel():
+    packed = vc._rgb_to_packed(np.array([[0, 0, 0], [255, 255, 255],
+                                         [18, 52, 86]]))
+    assert packed[0] == 0x000000 and packed[1] == 0xFFFFFF
+    assert packed[2] == 0x123456, "channels must pack R,G,B in that order"
+
+
+def test_depth_shading_is_not_quantised_into_a_handful_of_steps(scene):
+    """The reason the cloud paints 24-bit rather than the xterm-256 cube.
+
+    The cube has six levels per channel, so a single point fading from far to
+    near collapsed into ~6 distinct colours and the depth cue arrived visibly
+    banded.  Packed 24-bit keeps the whole ramp.  Asserted as a property of the
+    ramp itself, not of one frame, so it cannot pass by accident.
+    """
+    white = np.array([[255, 255, 255]], dtype=np.uint8)
+    levels = np.linspace(vc.SHADE_MIN, 1.0, 64)[:, None]
+    ramp = vc._rgb_to_packed(np.clip(white * levels, 0, 255))
+    assert len(np.unique(ramp)) > 40, (
+        "a 64-step depth ramp must survive as far more than the cube's six")
 
 
 # ── Pure geometry ─────────────────────────────────────────────────────────────
@@ -93,9 +109,9 @@ def test_compute_frame_lights_cells_for_a_real_cloud(scene):
     coords, rgb, _ = scene
     frame = vc.compute_frame(coords, rgb, 80, 24, 0.5, 0.5)
     assert int((frame.bits > 0).sum()) > 0, "a 40-point cloud must light cells"
-    # every lit cell has a colour and every colour is a valid xterm code
+    # every lit cell has a colour, and every colour is a packed 0xRRGGBB
     lit = frame.bits > 0
-    assert (frame.color[lit] >= 16).all() and (frame.color[lit] <= 231).all()
+    assert (frame.color[lit] >= 0).all() and (frame.color[lit] <= 0xFFFFFF).all()
 
 
 def test_nearer_points_win_a_shared_cell():

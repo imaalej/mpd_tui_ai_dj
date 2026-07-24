@@ -33,5 +33,7 @@ data-driven per library — see `explore_mood_axes.py`.
 
 ## Snapshot
 
-Planning phase, July 2026. The full design record and the staged work plan live
-in `../inspection_findings.md`.
+Planning phase, July 2026. `../inspection_findings.md` held the design record and
+the staged work plan; it and `../project_state.md` were distilled into
+`../PROJECT.md` and now live only in git history
+(`git show c599ab7:inspection_findings.md`).
