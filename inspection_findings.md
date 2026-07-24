@@ -451,6 +451,47 @@ authority on dimension (§6). Verify: extend `test_embeddings_io` to break each 
 stored axes reproduce `explore_mood_axes.py`'s pick on the real library (skip if `data/embeddings/`
 absent).
 
+> **What Phase 3 actually did** (branch `rewrite/phase-3`, suite 603 → 618; so Phase 4 doesn't re-derive it):
+> - **D1** — `load_model` now also sets `cudnn.deterministic = True`, exports `CUBLAS_WORKSPACE_CONFIG`
+>   before the first CUDA call, and calls `torch.use_deterministic_algorithms(True, warn_only=True)`.
+>   `warn_only=True` is deliberate: an op with no deterministic CUDA kernel logs a warning instead of
+>   crashing a 5-minute run. The **real** guarantee stays the empirical cross-run test
+>   (`test_a_real_track_reproduces_its_stored_embedding`) — verified: the pre-existing library, generated
+>   *before* these flags, still re-embeds bit-for-bit *with* them, so no embedding regeneration was needed.
+> - **D2** — `_save_partial` records `batch_size`; `_load_partial` returns `(pooled, windows, batch_size)`;
+>   the resume branch raises `EmbeddingGenerationError` if the stored size differs from `--batch-size`.
+>   Rows from two batch sizes are not bit-identical, so mixing them in one artifact is refused.
+> - **D3** — atomic writes live in **`embeddings_io.atomic_savez(path, arrays, compressed=)`** (pure numpy,
+>   so the player never imports torch to reach it): temp file in the dest dir → `np.savez` → `os.replace`.
+>   `_save_partial`/`_save_embeddings` and the descriptor-bank write all use it; `_atomic_savez` on the
+>   generator is now a thin alias. `_load_partial` on a corrupt/truncated partial is now a **hard
+>   `EmbeddingGenerationError`** naming the file, not a swallowed warning that silently restarts. (The old
+>   "survived rather than fatal" test was replaced with `test_a_corrupt_partial_is_a_hard_error`.)
+> - **D4** — `validate_embeddings` now also checks: centroid == `mean(embeddings)` (max-dev > 1e-4 fails,
+>   ordered *after* the embeddings-norm gate so an unnormalised file reports that first), `window_offsets`
+>   monotonic non-decreasing, and per-window L2 norms. The **existing real artifact already passes all
+>   three** — no embedding regeneration needed.
+> - **Mood axes** — new pure-numpy module **`src/mood_axes.py`** (`CANDIDATE_AXES`, `build_axis`,
+>   `select_axes` → `AxisSelection`, `selection_arrays`, and the runtime `MoodAxes` loader with
+>   `.coordinates(vector)`). The chosen triad on this library is **Tone · Saturation · Organic** (the
+>   balanced auto-pick — *not* the prose "Intensity·Tone·Organic" in G3, which was the runner-up; the pick
+>   is the script's, reproduced by a test). Stored **beside the descriptors in `descriptors.npz`** as four
+>   **additive** keys — `axis_labels (3,)`, `axis_directions (3,512) f32` (unit, centred-audio space),
+>   `axis_mean (3,) f32`, `axis_std (3,) f32` (raw-projection calibration, so a coord is
+>   `(v·dir − mean)/std`). **`descriptor_bank.SCHEMA_VERSION` is unchanged** — the keys are additive, an
+>   older bank still loads for the readout, and `MoodAxes.load` returns `None` (reported) when they're
+>   absent.
+> - **Why descriptors.npz, not track_embeddings.npz** (Phase 4 note): the axes are derivable from the two
+>   existing artifacts with **no audio re-embedding**, so they were produced by `--descriptors-only`
+>   (seconds, text tower only) — the expensive-regeneration gate never had to fire. `track_embeddings.npz`
+>   schema is untouched (still v2). `explore_mood_axes.py` now imports the selection from `mood_axes` so the
+>   offline diagnostic and the stored artifact cannot drift.
+>
+> **Phase 4 reads the axes with `from mood_axes import MoodAxes; axes = MoodAxes.load()`** — `axes.labels`,
+> `axes.directions`, and `axes.coordinates(centred_vector)` → the z-scored 3-vector to place a point/comet
+> (and to colour it as HSV, per G3). Handle `axes is None` (rebuild message) as the "absent is not fatal"
+> path. `data/embeddings/descriptors.npz` on disk **already carries the axes** (rebuilt this phase).
+
 ---
 
 ### Phase 4 — Vibe-cloud widget and TUI restructure

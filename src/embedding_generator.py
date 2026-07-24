@@ -53,6 +53,7 @@ asserts and what the test suite can check.
 """
 
 import json
+import os
 import warnings
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
@@ -64,7 +65,7 @@ import numpy as np
 
 # Reading/validating the artifact is pure numpy and lives in embeddings_io so
 # the player never has to import torch.  SCHEMA_VERSION is defined there, once.
-from embeddings_io import SCHEMA_VERSION
+from embeddings_io import SCHEMA_VERSION, atomic_savez
 
 # Try to import torch/transformers - these are optional dependencies
 try:
@@ -243,11 +244,29 @@ class CLAPEmbeddingGenerator:
             self.model = self.model.to(self.device)
             self.model.eval()
 
-            # Determinism (C3).  Autotuning picks convolution algorithms by
-            # timing them, which can differ between runs of the same input; with
-            # benchmarking off the choice is fixed.
+            # Determinism (C3, inspection D1).  Autotuning picks convolution
+            # algorithms by timing them, which can differ between runs of the
+            # same input; with benchmarking off the choice is fixed.  But fixing
+            # *selection* is not the same as fixing the chosen kernel: a cuDNN
+            # convolution can still run a non-deterministic algorithm.  So we also
+            # ask cuDNN for deterministic kernels and turn on torch's global
+            # deterministic-algorithms guard.
+            #
+            # `warn_only=True` is deliberate: some ops have no deterministic CUDA
+            # implementation, and the honest outcome there is a warning in the
+            # log, not a crashed 5-minute run.  Where a deterministic kernel
+            # exists it is now used; where none exists the empirical cross-run
+            # test (`test_a_real_track_reproduces_its_stored_embedding`) remains
+            # the actual guarantee.  cuBLAS honours the guard only with a
+            # workspace config set before the first CUDA call.
             if self.device.startswith('cuda'):
                 torch.backends.cudnn.benchmark = False
+                torch.backends.cudnn.deterministic = True
+                os.environ.setdefault('CUBLAS_WORKSPACE_CONFIG', ':4096:8')
+                try:
+                    torch.use_deterministic_algorithms(True, warn_only=True)
+                except Exception as exc:               # noqa: BLE001
+                    warnings.warn(f"could not enable deterministic algorithms: {exc}")
 
             if progress_callback:
                 progress_callback(f"Model loaded on {self.device_name}")
@@ -479,7 +498,19 @@ class CLAPEmbeddingGenerator:
         windows: Dict[str, np.ndarray] = {}
 
         if resume and partial_file.exists():
-            pooled, windows = self._load_partial(partial_file)
+            pooled, windows, partial_batch_size = self._load_partial(partial_file)
+            # inspection D2: rows computed under a different batch size are not
+            # bit-identical to these (GPU reductions depend on batch composition,
+            # which is exactly why batch_size is recorded in the artifact
+            # metadata).  Resuming with a different size would splice two regimes
+            # into one file the schema cannot tell apart.  Refuse it.
+            if partial_batch_size is not None and partial_batch_size != self.batch_size:
+                raise EmbeddingGenerationError(
+                    f"partial results were built with --batch-size {partial_batch_size}, "
+                    f"but this run uses {self.batch_size}.  Rows from two batch sizes "
+                    f"are not bit-identical; resume with --batch-size {partial_batch_size} "
+                    f"or start fresh without --resume."
+                )
             if progress_callback:
                 progress_callback(f"Resuming: {len(pooled)} tracks already processed")
 
@@ -608,21 +639,39 @@ class CLAPEmbeddingGenerator:
         ).astype(np.float32)
         return names, embeddings, offsets, window_matrix
 
+    # Atomic writes (inspection D3) live in embeddings_io — the pure-numpy half —
+    # so the player never imports torch to reach them.  Kept as a thin static
+    # alias here because the generator's own I/O and its tests call it directly.
+    _atomic_savez = staticmethod(atomic_savez)
+
     def _save_partial(self, pooled, windows, order, partial_file: Path):
         """Checkpoint mid-run.  Same layout as the final file minus the
-        centroid, which is only meaningful over a complete library."""
+        centroid, which is only meaningful over a complete library.  The batch
+        size is recorded so `--resume` can refuse a size that would produce rows
+        the code itself calls non-equivalent (inspection D2)."""
         names, embeddings, offsets, window_matrix = self._stack(pooled, windows, order)
-        partial_file.parent.mkdir(parents=True, exist_ok=True)
-        np.savez(
-            partial_file,
-            track_files=np.array(names, dtype=np.str_),
-            embeddings=embeddings,
-            window_offsets=offsets,
-            windows=window_matrix,
-        )
+        self._atomic_savez(partial_file, {
+            'track_files': np.array(names, dtype=np.str_),
+            'embeddings': embeddings,
+            'window_offsets': offsets,
+            'windows': window_matrix,
+            'batch_size': np.array(self.batch_size),
+        })
 
     @staticmethod
     def _load_partial(partial_file: Path):
+        """
+        Read a checkpoint back.  Returns (pooled, windows, batch_size); the batch
+        size is None on a pre-D2 partial that never stored it.
+
+        A corrupt partial is a **hard error** (inspection D3), not a swallowed
+        warning: the old behaviour returned empty and looked like a normal slow
+        run, silently discarding every track already embedded while the CLI told
+        the user their progress was safe.  With atomic writes a partial can no
+        longer be truncated by an interrupted save, so an unreadable one means
+        real damage the user needs to know about — the honest response is to stop
+        and say so, not to quietly start over.
+        """
         try:
             data = np.load(partial_file, allow_pickle=False)
             names = [str(t) for t in data['track_files']]
@@ -632,10 +681,13 @@ class CLAPEmbeddingGenerator:
             windows = {
                 t: matrix[offsets[i]:offsets[i + 1]] for i, t in enumerate(names)
             }
-            return pooled, windows
+            batch_size = int(data['batch_size']) if 'batch_size' in data else None
+            return pooled, windows, batch_size
         except Exception as exc:                       # noqa: BLE001
-            warnings.warn(f"Failed to load partial results: {exc}")
-            return {}, {}
+            raise EmbeddingGenerationError(
+                f"partial results at {partial_file} are unreadable ({exc}). "
+                f"Delete the file and rerun, or run without --resume to start fresh."
+            )
 
     def _save_embeddings(self, pooled, windows, order, output_file: Path, stats):
         """Write `track_embeddings.npz` to the schema in the audit's §7."""
@@ -675,20 +727,20 @@ class CLAPEmbeddingGenerator:
             },
         }
 
-        output_file.parent.mkdir(parents=True, exist_ok=True)
         # Metadata is a JSON string rather than a pickled dict so the artifact
         # loads with `allow_pickle=False` (M5 asks for validation on load; not
-        # executing arbitrary pickles while doing it is free).
-        np.savez_compressed(
-            output_file,
-            schema_version=np.array(SCHEMA_VERSION),
-            track_files=np.array(names, dtype=np.str_),
-            embeddings=embeddings,
-            centroid=centroid,
-            window_offsets=offsets,
-            windows=window_matrix,
-            metadata=np.array(json.dumps(metadata)),
-        )
+        # executing arbitrary pickles while doing it is free).  Written
+        # atomically (inspection D3) so a kill or a full disk mid-write cannot
+        # destroy a completed run in place.
+        self._atomic_savez(output_file, {
+            'schema_version': np.array(SCHEMA_VERSION),
+            'track_files': np.array(names, dtype=np.str_),
+            'embeddings': embeddings,
+            'centroid': centroid,
+            'window_offsets': offsets,
+            'windows': window_matrix,
+            'metadata': np.array(json.dumps(metadata)),
+        }, compressed=True)
         return metadata
 
 
