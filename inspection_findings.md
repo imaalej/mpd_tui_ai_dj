@@ -487,10 +487,16 @@ absent).
 >   schema is untouched (still v2). `explore_mood_axes.py` now imports the selection from `mood_axes` so the
 >   offline diagnostic and the stored artifact cannot drift.
 >
-> **Phase 4 reads the axes with `from mood_axes import MoodAxes; axes = MoodAxes.load()`** — `axes.labels`,
-> `axes.directions`, and `axes.coordinates(centred_vector)` → the z-scored 3-vector to place a point/comet
-> (and to colour it as HSV, per G3). Handle `axes is None` (rebuild message) as the "absent is not fatal"
-> path. `data/embeddings/descriptors.npz` on disk **already carries the axes** (rebuilt this phase).
+> **Phase 4 reads the axes with `from mood_axes import MoodAxes; axes = MoodAxes.load()`** — then
+> `axes.labels`, `axes.directions`, and `axes.coordinates(v)`. `coordinates` takes **either** a single
+> `(512,)` centred vector → `(3,)` (the session comet) **or** the whole centred library `(N, 512)` → `(N, 3)`
+> in one call (the point cloud). It unit-normalises rows and returns **z-scored** coordinates, so the cloud
+> is already centred on the origin with ~unit spread per axis — no separate camera rescale needed; colour
+> each point from its own three coords as HSV (G3). The per-point track key for click-to-inspect is just the
+> aligned `track_files[i]` from `track_embeddings.npz` (or `TrackLibrary.track_list`). To get the centred
+> library, reuse the app's `embeddings_io.centre(embeddings, centroid)` (or `TrackLibrary`, which already
+> centres on load). Handle `axes is None` (rebuild message) as the "absent is not fatal" path.
+> `data/embeddings/descriptors.npz` on disk **already carries the axes** (rebuilt this phase).
 
 ---
 

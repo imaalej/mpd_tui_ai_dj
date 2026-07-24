@@ -121,6 +121,23 @@ def test_axes_round_trip_through_an_npz(rng, monkeypatch, tmp_path):
     assert coords[0] > 0
 
 
+def test_coordinates_batch_matches_per_row(rng, monkeypatch, tmp_path):
+    """
+    Phase 4 projects the whole library in one call for the point cloud; a batch
+    (N, D) → (N, 3) must equal projecting each row on its own.
+    """
+    text, labels, library, axes = _controlled_bank(rng)
+    monkeypatch.setattr(mood_axes, 'CANDIDATE_AXES', axes)
+    sel = select_axes(text, labels, library)
+    m = MoodAxes(sel.labels, sel.directions, sel.mean, sel.std)
+
+    lib32 = library.astype(np.float32)
+    batch = m.coordinates(lib32)
+    assert batch.shape == (library.shape[0], 3)
+    per_row = np.stack([m.coordinates(v) for v in lib32])
+    assert np.allclose(batch, per_row, atol=1e-5)
+
+
 def test_a_bank_without_axes_loads_as_none(tmp_path):
     """An older descriptors.npz predates the axes — reported, never a crash."""
     path = tmp_path / 'descriptors.npz'
@@ -181,7 +198,8 @@ def test_the_real_frame_is_a_cloud_not_a_pancake(real_artifacts):
     """
     stored, library = real_artifacts
     axes = MoodAxes(stored['labels'], stored['directions'], stored['mean'], stored['std'])
-    coords = np.stack([axes.coordinates(v) for v in library])
+    coords = axes.coordinates(library)          # whole library in one call
+    assert coords.shape == (library.shape[0], 3)
     cov = np.cov(coords, rowvar=False)
     ev = np.clip(np.linalg.eigvalsh(cov), 0, None)
     pr = float(ev.sum() ** 2 / np.square(ev).sum())

@@ -253,10 +253,26 @@ class MoodAxes:
 
     def coordinates(self, vector: np.ndarray) -> np.ndarray:
         """
-        Place one centred-audio-space vector on the three axes, z-scored against
-        the library's own spread.  Returns a (3,) float array.
+        Place centred-audio-space vector(s) on the three axes, z-scored against
+        the library's own spread.
+
+        Accepts a single `(D,)` vector → `(3,)`, or a batch `(N, D)` → `(N, 3)`,
+        so Phase 4 can project the whole library for the point cloud in one call
+        (`MoodAxes.load().coordinates(centred_library)`) and the session vector
+        for the comet with the same method.
+
+        Rows are unit-normalised first — the calibration was measured over the
+        normalised library, and `DescriptorBank.z_scores` normalises for the same
+        reason.  Because the result is z-scored, the cloud comes out naturally
+        centred on the origin with unit spread per axis, so the camera needs no
+        separate rescaling.
         """
         vector = np.asarray(vector, dtype=np.float32)
-        projections = self.directions @ vector
+        single = vector.ndim == 1
+        rows = vector[None, :] if single else vector
+        norms = np.linalg.norm(rows, axis=1, keepdims=True)
+        norms = np.where(norms < 1e-12, 1.0, norms)
+        rows = rows / norms
         std = np.where(self.std < 1e-12, 1.0, self.std)
-        return (projections - self.mean) / std
+        coords = (rows @ self.directions.T - self.mean) / std
+        return coords[0] if single else coords
