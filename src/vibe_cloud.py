@@ -125,12 +125,22 @@ COMET_MOVE_EPSILON = 0.05
 #     large *negative* depth bump: its dots light up, but any library point in
 #     the same cell wins that cell's colour.  The frame can never recolour the
 #     data, only sit behind it.
-# The box is **±2σ**, not a number picked to look right: the coordinates are
-# z-scored per axis (§6), so 2.0 is a stated fact about the library — most of it
-# is inside the box and the outliers visibly are not.  It also happens to be the
-# largest box that stays on the panel: at the fixed 0.5 tilt a cube corner
-# reaches 1.556·e vertically against the panel's 3.0σ half-height.
+# **The box is the library's own bounding box, one extent per axis.**
+#
+# It started as a ±2σ cube, which left 55 of 674 tracks outside it — and a cube
+# is the wrong shape here anyway.  Measured on this library: Tone spans ±3.74σ,
+# Saturation ±1.94, Organic ±2.82.  A *cube* containing all of that is ±3.74 on
+# every axis, **61% of which is volume the library never occupies** — and since
+# the box is fitted to the panel, that empty space is paid for by drawing the
+# cloud at 52% of its former size.  The library's own box costs 74% instead, and
+# nothing falls outside it.  So the shape is measured, not assumed, and it re-fits
+# itself as the collection grows.
+#
+# `SCAFFOLD_EXTENT` survives only as the fallback for a caller with no cloud to
+# measure (the geometry unit tests); `library_extent()` is the real source.
 SCAFFOLD_EXTENT = 2.0
+SCAFFOLD_MARGIN = 1.04         # a little air between the outermost track and the box
+SCAFFOLD_EXTENT_FLOOR = 0.5    # a degenerate cloud must not divide by zero
 SCAFFOLD_DIV = 4               # grid subdivisions per wall/floor
 SCAFFOLD_SPACING = 2.0         # dots between line samples: 1 = solid, 2 = dotted
 
@@ -185,6 +195,12 @@ COL_SCAFFOLD_LABEL = _lift(TERMINAL_BACKGROUND, 7.0, 130.0)  # axis names
 GNOMON_CELLS = 5               # arm length, in character cells
 GNOMON_MARGIN = 3
 SHADOW_WEIGHT = 0.55           # the cast shadow, relative to a ruled line
+
+# Tokens drawn in **world** space at the box extents — everything except the
+# screen-anchored gnomon.  Any of these means the scene has to be fitted to the
+# panel, or the frame runs off the edge of it.
+_WORLD_SCAFFOLDS = frozenset(
+    {"cage", "corners", "walls", "floor", "triad", "shadow"})
 
 # The presets `[B]` cycles, chosen by eye from the ten the offline explorer
 # renders (`explore_cloud_scaffold.py`).  Tokens compose with '+', so a
@@ -325,9 +341,32 @@ class Frame:
 Segment = Tuple[Tuple[float, float, float], Tuple[float, float, float]]
 
 
-def _cube_edges(e: float) -> List[Segment]:
-    """The 12 edges of the cube [−e, e]³."""
-    corners = [(x, y, z) for x in (-e, e) for y in (-e, e) for z in (-e, e)]
+def library_extent(coords: Optional[np.ndarray],
+                   margin: float = SCAFFOLD_MARGIN) -> np.ndarray:
+    """`(3,)` half-extents that contain the whole cloud, with a little air.
+
+    The box is a *measurement of this library*, not a shape imposed on it — the
+    same discipline as the mood axes themselves, and it re-fits as the collection
+    grows.  A caller with nothing to measure gets the fallback cube.
+    """
+    if coords is None or len(coords) == 0:
+        return np.full(3, float(SCAFFOLD_EXTENT))
+    e = np.abs(np.asarray(coords, dtype=np.float64)).max(axis=0) * margin
+    return np.maximum(e, SCAFFOLD_EXTENT_FLOOR)
+
+
+def _as_extent(extent, coords: Optional[np.ndarray] = None) -> np.ndarray:
+    """Normalise `None` / a scalar / a 3-vector into `(3,)` half-extents."""
+    if extent is None:
+        return library_extent(coords)
+    e = np.asarray(extent, dtype=np.float64)
+    return np.full(3, float(e)) if e.ndim == 0 else e
+
+
+def _cube_edges(e: np.ndarray) -> List[Segment]:
+    """The 12 edges of the box [−e, e] (per axis)."""
+    corners = [(x, y, z) for x in (-e[0], e[0]) for y in (-e[1], e[1])
+               for z in (-e[2], e[2])]
     segs: List[Segment] = []
     for i, p in enumerate(corners):
         for q in corners[i + 1:]:
@@ -336,38 +375,40 @@ def _cube_edges(e: float) -> List[Segment]:
     return segs
 
 
-def _corner_brackets(e: float, fraction: float = 0.28) -> List[Segment]:
+def _corner_brackets(e: np.ndarray, fraction: float = 0.28) -> List[Segment]:
     """Only the ends of each edge — eight crop-mark corners.
 
     Reads as a box for a third of the ink of a full cage, and leaves the middle
-    of the view (where the cloud is densest) completely clear.
+    of the view (where the cloud is densest) completely clear.  The bracket is a
+    fraction of *its own* edge, so a flat axis gets short marks and a long one
+    gets long marks rather than all three being cut to the same length.
     """
-    d = 2 * e * fraction
     segs: List[Segment] = []
-    for corner in [(x, y, z) for x in (-e, e) for y in (-e, e) for z in (-e, e)]:
+    for corner in [(x, y, z) for x in (-e[0], e[0]) for y in (-e[1], e[1])
+                   for z in (-e[2], e[2])]:
         for k in range(3):
             end = list(corner)
-            end[k] += -d if corner[k] > 0 else d
+            end[k] += (-1 if corner[k] > 0 else 1) * 2 * e[k] * fraction
             segs.append((corner, tuple(end)))
     return segs
 
 
-def _plane_grid(axis: int, value: float, e: float, div: int) -> List[Segment]:
+def _plane_grid(axis: int, value: float, e: np.ndarray,
+                div: int) -> List[Segment]:
     """A `div`×`div` grid ruled on the plane `axis = value`."""
     others = [k for k in range(3) if k != axis]
-    steps = np.linspace(-e, e, div + 1)
     segs: List[Segment] = []
     for fixed, varying in (others, others[::-1]):
-        for s in steps:
+        for s in np.linspace(-e[fixed], e[fixed], div + 1):
             a, b = [0.0, 0.0, 0.0], [0.0, 0.0, 0.0]
             a[axis] = b[axis] = value
             a[fixed] = b[fixed] = float(s)
-            a[varying], b[varying] = -e, e
+            a[varying], b[varying] = -e[varying], e[varying]
             segs.append((tuple(a), tuple(b)))
     return segs
 
 
-def _far_walls(R: np.ndarray, e: float, div: int) -> List[Segment]:
+def _far_walls(R: np.ndarray, e: np.ndarray, div: int) -> List[Segment]:
     """The three faces currently *behind* the cloud, ruled as grids.
 
     matplotlib's 3-D axes do exactly this and it is why they read as a box: the
@@ -380,23 +421,24 @@ def _far_walls(R: np.ndarray, e: float, div: int) -> List[Segment]:
     for axis in range(3):
         # projected z of the +unit vector on this axis; farther = smaller z.
         sign = -1.0 if R[2, axis] > 0 else 1.0
-        segs.extend(_plane_grid(axis, sign * e, e, div))
+        segs.extend(_plane_grid(axis, sign * e[axis], e, div))
     return segs
 
 
-def _axis_triad(e: float, tick: float = 0.12) -> List[Segment]:
+def _axis_triad(e: np.ndarray, tick: float = 0.12) -> List[Segment]:
     """Three ruled axes through the origin, with a tick every 1σ.
 
     The "3-axis graph" reading of the problem: instead of bounding the volume,
     name it.  Each tick is one z-score, so the frame doubles as the scale the
-    readout line quotes.
+    readout line quotes — and an axis the library barely uses is visibly the
+    short one.
     """
     segs: List[Segment] = []
     for axis in range(3):
         a, b = [0.0, 0.0, 0.0], [0.0, 0.0, 0.0]
-        a[axis], b[axis] = -e, e
+        a[axis], b[axis] = -e[axis], e[axis]
         segs.append((tuple(a), tuple(b)))
-        for t in np.arange(-math.floor(e), math.floor(e) + 1):
+        for t in np.arange(-math.floor(e[axis]), math.floor(e[axis]) + 1):
             if abs(t) < 1e-9:
                 continue
             for cross in [k for k in range(3) if k != axis]:
@@ -429,7 +471,7 @@ def scaffold_points(mode: str,
                     R: np.ndarray,
                     scale: float,
                     coords: Optional[np.ndarray] = None,
-                    extent: float = SCAFFOLD_EXTENT,
+                    extent=None,
                     div: int = SCAFFOLD_DIV,
                     spacing: float = SCAFFOLD_SPACING
                     ) -> Tuple[np.ndarray, np.ndarray]:
@@ -455,18 +497,19 @@ def scaffold_points(mode: str,
     tokens = {t for t in str(mode).split("+") if t and t != "off"}
     if not tokens:
         return empty
+    e = _as_extent(extent, coords)
 
     segs: List[Segment] = []
     if "corners" in tokens:
-        segs += _corner_brackets(extent)
+        segs += _corner_brackets(e)
     if "cage" in tokens:
-        segs += _cube_edges(extent)
+        segs += _cube_edges(e)
     if "walls" in tokens:
-        segs += _far_walls(R, extent, div)
+        segs += _far_walls(R, e, div)
     if "floor" in tokens:
-        segs += _plane_grid(1, -extent, extent, div)
+        segs += _plane_grid(1, -e[1], e, div)
     if "triad" in tokens:
-        segs += _axis_triad(extent)
+        segs += _axis_triad(e)
 
     parts: List[np.ndarray] = []
     weights: List[np.ndarray] = []
@@ -476,7 +519,7 @@ def scaffold_points(mode: str,
         weights.append(np.ones(len(pts)))
     if "shadow" in tokens and coords is not None and len(coords):
         flat = np.asarray(coords, dtype=np.float64).copy()
-        flat[:, 1] = -extent
+        flat[:, 1] = -e[1]
         parts.append(flat)
         weights.append(np.full(len(flat), SHADOW_WEIGHT))
     if not parts:
@@ -543,7 +586,8 @@ def compute_frame(coords: np.ndarray,
                   selected_idx: Optional[int] = None,
                   shade: bool = True,
                   scaffold: str = "off",
-                  axis_labels: Optional[Sequence[str]] = None) -> Frame:
+                  axis_labels: Optional[Sequence[str]] = None,
+                  extent=None) -> Frame:
     """
     Project `coords` (N, 3) into a Braille grid of `cols`×`rows` character cells.
 
@@ -568,22 +612,27 @@ def compute_frame(coords: np.ndarray,
     scale = half_dots / BASE_HALF_EXTENT
     cx0, cy0 = dot_w / 2.0, dot_h / 2.0
 
+    extent3 = _as_extent(extent, coords)
     tokens = {t for t in str(scaffold).split("+") if t and t != "off"}
-    if tokens & {"cage", "corners", "walls", "floor"}:
-        # Shrink just enough that the box **closes** on screen at zoom 1.  A cube
-        # corner reaches `e·(|cos tilt| + √2·|sin tilt|)` from centre, which at the
-        # default tilt is 3.11σ against the panel's 3.0 — so without this the top
-        # and bottom corners are always cut and the frame reads as a wall, not a
-        # box.  The budget is `half_dots − 1`, not `half_dots`: the far corner
-        # sits at `cy0 + reach·scale`, and a dot rounded exactly onto `dot_h` is
-        # one past the last index and silently vanishes — a corner missing from
-        # the cube for one dot of greed.  Applied to the
-        # base scale and *then* multiplied by zoom, so zooming in still overflows
-        # the panel as it should — this fits the box, it does not cage the camera.
-        reach = SCAFFOLD_EXTENT * (abs(math.cos(tilt))
-                                   + math.sqrt(2.0) * abs(math.sin(tilt)))
-        if reach * scale > half_dots - 1.0:
-            scale = (half_dots - 1.0) / reach
+    if tokens & _WORLD_SCAFFOLDS:
+        # **Fit the box to the panel** at zoom 1, so it always closes on screen.
+        # Both reaches are the worst case *over azimuth*, not this frame's — a
+        # scale that tracked the current angle would make the cloud pulse as it
+        # spins.  With `x' = cos·x + sin·z` that worst case is the x–z diagonal,
+        # and the vertical adds the tilted y.  Fitting per axis is what makes a
+        # non-cubic box worth having: the panel is 192×120 dots, so a box that is
+        # wide and flat can use the width instead of paying for it in height.
+        #
+        # The budget is `half − 1`, not `half`: the far corner sits at
+        # `centre + reach·scale`, and a dot rounded exactly onto `dot_h` is one
+        # past the last index and silently vanishes — a corner missing from the
+        # box for one dot of greed.  Zoom is applied *after*, so zooming in still
+        # overflows the panel as it should: this fits the box, not the camera.
+        diagonal = math.hypot(extent3[0], extent3[2])
+        reach_x = max(diagonal, 1e-6)
+        reach_y = max(abs(math.cos(tilt)) * extent3[1]
+                      + abs(math.sin(tilt)) * diagonal, 1e-6)
+        scale = min((dot_w / 2.0 - 1.0) / reach_x, (dot_h / 2.0 - 1.0) / reach_y)
     scale *= zoom
 
     R = rotation_matrix(azimuth, tilt)          # once, reused for cloud + comet
@@ -626,7 +675,7 @@ def compute_frame(coords: np.ndarray,
         gx, gy, gc, gnomon_text = gnomon_dots(R, cols, rows, axis_labels)
         splat_dots(gx, gy, gc, -99.0)
 
-    scaf, scaf_w = scaffold_points(scaffold, R, scale, coords)
+    scaf, scaf_w = scaffold_points(scaffold, R, scale, coords, extent3)
     if len(scaf):
         sproj = scaf @ R.T
         sz = sproj[:, 2]
@@ -701,13 +750,13 @@ def compute_frame(coords: np.ndarray,
             frame.glyph[row, col] = ord(letter)
             frame.color[row, col] = COL_SCAFFOLD_LABEL
     if axis_labels is not None and tokens - {"gnomon"}:
-        _place_axis_labels(frame, axis_labels, R, scale, cx0, cy0)
+        _place_axis_labels(frame, axis_labels, R, scale, cx0, cy0, extent3)
     return frame
 
 
 def _place_axis_labels(frame: Frame, labels: Sequence[str], R: np.ndarray,
                        scale: float, cx0: float, cy0: float,
-                       extent: float = SCAFFOLD_EXTENT) -> None:
+                       extent=None) -> None:
     """Write each axis name at that axis's positive tip, in the same grid.
 
     A label is a glyph override on the cell, so it costs no extra widget and no
@@ -715,7 +764,7 @@ def _place_axis_labels(frame: Frame, labels: Sequence[str], R: np.ndarray,
     is drawn last and kept to a short word.  Nothing is written where the tip
     falls off the panel.
     """
-    tips = np.eye(3) * (extent * 1.22)
+    tips = np.diag(_as_extent(extent) * 1.10)
     for axis, name in enumerate(list(labels)[:3]):
         p = tips[axis] @ R.T
         col = int(round((p[0] * scale + cx0)) // 2)
@@ -813,8 +862,11 @@ if URWID_AVAILABLE:
             # animation alarm can skip a repaint when nothing moved enough.
             self._rendered_pose: Optional[Tuple[float, float, float]] = None
 
-            # Which spatial frame is drawn behind the cloud (`[B]` cycles it).
+            # Which spatial frame is drawn behind the cloud (`[B]` cycles it),
+            # and the box it draws — measured off this library once, not per
+            # frame: it is a property of the collection, not of the camera.
             self.scaffold = SCAFFOLD_DEFAULT
+            self.extent = library_extent(self.coords)
 
             self.comet: List[np.ndarray] = []
             self._comet_arr: Optional[np.ndarray] = None   # cached stack of comet
@@ -1009,7 +1061,8 @@ if URWID_AVAILABLE:
                 current_idx=self.current_idx,
                 selected_idx=self.selected_idx,
                 scaffold=self.scaffold,
-                axis_labels=self.axis_labels)
+                axis_labels=self.axis_labels,
+                extent=self.extent)
             self._last_frame = frame
             self._rendered_pose = (self.azimuth, self.tilt, self.zoom)
 

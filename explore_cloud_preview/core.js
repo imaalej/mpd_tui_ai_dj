@@ -10,6 +10,9 @@ export const BRAILLE_LUT = [0x01, 0x02, 0x04, 0x40, 0x08, 0x10, 0x20, 0x80];
 export const SHADE_MIN = 0.4;
 export const BASE_HALF_EXTENT = 3.0;
 export const SCAFFOLD_EXTENT = 2.0;
+export const SCAFFOLD_MARGIN = 1.04;
+export const SCAFFOLD_EXTENT_FLOOR = 0.5;
+const WORLD_SCAFFOLDS = ["cage", "corners", "walls", "floor", "triad", "shadow"];
 export const SCAFFOLD_DIV = 4;
 export const SCAFFOLD_SPACING = 2.0;
 export const SHADOW_WEIGHT = 0.55;
@@ -70,9 +73,25 @@ function shadeBetween(t, far, near) {
 
 // ── scaffold geometry (mirrors the Python segment builders) ──────────────────
 
+// The box is measured off the cloud, one extent per axis — a cube would be
+// mostly empty volume on a lopsided library, and the box is fitted to the panel,
+// so that emptiness is paid for in how small the cloud gets drawn.
+export function libraryExtent(coords, margin = SCAFFOLD_MARGIN) {
+  if (!coords || !coords.length) return [SCAFFOLD_EXTENT, SCAFFOLD_EXTENT, SCAFFOLD_EXTENT];
+  const e = [0, 0, 0];
+  for (const p of coords)
+    for (let k = 0; k < 3; k++) e[k] = Math.max(e[k], Math.abs(p[k]));
+  return e.map((v) => Math.max(v * margin, SCAFFOLD_EXTENT_FLOOR));
+}
+
+function asExtent(extent, coords) {
+  if (extent == null) return libraryExtent(coords);
+  return typeof extent === "number" ? [extent, extent, extent] : extent;
+}
+
 function cubeEdges(e) {
   const corners = [];
-  for (const x of [-e, e]) for (const y of [-e, e]) for (const z of [-e, e])
+  for (const x of [-e[0], e[0]]) for (const y of [-e[1], e[1]]) for (const z of [-e[2], e[2]])
     corners.push([x, y, z]);
   const segs = [];
   for (let i = 0; i < corners.length; i++)
@@ -86,12 +105,12 @@ function cubeEdges(e) {
 }
 
 function cornerBrackets(e, fraction = 0.28) {
-  const d = 2 * e * fraction, segs = [];
-  for (const x of [-e, e]) for (const y of [-e, e]) for (const z of [-e, e]) {
+  const segs = [];
+  for (const x of [-e[0], e[0]]) for (const y of [-e[1], e[1]]) for (const z of [-e[2], e[2]]) {
     const c = [x, y, z];
     for (let k = 0; k < 3; k++) {
       const end = c.slice();
-      end[k] += c[k] > 0 ? -d : d;
+      end[k] += (c[k] > 0 ? -1 : 1) * 2 * e[k] * fraction;
       segs.push([c, end]);
     }
   }
@@ -103,11 +122,13 @@ function planeGrid(axis, value, e, div) {
   const segs = [];
   for (const [fixed, varying] of [others, [others[1], others[0]]]) {
     for (let i = 0; i <= div; i++) {
-      const s = -e + (2 * e * i) / div;
+      // numpy's linspace: step-multiply with an exact endpoint.
+      const step = (2 * e[fixed]) / div;
+      const s = i === div ? e[fixed] : -e[fixed] + step * i;
       const a = [0, 0, 0], b = [0, 0, 0];
       a[axis] = b[axis] = value;
       a[fixed] = b[fixed] = s;
-      a[varying] = -e; b[varying] = e;
+      a[varying] = -e[varying]; b[varying] = e[varying];
       segs.push([a, b]);
     }
   }
@@ -118,7 +139,7 @@ function farWalls(R, e, div) {
   let segs = [];
   for (let axis = 0; axis < 3; axis++) {
     const sign = R[2][axis] > 0 ? -1 : 1;
-    segs = segs.concat(planeGrid(axis, sign * e, e, div));
+    segs = segs.concat(planeGrid(axis, sign * e[axis], e, div));
   }
   return segs;
 }
@@ -127,9 +148,9 @@ function axisTriad(e, tick = 0.12) {
   const segs = [];
   for (let axis = 0; axis < 3; axis++) {
     const a = [0, 0, 0], b = [0, 0, 0];
-    a[axis] = -e; b[axis] = e;
+    a[axis] = -e[axis]; b[axis] = e[axis];
     segs.push([a, b]);
-    for (let t = -Math.floor(e); t <= Math.floor(e); t++) {
+    for (let t = -Math.floor(e[axis]); t <= Math.floor(e[axis]); t++) {
       if (Math.abs(t) < 1e-9) continue;
       for (const cross of [0, 1, 2].filter((k) => k !== axis)) {
         const p = [0, 0, 0], q = [0, 0, 0];
@@ -160,20 +181,21 @@ function sampleSegments(segs, scale, spacing) {
   return pts;
 }
 
-export function scaffoldPoints(mode, R, scale, coords, extent = SCAFFOLD_EXTENT) {
+export function scaffoldPoints(mode, R, scale, coords, extent) {
   const tokens = new Set(String(mode).split("+").filter((t) => t && t !== "off"));
   if (!tokens.size) return { pts: [], weights: [] };
+  const e = asExtent(extent, coords);
   let segs = [];
-  if (tokens.has("corners")) segs = segs.concat(cornerBrackets(extent));
-  if (tokens.has("cage")) segs = segs.concat(cubeEdges(extent));
-  if (tokens.has("walls")) segs = segs.concat(farWalls(R, extent, SCAFFOLD_DIV));
-  if (tokens.has("floor")) segs = segs.concat(planeGrid(1, -extent, extent, SCAFFOLD_DIV));
-  if (tokens.has("triad")) segs = segs.concat(axisTriad(extent));
+  if (tokens.has("corners")) segs = segs.concat(cornerBrackets(e));
+  if (tokens.has("cage")) segs = segs.concat(cubeEdges(e));
+  if (tokens.has("walls")) segs = segs.concat(farWalls(R, e, SCAFFOLD_DIV));
+  if (tokens.has("floor")) segs = segs.concat(planeGrid(1, -e[1], e, SCAFFOLD_DIV));
+  if (tokens.has("triad")) segs = segs.concat(axisTriad(e));
 
   const pts = segs.length ? sampleSegments(segs, scale, SCAFFOLD_SPACING) : [];
   const weights = pts.map(() => 1.0);
   if (tokens.has("shadow") && coords && coords.length) {
-    for (const p of coords) { pts.push([p[0], -extent, p[2]]); weights.push(SHADOW_WEIGHT); }
+    for (const p of coords) { pts.push([p[0], -e[1], p[2]]); weights.push(SHADOW_WEIGHT); }
   }
   return { pts, weights };
 }
@@ -209,14 +231,19 @@ export function computeFrame(data, cols, rows, azimuth, tilt, zoom, scaffold, op
   if (cols <= 0 || rows <= 0) return { bits, color, glyph, cols, rows };
 
   const dotW = 2 * cols, dotH = 4 * rows;
-  const halfDots = Math.min(dotW, dotH) / 2;
+  const halfDots = Math.min(dotW, dotH) / 2;   // base scale only
   let scale = halfDots / BASE_HALF_EXTENT;
   const cx0 = dotW / 2, cy0 = dotH / 2;
   const tokens = new Set(String(scaffold).split("+").filter((t) => t && t !== "off"));
-  if (["cage", "corners", "walls", "floor"].some((t) => tokens.has(t))) {
-    const reach = SCAFFOLD_EXTENT *
-      (Math.abs(Math.cos(tilt)) + Math.SQRT2 * Math.abs(Math.sin(tilt)));
-    if (reach * scale > halfDots - 1) scale = (halfDots - 1) / reach;
+  const ext = asExtent(opts.extent, data.coords);
+  if (WORLD_SCAFFOLDS.some((t) => tokens.has(t))) {
+    // Worst case over azimuth, not this frame's — a scale that tracked the
+    // current angle would make the cloud pulse as it spins.
+    const diagonal = Math.hypot(ext[0], ext[2]);
+    const reachX = Math.max(diagonal, 1e-6);
+    const reachY = Math.max(Math.abs(Math.cos(tilt)) * ext[1]
+                            + Math.abs(Math.sin(tilt)) * diagonal, 1e-6);
+    scale = Math.min((dotW / 2 - 1) / reachX, (dotH / 2 - 1) / reachY);
   }
   scale *= zoom;
   const R = rotationMatrix(azimuth, tilt);
@@ -236,7 +263,7 @@ export function computeFrame(data, cols, rows, azimuth, tilt, zoom, scaffold, op
     gtext = g.text;
   }
 
-  const { pts, weights } = scaffoldPoints(scaffold, R, scale, data.coords);
+  const { pts, weights } = scaffoldPoints(scaffold, R, scale, data.coords, ext);
   if (pts.length) {
     const proj = pts.map((p) => project(p, R));
     let lo = Infinity, hi = -Infinity;
@@ -295,7 +322,7 @@ export function computeFrame(data, cols, rows, azimuth, tilt, zoom, scaffold, op
   if (data.labels && boxed.size) {
     for (let axis = 0; axis < 3 && axis < data.labels.length; axis++) {
       const tip = [0, 0, 0];
-      tip[axis] = SCAFFOLD_EXTENT * 1.22;
+      tip[axis] = ext[axis] * 1.10;
       const p = project(tip, R);
       let col = Math.floor(rint(p[0] * scale + cx0) / 2);
       const row = Math.floor(rint(cy0 - p[1] * scale) / 4);

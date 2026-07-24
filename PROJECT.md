@@ -277,13 +277,21 @@ projected back with `snap()` = `normalise(mean(top-25 library embeddings by dot(
   (`COL_SCAFFOLD_FAR/NEAR`, depth-interpolated) *and* `SCAFFOLD_SPACING` — one sample
   every two dots. The cast shadow additionally carries `SHADOW_WEIGHT`, because a
   674-point mass at line brightness out-shouts the frame it sits in.
-- **The box is ±2σ and it must close on screen.** The coordinates are z-scored, so 2.0
-  states a fact rather than being tuned by eye. A cube corner reaches
-  `e·(|cos tilt| + √2·|sin tilt|)` from centre — 3.11σ at the default tilt against a
-  3.0σ half-panel — so `compute_frame` shrinks the *base* scale (≤4%, points included)
-  to fit, then applies zoom, and budgets `half_dots − 1`: a dot rounded exactly onto
-  `dot_h` is one index past the end and vanishes, which is a corner missing for one
-  dot of greed. Zooming in still overflows the panel, as it should.
+- **The box is the library's own bounding box, and it must close on screen.** It began
+  as a ±2σ cube, which left **55 of 674 tracks outside it** — and a cube is the wrong
+  shape here: Tone spans ±3.74σ, Saturation ±1.94, Organic ±2.82, so a cube containing
+  all of it is **61% volume the library never occupies**. That matters because the box
+  is *fitted to the panel*, so empty volume is paid for in how small the cloud is drawn:
+  a containing cube costs 52% of the old scale, the measured box 76%. `library_extent()`
+  measures it once per library (`max|coord| × 1.04`, floored so a degenerate cloud cannot
+  divide by zero) and it re-fits as the collection grows.
+  The fit uses **both** panel dimensions and the worst case *over azimuth* — never this
+  frame's angle, which would make the cloud pulse as it spins: `reach_x` is the x–z
+  diagonal, `reach_y` adds the tilted y. Fitting per axis is what makes a non-cubic box
+  worth having — a wide flat box uses the panel's width (73%, was 56%) instead of paying
+  for it in height. The budget is `half − 1`, not `half`: a dot rounded exactly onto
+  `dot_h` is one index past the end and vanishes, a corner missing for one dot of greed.
+  Zoom is applied after, so zooming in still overflows the panel, as it should.
 - **The panel opens on a frame, not on `off`.** Opening bare would ship the unreadable
   state as the default and make the fix a discovery. `off` is the first stop in the
   `[B]` ring.

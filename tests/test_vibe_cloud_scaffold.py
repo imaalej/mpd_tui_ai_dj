@@ -60,17 +60,24 @@ def test_every_mode_lights_more_cells_than_bare(scene):
         assert lit > bare, f"{mode} drew nothing"
 
 
-def test_the_scaffold_never_wins_a_cell_a_point_owns(scene):
-    """`triad` does not rescale the scene, so every point lands in exactly the
-    cell it lands in with no scaffold — which makes the colours directly
-    comparable.  Any cell owning a library point must keep that point's colour."""
+def test_the_scaffold_never_wins_a_cell_a_point_owns(scene, monkeypatch):
+    """Repaint the frame in screaming red and re-render: not one cell that owns a
+    library point may change colour.  Comparing against a *no-scaffold* render
+    would not work — the box rescales the scene, so the points would land in
+    different cells — and this is the sharper question anyway."""
     coords, rgb, _ = scene
-    bare = vc.compute_frame(coords, rgb, 96, 30, 0.7, 0.5)
-    ruled = vc.compute_frame(coords, rgb, 96, 30, 0.7, 0.5, scaffold="triad")
-    owned = bare.hit >= 0
-    assert owned.any()
-    assert np.array_equal(ruled.color[owned], bare.color[owned]), \
-        "a scaffold dot repainted a cell that belongs to a track"
+    for mode in BOXED:
+        before = vc.compute_frame(coords, rgb, 96, 30, 0.7, 0.5, scaffold=mode)
+        with monkeypatch.context() as m:
+            m.setattr(vc, "COL_SCAFFOLD_FAR", 0xFF0000)
+            m.setattr(vc, "COL_SCAFFOLD_NEAR", 0x00FF00)
+            after = vc.compute_frame(coords, rgb, 96, 30, 0.7, 0.5, scaffold=mode)
+        owned = before.hit >= 0
+        assert owned.any()
+        assert np.array_equal(after.color[owned], before.color[owned]), \
+            f"{mode}: a scaffold dot repainted a cell that belongs to a track"
+        assert not np.array_equal(after.color, before.color), \
+            f"{mode}: the repaint did not reach the frame — the test proves nothing"
 
 
 def test_the_scaffold_never_claims_a_hit(scene):
@@ -123,7 +130,7 @@ def test_each_wall_is_the_far_face_of_its_pair():
     *away* from the camera — which is what makes it unable to occlude anything
     inside the box.  (Its own far corners still project in front of the origin;
     that is perspective on a plane, not an occlusion.)"""
-    e, div = vc.SCAFFOLD_EXTENT, vc.SCAFFOLD_DIV
+    e, div = np.array([3.2, 1.5, 2.4]), vc.SCAFFOLD_DIV
     per_axis = 2 * (div + 1)
     for azimuth in np.linspace(0, 2 * np.pi, 12):
         for tilt in (-1.0, 0.0, 0.5, 1.2):
@@ -133,6 +140,8 @@ def test_each_wall_is_the_far_face_of_its_pair():
             for axis in range(3):
                 group = segs[axis * per_axis:(axis + 1) * per_axis]
                 value = group[0][0][axis]
+                assert abs(abs(value) - e[axis]) < 1e-9, \
+                    "a wall sat somewhere other than its own face"
                 assert all(a[axis] == value and b[axis] == value
                            for a, b in group), "a wall segment left its plane"
                 assert value * R[2][axis] <= 0, \
@@ -144,7 +153,7 @@ def test_the_shadow_lies_on_the_floor(scene):
     R = vc.rotation_matrix(0.3, 0.5)
     pts, weights = vc.scaffold_points("shadow", R, 20.0, coords)
     assert len(pts) == len(coords)
-    assert np.allclose(pts[:, 1], -vc.SCAFFOLD_EXTENT)
+    assert np.allclose(pts[:, 1], -vc.library_extent(coords)[1])
     assert np.allclose(weights, vc.SHADOW_WEIGHT), \
         "the shadow must be dimmer than a ruled line, or it out-shouts the frame"
 
@@ -299,3 +308,59 @@ def test_the_shading_ramp_never_dips_below_the_far_colour(scene):
         lums = [vc._luminance(int(c)) for c in ramp]
         assert min(lums) >= vc._luminance(vc.COL_SCAFFOLD_FAR) - 0.5
         assert lums == sorted(lums)
+
+
+# ── The box has to contain the library ────────────────────────────────────────
+
+
+def test_the_box_contains_every_track(rng):
+    """The complaint that produced this: a ±2σ cube left 55 of 674 tracks
+    outside it.  The box is now measured off the cloud, so *nothing* is outside
+    — on any cloud, including a lopsided one."""
+    for coords in (rng.standard_normal((500, 3)),
+                   rng.standard_normal((500, 3)) * [3.0, 0.4, 1.6],
+                   rng.standard_normal((500, 3)) + [1.0, -2.0, 0.5]):
+        e = vc.library_extent(coords)
+        assert (np.abs(coords) <= e).all(), "a track fell outside its own box"
+        assert (e >= np.abs(coords).max(axis=0)).all()
+
+
+def test_the_box_is_the_cloud_shape_not_a_cube(rng):
+    """A cube around a flat cloud is mostly empty volume, and since the box is
+    fitted to the panel that emptiness is paid for in how small the cloud is
+    drawn.  So the extents must differ per axis when the cloud does."""
+    coords = rng.standard_normal((400, 3)) * [3.0, 0.5, 1.5]
+    e = vc.library_extent(coords)
+    assert e[0] > 2 * e[1], "the box squared off a cloud that is not square"
+
+
+def test_a_degenerate_cloud_still_produces_a_usable_box():
+    """All tracks at one point is a division by zero waiting to happen."""
+    e = vc.library_extent(np.zeros((5, 3)))
+    assert (e >= vc.SCAFFOLD_EXTENT_FLOOR).all()
+    frame = vc.compute_frame(np.zeros((5, 3)), np.full((5, 3), 200, np.uint8),
+                             96, 30, 0.4, 0.5, scaffold="cage+triad")
+    assert (frame.bits != 0).any()
+
+
+def test_no_track_is_clipped_off_the_panel_when_a_box_is_up(rng):
+    """Fitting the *box* to the panel has to fit the cloud with it — otherwise
+    the frame is honest and the data is not.
+
+    Only the six extreme tracks are rendered, at the extent measured from the
+    whole cloud: with 300 points on a 96×30 grid an absent point is far more
+    likely to be occluded than clipped, and the test has to tell those apart.
+    """
+    coords = rng.standard_normal((300, 3)) * [3.4, 1.8, 2.6]
+    extent = vc.library_extent(coords)
+    edge = sorted({int(f(coords[:, a])) for a in range(3)
+                   for f in (np.argmin, np.argmax)})
+    probe = coords[edge]
+    rgb = vc.point_rgb(probe)
+    for tilt in (-1.2, 0.0, 0.5, 1.2):
+        for azimuth in np.linspace(0, 2 * np.pi, 8):
+            frame = vc.compute_frame(probe, rgb, 96, 30, float(azimuth),
+                                     float(tilt), scaffold="cage", extent=extent)
+            visible = set(int(i) for i in frame.hit[frame.hit >= 0])
+            assert visible == set(range(len(probe))), \
+                f"an outermost track was clipped at tilt={tilt:.1f}"
