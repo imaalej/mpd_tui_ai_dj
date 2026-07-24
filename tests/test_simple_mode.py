@@ -97,7 +97,14 @@ def test_the_arrow_keys_mean_the_same_thing_in_both_interfaces(tui, library):
     """
     The claim L9 is actually about.  `↑` decoded from a terminal must reach the
     same method as `up` from urwid — not merely be documented as doing so.
+
+    Phase 4 (G3) made the arrows and ENTER context-sensitive: over the cloud they
+    orbit, over the history they navigate.  The claim under test is the *decode →
+    dispatch* equivalence, so this switches to the history view where the arrows
+    carry their navigation meaning, and both interfaces still reach it identically.
     """
+    from tui import BODY_HISTORY
+    tui._set_body_view(BODY_HISTORY)
     fired = []
     for name in ('_history_scroll', '_seek_forward', '_seek_backward',
                  '_replay_focused', '_volume_up', '_volume_down'):
@@ -114,8 +121,11 @@ def test_the_arrow_keys_mean_the_same_thing_in_both_interfaces(tui, library):
 def test_up_and_down_are_history_not_volume(tui):
     """
     The specific disagreement L9 records: in the fallback mode `↑↓` used to be
-    bound to volume, contradicting both the urwid mode and the README.
+    bound to volume, contradicting both the urwid mode and the README.  With the
+    history revealed (G3), `↓` still means "move the history cursor", never volume.
     """
+    from tui import BODY_HISTORY
+    tui._set_body_view(BODY_HISTORY)
     before = tui.dj.mpd_controller.volume
     tui.history.note_playing('a.flac')
     tui.history.note_playing('b.flac')

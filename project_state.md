@@ -3,10 +3,12 @@
 A terminal DJ for MPD that selects tracks from CLAP audio embeddings and adapts to feedback within a
 listening session. Python + urwid TUI, MPD driven via `mpc` subprocesses.
 
-**Status: the five-stage rewrite is complete.** 542 tests, green, ~18 s. Every finding from the
+**Status: the five-stage rewrite is complete, and the four-phase inspection follow-up (Phases 1–4) has
+landed — the vibe cloud is the TUI's centrepiece.** 651 tests, green, ~20 s. Every finding from the
 original audit is closed. The application plays continuously, adapts on the next track, says what it
-is playing, restores the user's MPD state on every exit path, and has coverage on all three
-interfaces (player, urwid display, fallback text mode).
+is playing, restores the user's MPD state on every exit path, shows the whole library as a rotating
+3-D mood cloud with a session comet, and has coverage on all three interfaces (player, urwid display,
+fallback text mode).
 
 ---
 
@@ -83,8 +85,10 @@ tui.py         background thread                mpd_controller.py
    │            full-listen, refills, seeds
    │            the session vector)
    ├──▶ vibe_readout.py     descriptor_bank.py → top-3 z-scores + drift
-   ├──▶ session_history.py  what played · ♥ ⏭ ✓ · the ↑↓ cursor
-   │        (both display-only: nothing behind the display reads them)
+   ├──▶ session_history.py  what played · ♥ ⏭ ✓ » · the ↑↓ cursor
+   ├──▶ vibe_cloud.py       mood_axes.py → rotating 3-D Braille point cloud +
+   │        session comet; single-dot depth-shaded points, eased camera; own alarm (Phase 4)
+   │        (all three display-only: nothing behind the display reads them)
    ▼
 feedback_handler.py ──┬──▶ session_state.py   short-term vibe vector
                       │        └──▶ manifold.py   turnover · solved λ · snap
@@ -247,6 +251,31 @@ projected back with `snap()` = `normalise(mean(top-25 library embeddings by dot(
 - **Both interfaces share one binding table.** `decode_key()`/`decode_keys()` turn terminal bytes into
   urwid's key names and `_handle_input` dispatches for both. A binding cannot exist in one interface
   and not the other. Do not reintroduce a second `if key == …` ladder.
+- **The vibe cloud's camera orbits ambient; its comet moves only on data (Phase 4, inspection G3).**
+  `_animate` (a fast alarm — up to ~144 fps — separate from the 0.5 s poll) advances only the camera and
+  redraws just the cloud, and **only when the camera moved enough to matter** (`cloud.pose_changed()`): a
+  slow ambient spin repaints a few times a second, an active drag/zoom every frame — cheap when idle,
+  buttery when moving.  The camera **eases** toward a mouse-set target rather than snapping, and both the
+  spin and the ease are in real time (`advance(dt)`), so the framerate is free to change without changing
+  the feel — this is what fixed a tilt-drag reading choppier than a left/right spin (the tilt had no
+  per-frame animation, only discrete mouse-event jumps).  urwid's canvas cache makes it a panel-only
+  redraw, so it never starves `_sync_session_state`
+  (a full listen between frames is still recorded, and the comet updates from the 2 Hz observe even while
+  `[I]` blocks the loop). `note_session` lays a comet bead only when the session vector actually moved, so
+  ambient rotation and data motion never blur. **Never drive the comet from the animation alarm, and never
+  put session bookkeeping on it.**
+- **The camera is a mouse instrument; the arrows are for the history.** Orbit is **right-drag** (moved off
+  the left button so the left is free), zoom is **scroll**, and an on-panel **orbit-speed slider** (0 =
+  static, starts slow) is set by left-click/drag. So `↑/↓` always move the history cursor — never the
+  camera. `ENTER` is the one focus-dependent key: `_handle_input` routes it to one method (`_enter_action`)
+  that resets the cloud when the cloud is up and replays the focused track when the history is up — still
+  one binding table (the key→method map is fixed). `[T]` cycles the body pane (cloud → history → console);
+  `F1/F2/F3` jump straight to one (unadvertised). `←/→` stay seek; `+/−` zoom. The footer, README,
+  `start.sh` and the fallback advertise this, held together by tests.
+- **The cloud paints 256-colour `AttrSpec`s and needs `set_terminal_properties(colors=256)`.** Without it
+  urwid down-converts every colour to the nearest of 16 and the cloud goes muddy — declare the capability,
+  never emit raw ANSI into the text. Absent mood axes are not fatal: `MoodAxes.load()` returns `None` and
+  the widget draws a rebuild message while the rest of the app plays on.
 
 ### The taste model
 
@@ -469,7 +498,10 @@ CPU mel extraction, so `--workers` matters more than `--batch-size`; on CPU the 
 
 ## 8 · Testing
 
-`python3 -m pytest tests` — **618 tests, green, ~19 s.** (603 after Phase 2, 591 after Phase 1, 542 before it.)
+`python3 -m pytest tests` — **651 tests, green, ~20 s.** (619 after Phase 3, 603 after Phase 2, 591 after
+Phase 1, 542 before it. Phase 4 adds `tests/test_vibe_cloud.py` — 32 — and updates the body-layout
+coupling in `test_tui_display`/`test_simple_mode`/`test_art_geometry` to reveal the history before
+asserting on it, since the cloud is the default view now.)
 
 The suite is behavioural, not existence checks. Two of the worst defects in this project's history
 survived a green suite of the latter. What that means in practice, and what to preserve:
@@ -560,15 +592,24 @@ Delete `data/state/` before measuring anything about a cold start.
 | `V` | Pass — advance without changing the vibe; marks the track `»`, moves nothing in the model |
 | `L` | Like; press again on a liked track to un-like |
 | `↑` / `↓` | Move the cursor through the session history |
-| `Enter` | Replay the track under the cursor — it becomes `↓ next:` |
+| `+` / `−` | Zoom the cloud in / out |
+| `Enter` | Over the cloud: reset the view. Over the history: replay the focused track |
+| `T` | Cycle the body pane: cloud → history → console → cloud |
+| `F1`/`F2`/`F3` | Jump straight to cloud / history / console (unadvertised in the footer) |
 | `,` / `.` | Volume down / up |
 | `←` / `→` | Seek ∓10 s |
 | `I` | Model state (descriptors, sampling, taste, exploration, weights); `↑↓` scrolls |
 | `Q` | Quit |
+| mouse | Over the cloud: right-drag to orbit, scroll to zoom, left-click a point to inspect it, drag the orbit-speed slider |
 
-The footer, the README table, `start.sh`'s launch banner and both interfaces advertise exactly this
-list. Tests drive every row through the real key handler, and `test_documented_numbers` guards the
-`start.sh` banner so it cannot drift again (audit E1).
+The footer, the README table, `start.sh`'s launch banner and both interfaces advertise this list (F1–F3
+are a deliberately unadvertised convenience — only `[T]` is in the footer). Tests drive every row through
+the real key handler, and `test_documented_numbers` guards the `start.sh` banner so it cannot drift again
+(audit E1). The camera is a **mouse** instrument — right-drag orbit, scroll zoom, and an on-panel
+orbit-speed slider that starts slow — which frees the arrows to always mean "history cursor". `Enter` is
+the one focus-dependent key (reset over the cloud, replay over the history): one dispatch method whose
+effect follows `body_view`, not a second binding table (§4). The **Now Playing header carries a `Next:`
+line** so the lookahead is visible without opening the history.
 
 ---
 
@@ -715,3 +756,13 @@ know were seen and decided on.
 Each stage re-measured rather than inheriting, and each time it changed something material. Stage 4
 was the first where the thing that turned out to be wrong was a *finding* rather than a number — see
 §1's corollary.
+
+After the rewrite, an independent inspection (`inspection_findings.md`) reopened the codebase and drew a
+four-phase follow-up:
+
+| Phase | What it did |
+|---|---|
+| **1** | Foundation: moved every module under `src/`, the `[V]` neutral skip, the 75% full-listen threshold, and the doc/dead-code reconciliations. |
+| **2** | Album-art lifecycle: one `ImageProtocol` base that respawns a dead ueberzugpp child mid-call, honest `available`, cache cleanup on SIGTERM, atomic cache writes. |
+| **3** | Generation durability (CUDA determinism flags, batch-size-pinned resume, atomic `.npz` writes, stronger `validate_embeddings`) and the stored, per-library **mood axes** (`mood_axes.py`) the cloud needs. |
+| **4** | The **vibe cloud** (`vibe_cloud.py`): the rotating 3-D Braille + 256-colour point cloud as the TUI centrepiece — a vectorised rasteriser (each point a single Braille dot, **depth-shaded** — near bright, far dim — so rotation reads as 3-D without billboarded markers; clicking uses a nearest-within-radius search) with an **eased, framerate-independent camera** on its own up-to-144 fps panel-only alarm that only repaints when the view moved, with a data-only session comet, an on-panel orbit-speed slider, a `Next:` line in the header, panes on `[T]`/F-keys, and mouse right-drag/scroll/click — all through the one shared binding table. |
