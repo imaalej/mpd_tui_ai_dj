@@ -186,7 +186,22 @@ establish, and each would silently regress.
 - **The album-art child process must be terminated explicitly.** `clear()` removes the image and
   leaves `ueberzugpp` running. `AlbumArtRenderer.shutdown()` is called from `_shutdown()` and from the
   signal handler, and **cannot raise** — it runs before `request_exit()`, the call that unblocks urwid
-  and makes the rest of the shutdown reachable.
+  and makes the rest of the shutdown reachable. It also tears down the extracted-cover cache dir
+  (`cleanup_cover_cache()`), because `atexit` does not fire on a default SIGTERM (Phase 2, inspection C4).
+- **A broken pipe to the overlay child must respawn, not disable art.** The protocol keeps one
+  long-lived `ueberzugpp` child on a stdin pipe. A single `BrokenPipeError` used to null the handle and
+  return before the respawn branch could run, so one choked write — a resize command was enough —
+  killed album art for the whole session while `is_available()` still said True (Phase 2, inspection
+  C1/C2). `ImageProtocol.render()` now drops the dead child and retries once against a fresh layer in
+  the same call, and returns a bool the renderer reads. **`protocol.available` goes False only on a
+  confirmed-missing binary (`FileNotFoundError`), never on a transient spawn failure** — otherwise one
+  mid-resize hiccup would permanently disable art (the C2 "finagle until it's back" symptom by another
+  route). The renderer's flicker-skip guard (`key == self._render_key`) is now also gated on
+  `protocol.is_alive()`: skipping a re-send is only safe while a child is actually holding the image, or
+  a dead frame freezes on screen.
+- **The `[I]` overlay takes the cover down while open.** The art is a separate X11/Wayland surface urwid
+  does not paint over, so it sat on top of the inspector (Phase 2, inspection F3). `_show_model_info()`
+  clears it on open and `force_redraw()`s on close so the next tick repaints it in place.
 
 ### The manifold
 
@@ -435,7 +450,7 @@ CPU mel extraction, so `--workers` matters more than `--batch-size`; on CPU the 
 
 ## 8 · Testing
 
-`python3 -m pytest tests` — **591 tests, green, ~19 s.** (542 before Phase 1.)
+`python3 -m pytest tests` — **603 tests, green, ~19 s.** (591 after Phase 1, 542 before it.)
 
 The suite is behavioural, not existence checks. Two of the worst defects in this project's history
 survived a green suite of the latter. What that means in practice, and what to preserve:

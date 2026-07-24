@@ -359,10 +359,37 @@ the banner.
 
 ---
 
-### Phase 2 — Album-art lifecycle and rendering
+### Phase 2 — Album-art lifecycle and rendering  ✅ DONE (branch `rewrite/phase-2`, suite 591 → 603)
 **Closes C1, C2, C4, C5; documents C3.** Depends on Phase 1's `src/` move. Separate agent: a
 self-contained subsystem (`album_art.py` + the SIGWINCH/render path in `tui.py`), and C2 needs
 interactive/visual reproduction — a different mode from Phase 1's edits.
+
+> **What Phase 2 actually did** (so Phase 3/4 don't re-derive it):
+> - **C1** — the two protocol classes (`UeberzugppProtocol`, `UeberzugProtocol`) were near-identical
+>   copies carrying the pipe-break bug *twice*; they now share one `ImageProtocol` base and set only
+>   `binary`/`launch`. `ImageProtocol.render()` **returns a bool** and, on `BrokenPipeError`, drops the
+>   dead child and retries once against a fresh layer in the same call. `is_alive()`/`_ensure_process()`
+>   are the new helpers.
+> - **C1/C2 honesty** — `protocol.available` flips False **only** on a confirmed-missing binary
+>   (`FileNotFoundError`), never on a transient immediate-exit, so one mid-resize hiccup can't
+>   permanently disable art. `AlbumArtRenderer.render` reads that bool: on failure it forgets the render
+>   key (so the next tick retries) and disables + logs only when `protocol.available` is False. The
+>   renderer's flicker-skip is now gated on `self.protocol.is_alive()` — skipping a re-send is safe only
+>   while a child is holding the image.
+> - **C2** — the "toggle until it lands" symptom is the C1 pipe-break plus the flicker-guard wedge;
+>   both are fixed above. Active-resize flicker can still occur while dragging (many rapid re-sends at
+>   changing geometry) but **converges within one 0.5 s tick** once resizing stops. `_on_sigwinch` was
+>   already correct (signal-safe `force_redraw()` only) and is unchanged. No deterministic *visual*
+>   repro was added — the mechanism is reproduced at the unit level in `test_album_art_lifecycle.py`
+>   (pipe break → respawn → paint; dead child → key no longer skipped).
+> - **C4** — `cleanup_cover_cache()` (module fn, idempotent, clears the global) is called from
+>   `AlbumArtRenderer.shutdown()`, which the signal path and `_shutdown()` both reach; `atexit` stays as
+>   a backstop.
+> - **C5** — `_atomic_write_bytes(path, data)` (temp-then-rename via `os.replace`) replaces the cache
+>   `write_bytes`. **Phase 3's D3 wants the same property** for the `.npz` artifacts — see the handoff
+>   note below.
+> - **F3** — `_show_model_info()` clears the art on open and `force_redraw()`s on close.
+> - **C3** — documented in `README.md` (Requirements) as an inherent overlay-under-tmux limitation.
 
 Work: make the BrokenPipe path reach the respawn (clear `process` *and* fall through to `_start_layer`,
 or gate on a `needs_restart` flag) — `album_art.py:96/98/115`; reproduce the resize toggling
@@ -375,6 +402,34 @@ Invariants: `AlbumArtRenderer.shutdown()` **cannot raise** and runs before `requ
 a test that kills the child and asserts the next `render` respawns and `is_available()` stays honest.
 
 ---
+
+> **⚠ Phase 2 → Phase 3 handoff — read before you start (three trip-hazards):**
+>
+> 1. **The finding-ID letters in *this document* collide with `project_state.md` §10's glossary.**
+>    The glossary defines its own `C1–C5` and `D1–D8` (e.g. glossary `D1` = "queue depth 10→1",
+>    glossary `C5` = "similarity scale compressed") — **different findings** from this doc's inspection
+>    `C1–C5`/`D1–D4`. Phase 2 disambiguated its code comments by writing **"(inspection C1)"** rather
+>    than "(audit C1)". **Phase 3 must do the same for its D-series** — cite **"(inspection D1)"**, never
+>    "(audit D1)", or a future reader will map your comment to the wrong glossary entry. (Phase 1's
+>    citations happened not to collide because it only touched A/B/E/F/G letters, which the glossary
+>    doesn't use — so it wrote bare "(audit G1)". That convention is unsafe for C and D.)
+>
+> 2. **The atomic-write pattern D3 needs already exists — but not reusably for `.npz`.** Phase 2 added
+>    `album_art._atomic_write_bytes(path, bytes)` (write-`.tmp`-then-`os.replace`). It is **bytes-only**,
+>    so it does **not** wrap `np.savez`/`np.savez_compressed` directly. For D3, mirror the *pattern*:
+>    save to `<dest>.tmp.npz` (or a `NamedTemporaryFile` in the same dir) then `os.replace` onto the
+>    destination — same-directory rename is the atomic part. Consider factoring one shared helper if you
+>    want, but don't try to call the bytes helper on an npz path.
+>
+> 3. **Branch/baseline bookkeeping.** Phase 2 lives on `rewrite/phase-2` (off Phase 1's tip) and the
+>    suite is **603 green** there. Phase 3 depends on Phase 1, **not** Phase 2 — the two are independent
+>    siblings. So Phase 3's green baseline is **591** if you branch from Phase 1's tip, or **603** if you
+>    branch from a tree that already has Phase 2 merged. Confirm which base you're on before trusting a
+>    count; the `_isolate_state_files` autouse fixture and the "read `src/<module>.py`, not
+>    `<module>.py`" source-reading rule (§8) apply unchanged.
+>
+> Nothing in Phase 2 touched `embedding_generator.py`, `embeddings_io.py`, `generate_embeddings.py`, or
+> the artifact schema, so there are **no file-level conflicts** with Phase 3's scope.
 
 ### Phase 3 — Generation pipeline: durability and the vibe-cloud axes
 **Closes D1–D4; produces the stored axes Phase 4 needs.** Depends on Phase 1's move. **Gate: run only

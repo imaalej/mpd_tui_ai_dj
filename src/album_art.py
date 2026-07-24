@@ -21,83 +21,117 @@ from config import config
 
 
 class ImageProtocol:
+    """
+    A layer-drawing overlay protocol (ueberzugpp or classic ueberzug).
+
+    Both work by keeping a long-lived child process open on a stdin pipe and
+    feeding it JSON `add`/`remove` commands.  The two used to be near-identical
+    copies of the same fifty lines — including, twice, the inspection-C1 pipe-break bug — so
+    the shared machinery lives here and each subclass sets only `binary` and
+    `launch`.  One copy is one place to fix.
+    """
+
+    #: The executable name, checked with `which` and named in messages.
+    binary: str = ""
+    #: The full argv that starts a silent JSON layer.
+    launch: list = []
+
     def __init__(self):
         self.available = False
-
-    def detect(self) -> bool:
-        return False
-
-    def render(self, image_path: Path, x: int, y: int, width: int, height: int):
-        pass
-
-    def clear(self):
-        pass
-
-    def shutdown(self):
-        """
-        Release anything the protocol is holding outside this process.
-
-        Separate from `clear()`, which only removes the image: the overlay
-        protocols run a child process, and cleanup used to rely on `__del__`
-        firing at interpreter exit.  That is not guaranteed, and on SIGTERM it
-        did not happen at all, so the child outlived the DJ (audit L9).
-        """
-        pass
-
-
-# ---------------------------------------------------------------------------
-# ueberzugpp  (modern C++ rewrite — JSON stdin)
-# ---------------------------------------------------------------------------
-
-
-class UeberzugppProtocol(ImageProtocol):
-    def __init__(self):
-        super().__init__()
         self.process = None
         self.identifier = "adaptive_dj_cover"
+        # Throttle the "exited immediately" message so a persistently broken
+        # binary does not print twice a second forever — once per failure run.
+        self._start_failed_notified = False
 
     def detect(self) -> bool:
+        if not self.binary:
+            return False
         try:
-            r = subprocess.run(["which", "ueberzugpp"], capture_output=True, timeout=2)
+            r = subprocess.run(["which", self.binary], capture_output=True, timeout=2)
             if r.returncode != 0:
                 return False
             self.available = True
             return self._start_layer()
         except Exception as e:
-            print(f"ueberzugpp detection error: {e}", file=sys.stderr)
+            print(f"{self.binary} detection error: {e}", file=sys.stderr)
             return False
 
     def _start_layer(self) -> bool:
         try:
             self.process = subprocess.Popen(
-                ["ueberzugpp", "layer", "--silent"],
+                self.launch,
                 stdin=subprocess.PIPE,
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
             )
             time.sleep(0.15)
             if self.process.poll() is not None:
-                print(
-                    f"ueberzugpp exited immediately (code {self.process.returncode})",
-                    file=sys.stderr,
-                )
-                self.available = False
+                # Started but died at once.  This may be transient (the binary
+                # was momentarily busy mid-resize), so `available` stays True and
+                # the next tick retries — we only report it once per run.
+                if not self._start_failed_notified:
+                    print(
+                        f"{self.binary} exited immediately "
+                        f"(code {self.process.returncode})",
+                        file=sys.stderr,
+                    )
+                    self._start_failed_notified = True
+                self.process = None
                 return False
+            self._start_failed_notified = False
+            self.available = True
             return True
         except FileNotFoundError:
+            # The binary is genuinely gone — permanent, so stop claiming art
+            # works.  `available` is the signal the renderer reads to give up.
             self.available = False
+            self.process = None
             return False
         except Exception as e:
-            print(f"Failed to start ueberzugpp: {e}", file=sys.stderr)
-            self.available = False
+            print(f"Failed to start {self.binary}: {e}", file=sys.stderr)
+            self.process = None
             return False
 
-    def render(self, image_path: Path, x: int, y: int, width: int, height: int):
-        if not self.process or not image_path.exists():
-            return
-        if self.process.poll() is not None:
-            if not self._start_layer():
-                return
+    def is_alive(self) -> bool:
+        """True only while a live child is holding the layer open."""
+        return self.process is not None and self.process.poll() is None
+
+    def _ensure_process(self) -> bool:
+        """(Re)start the layer unless a live child already exists."""
+        if self.is_alive():
+            return True
+        return self._start_layer()
+
+    def render(self, image_path: Path, x: int, y: int, width: int, height: int) -> bool:
+        """
+        Draw `image_path` into the layer.  Returns True if it was written to a
+        live child, False if there is nothing on screen after this call.
+
+        The one non-obvious part is the pipe-break recovery (inspection C1).  The old
+        code caught `BrokenPipeError`, set `self.process = None`, and returned —
+        and the *next* render hit `if not self.process: return` before it could
+        reach the respawn branch, so a single broken write disabled album art for
+        the rest of the session while `is_available()` still reported True.  A
+        resize that made ueberzugpp choke on one command was enough to trigger it,
+        which is the mechanism behind inspection C2's "finagle until it comes back."
+
+        So a broken write now drops the dead child and retries once against a
+        fresh layer, and this same call paints.
+        """
+        if not image_path.exists():
+            return False
+        if not self._ensure_process():
+            return False
+        if self._send_add(image_path, x, y, width, height):
+            return True
+        # The write broke the pipe.  Drop the dead child, respawn, retry once.
+        self.process = None
+        if not self._ensure_process():
+            return False
+        return self._send_add(image_path, x, y, width, height)
+
+    def _send_add(self, image_path: Path, x: int, y: int, width: int, height: int) -> bool:
         try:
             cmd = {
                 "action": "add",
@@ -111,13 +145,15 @@ class UeberzugppProtocol(ImageProtocol):
             }
             self.process.stdin.write((json.dumps(cmd) + "\n").encode())
             self.process.stdin.flush()
+            return True
         except BrokenPipeError:
-            self.process = None
+            return False
         except Exception as e:
-            print(f"ueberzugpp render error: {e}", file=sys.stderr)
+            print(f"{self.binary} render error: {e}", file=sys.stderr)
+            return False
 
     def clear(self):
-        if not self.process:
+        if not self.is_alive():
             return
         try:
             cmd = {"action": "remove", "identifier": self.identifier}
@@ -128,14 +164,30 @@ class UeberzugppProtocol(ImageProtocol):
 
     def shutdown(self):
         """
-        End the child process.  See `ImageProtocol.shutdown` for why this is not
-        left to `__del__` (audit L9).
+        End the child process and reap it.
+
+        Separate from `clear()`, which only removes the image: the overlay
+        protocols run a child process, and cleanup used to rely on `__del__`
+        firing at interpreter exit.  That is not guaranteed, and on SIGTERM it
+        did not happen at all, so the child outlived the DJ (audit L9).
         """
         _terminate(self.process)
         self.process = None
 
     def __del__(self):
         self.shutdown()
+
+
+# ---------------------------------------------------------------------------
+# ueberzugpp  (modern C++ rewrite — JSON stdin)
+# ---------------------------------------------------------------------------
+
+
+class UeberzugppProtocol(ImageProtocol):
+    """ueberzugpp — the modern C++ rewrite, JSON on stdin."""
+
+    binary = "ueberzugpp"
+    launch = ["ueberzugpp", "layer", "--silent"]
 
 
 # ---------------------------------------------------------------------------
@@ -147,84 +199,10 @@ class UeberzugppProtocol(ImageProtocol):
 
 
 class UeberzugProtocol(ImageProtocol):
-    def __init__(self):
-        super().__init__()
-        self.process = None
-        self.identifier = "adaptive_dj_cover"
+    """Classic ueberzug — the Python package; needs `--parser json`."""
 
-    def detect(self) -> bool:
-        try:
-            r = subprocess.run(["which", "ueberzug"], capture_output=True, timeout=2)
-            if r.returncode != 0:
-                return False
-            self.available = True
-            return self._start_layer()
-        except Exception as e:
-            print(f"ueberzug detection error: {e}", file=sys.stderr)
-            return False
-
-    def _start_layer(self) -> bool:
-        try:
-            self.process = subprocess.Popen(
-                ["ueberzug", "layer", "--silent", "--parser", "json"],
-                stdin=subprocess.PIPE,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-            )
-            time.sleep(0.15)
-            if self.process.poll() is not None:
-                print("ueberzug exited immediately", file=sys.stderr)
-                self.available = False
-                return False
-            return True
-        except FileNotFoundError:
-            self.available = False
-            return False
-        except Exception as e:
-            print(f"Failed to start ueberzug: {e}", file=sys.stderr)
-            self.available = False
-            return False
-
-    def render(self, image_path: Path, x: int, y: int, width: int, height: int):
-        if not self.process or not image_path.exists():
-            return
-        if self.process.poll() is not None:
-            if not self._start_layer():
-                return
-        try:
-            cmd = {
-                "action": "add",
-                "identifier": self.identifier,
-                "x": x,
-                "y": y,
-                "width": width,
-                "height": height,
-                "scaler": "fit_contain",
-                "path": str(image_path.absolute()),
-            }
-            self.process.stdin.write((json.dumps(cmd) + "\n").encode())
-            self.process.stdin.flush()
-        except BrokenPipeError:
-            self.process = None
-        except Exception as e:
-            print(f"ueberzug render error: {e}", file=sys.stderr)
-
-    def clear(self):
-        if not self.process:
-            return
-        try:
-            cmd = {"action": "remove", "identifier": self.identifier}
-            self.process.stdin.write((json.dumps(cmd) + "\n").encode())
-            self.process.stdin.flush()
-        except Exception:
-            pass
-
-    def shutdown(self):
-        _terminate(self.process)
-        self.process = None
-
-    def __del__(self):
-        self.shutdown()
+    binary = "ueberzug"
+    launch = ["ueberzug", "layer", "--silent", "--parser", "json"]
 
 
 # ---------------------------------------------------------------------------
@@ -296,12 +274,45 @@ _COVER_CACHE_DIR: Optional[Path] = None
 def _get_cache_dir() -> Path:
     global _COVER_CACHE_DIR
     if _COVER_CACHE_DIR is None:
-        import atexit, shutil
+        import atexit
 
         _COVER_CACHE_DIR = Path(tempfile.mkdtemp(prefix="adaptive_dj_covers_"))
-        # Register cleanup so extracted cover art is removed when the process exits.
-        atexit.register(shutil.rmtree, str(_COVER_CACHE_DIR), True)
+        # `atexit` is the backstop, not the whole story: it does not run on a
+        # default SIGTERM, which is the same failure class the shutdown refactor
+        # fixed for the ueberzugpp child (inspection C4 / audit L9).  So the signal and
+        # `_shutdown()` paths call `cleanup_cover_cache()` too, via the renderer.
+        atexit.register(cleanup_cover_cache)
     return _COVER_CACHE_DIR
+
+
+def cleanup_cover_cache():
+    """
+    Remove the extracted-cover cache dir.  Idempotent, and safe on the signal
+    path — it swallows everything and clears the handle so a second call (atexit
+    after the signal path, say) is a no-op (inspection C4).
+    """
+    global _COVER_CACHE_DIR
+    if _COVER_CACHE_DIR is None:
+        return
+    import shutil
+
+    shutil.rmtree(str(_COVER_CACHE_DIR), ignore_errors=True)
+    _COVER_CACHE_DIR = None
+
+
+def _atomic_write_bytes(path: Path, data: bytes):
+    """
+    Write `data` to `path` via a temp file and an atomic rename (inspection C5).
+
+    A plain `write_bytes` truncated by a crash or a full disk leaves a partial
+    file at `path`, which the `cached.exists()` fast path then serves forever.
+    `os.replace` is atomic within the one directory, and the `.tmp` name never
+    matches the extensions the fast path checks — so a leftover temp from a hard
+    kill is inert rather than served.
+    """
+    tmp = path.with_name(path.name + ".tmp")
+    tmp.write_bytes(data)
+    os.replace(tmp, path)
 
 
 def _extract_embedded_art(audio_file: Path) -> Optional[Path]:
@@ -381,7 +392,7 @@ def _extract_embedded_art(audio_file: Path) -> Optional[Path]:
 
         ext = ".png" if "png" in mime else (".webp" if "webp" in mime else ".jpg")
         out_path = cache_dir / f"{cache_key}{ext}"
-        out_path.write_bytes(img_data)
+        _atomic_write_bytes(out_path, img_data)  # temp-then-rename (inspection C5)
         return out_path
 
     except Exception as e:
@@ -458,15 +469,39 @@ class AlbumArtRenderer:
         # ueberzug from doing its internal remove+redraw cycle, eliminating flicker.
         # When something genuinely changes (new track, resize, window move) the
         # key will differ and we re-render exactly once.
+        #
+        # The liveness check is the inspection-C2 half of inspection-C1: the skip is only safe while a
+        # child is actually holding the image up.  If it died — a pipe break, a
+        # crash, a resize command ueberzugpp choked on — the on-screen image is
+        # gone even though the key is unchanged, so we must fall through and let
+        # the protocol respawn rather than believe a dead frame is still there.
         key = (str(image_path), x, y, width, height)
-        if key == self._render_key:
+        if key == self._render_key and self.protocol.is_alive():
             return  # nothing changed — stable image, no flicker
         try:
-            self.protocol.render(image_path, x, y, width, height)
+            drawn = self.protocol.render(image_path, x, y, width, height)
+        except Exception:
+            drawn = False
+        if drawn:
             self.current_image = image_path
             self._render_key = key
-        except Exception:
-            pass
+        else:
+            # Nothing is on screen after this call.  Forget the key so the next
+            # tick re-attempts rather than assuming the frame is up (that stale
+            # assumption is exactly what wedged inspection-C1).
+            self.current_image = None
+            self._render_key = None
+            # `protocol.available` goes False only when the binary is confirmed
+            # gone (FileNotFoundError), not on a transient spawn failure — so a
+            # brief mid-resize hiccup keeps retrying, and only a real absence
+            # makes `is_available()` honestly report there is no art.
+            if not self.protocol.available:
+                print(
+                    "Album art: renderer disabled — the overlay process is gone "
+                    "and could not be restarted",
+                    file=sys.stderr,
+                )
+                self.available = False
 
     def clear(self):
         if self.available and self.protocol:
@@ -497,6 +532,13 @@ class AlbumArtRenderer:
                 self.protocol.shutdown()
             except Exception:
                 pass
+        # The extracted-cover cache is torn down here too, so a SIGTERM stop —
+        # which never reaches `atexit` — does not leak the temp dir (inspection C4).  This
+        # runs on the signal path, so it must not raise.
+        try:
+            cleanup_cover_cache()
+        except Exception:
+            pass
         self.available = False
 
     def force_redraw(self):
