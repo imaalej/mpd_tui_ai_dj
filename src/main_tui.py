@@ -289,6 +289,61 @@ class AdaptiveDJWithTUI:
         if state == 'paused':
             self.mpd_controller.pause()
 
+    def neutral_skip_current_track(self):
+        """
+        Neutral skip (audit G1): advance to the queued track without moving any
+        vector — "not this song right now, but keep the vibe".
+
+        It is *simpler* than `skip_current_track`, not harder.  It deliberately
+        does **not** call `feedback_handler.process_skip` (no session repel, no
+        taste penalty, no exploration change, no escalation counter) and does
+        **not** `replace_next` — it plays the lookahead that already exists at
+        depth 1, chosen under the vectors as they stand.  Nothing here is a
+        rejection; the vibe is left exactly where it is.
+
+        What it shares with the real skip is the one invariant that keeps the
+        session alive: **add the replacement before advancing** (audit C4).  At
+        depth 1 the lookahead is normally already queued, but at a track boundary
+        the queue can momentarily hold only the current track, and `mpc next` off
+        the last remaining track empties the queue and stops MPD — a later `add`
+        will not restart it.  So if the queue is 1-deep, top it up first; if it
+        still cannot be, the keypress does nothing and says so.  There is no
+        `play()` here, for the same reason there is none in `skip_current_track`.
+
+        Returns the track that was passed (for the caller to mark in the session
+        history), or None if nothing was skipped.
+        """
+        status = self.mpd_controller.get_status()
+        state = status.get('state')
+        track_file = status.get('track_file')
+
+        # `mpc next` on a stopped player is an error that changes nothing.
+        if state not in ('playing', 'paused') or not track_file:
+            return None
+
+        # Stamped so the completion detector cannot count this partially-heard
+        # track as a full listen — the same guard the rejection skip uses.
+        self._last_skip_time = time.time()
+
+        # Add-before-advance (audit C4).  ensure_one_ahead is a plain refill — it
+        # picks under the current vectors and moves nothing — so it does not turn
+        # this into a feedback event.
+        if len(self.mpd_controller.get_queue()) < 2:
+            self.queue_manager.ensure_one_ahead(mpd_state=state)
+        if len(self.mpd_controller.get_queue()) < 2:
+            print("Pass: nothing to advance into, staying on the current track",
+                  file=sys.stderr)
+            return None
+
+        self.mpd_controller.next_track()
+
+        # `mpc next` while paused advances *and* resumes playing (verified live);
+        # re-pause to honour the user's play state.  `mpc pause` is idempotent.
+        if state == 'paused':
+            self.mpd_controller.pause()
+
+        return track_file
+
     def run(self):
         """Main event loop with TUI."""
         self.running = True
@@ -353,8 +408,7 @@ class AdaptiveDJWithTUI:
                         position = status.get('position', 0)
 
                         if track_duration and position > 0:
-                            completion_threshold = max(0.9 * track_duration,
-                                                       track_duration - 10)
+                            completion_threshold = self._completion_threshold(track_duration)
 
                             # Only fire full-listen if track was NOT manually skipped recently
                             recently_skipped = (time.time() - self._last_skip_time) < 2.0
@@ -378,6 +432,27 @@ class AdaptiveDJWithTUI:
             except Exception as e:
                 print(f"Background loop error: {e}", file=sys.stderr)
                 time.sleep(1)
+
+    @staticmethod
+    def _completion_threshold(duration: float) -> float:
+        """
+        Seconds of a track that count as a full listen (audit B1).
+
+        A flat fraction of the duration: three-quarters is a genuine full
+        listen, and 90% was stricter than intended.  The old formula took
+        `max(0.9·duration, duration − 10)`; the `duration − 10` term made *long*
+        tracks stricter, not more lenient (a 4-minute track needed 3:50), which
+        is the opposite of the intent, so it is dropped.  A flat fraction also
+        widens the window a 0.5 s poll has to land in for the completion to be
+        seen at all (audit B2): for a 4-minute track that window grows from ~10 s
+        to 60 s, so a poll delayed by thread contention is far less likely to
+        miss the track's end.
+
+        Seeking is deliberately not special-cased: the user may seek however they
+        like, and a completion reached by a forward seek counting as a listen is
+        acceptable by design.
+        """
+        return config.full_listen_fraction * duration
 
     def _maybe_checkpoint(self):
         """

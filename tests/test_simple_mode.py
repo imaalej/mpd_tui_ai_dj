@@ -254,14 +254,14 @@ def test_the_fallback_loop_draws_the_session_panel(simple_tui, capsys, library):
 def test_keys_pressed_at_the_terminal_reach_the_real_actions(simple_tui):
     tui, terminal = simple_tui
     fired = []
-    for name in ('_toggle_play_pause', '_skip_track', '_like_track',
+    for name in ('_toggle_play_pause', '_skip_track', '_pass_track', '_like_track',
                  '_volume_up', '_volume_down', '_seek_forward',
                  '_seek_backward', '_replay_focused'):
         setattr(tui, name, (lambda n: lambda *a, **k: fired.append(n))(name))
 
-    _run(tui, terminal, [" ", "n", "l", ".", ",", "\x1b[C", "\x1b[D", "\r"])
+    _run(tui, terminal, [" ", "n", "v", "l", ".", ",", "\x1b[C", "\x1b[D", "\r"])
 
-    assert fired == ['_toggle_play_pause', '_skip_track', '_like_track',
+    assert fired == ['_toggle_play_pause', '_skip_track', '_pass_track', '_like_track',
                      '_volume_up', '_volume_down', '_seek_forward',
                      '_seek_backward', '_replay_focused']
 

@@ -116,8 +116,9 @@ is a uniform random draw rather than an arbitrary `argpartition` ordering.
 
 | Event | Trigger | Effect |
 |---|---|---|
-| **Full listen** | ≥90% of duration played | Session vector updated (the primary driver). Taste +0.02. Exploration −0.02. The only thing that increments `tracks_played`. |
+| **Full listen** | ≥75% of duration played (`config.full_listen_fraction`) | Session vector updated (the primary driver). Taste +0.02. Exploration −0.02. The only thing that increments `tracks_played`. |
 | **Skip `[N]`** | Keypress | Taste −0.05. Exploration +0.05. Session vector repelled from the consecutive-skip-run centroid by a magnitude **solved for a pool-turnover target that escalates with run length** (5% → 20% → 50% → 85%), projected back onto the manifold from the second consecutive press. Lookahead replaced, then exactly one advance. Measured turnover printed to the console. |
+| **Pass `[V]`** | Keypress | **Nothing to the model** (audit G1): no session repel, no taste penalty, no exploration change, no escalation counter. Advances into the already-queued lookahead — add-before-advance, exactly one advance, no `play()` — and marks the passed track `»`. "Not this song, keep the vibe." |
 | **Like `[L]`** | Keypress | Taste +0.10, saved immediately. Adds `♥`. |
 | **Un-like `[L]`** | Keypress on an already-liked track | Removes the like from `feedback_history` and **recomputes** the taste model from what remains. See §4. |
 
@@ -498,7 +499,8 @@ Delete `data/state/` before measuring anything about a cold start.
 | Key | Action |
 |---|---|
 | `Space` | Play / Pause |
-| `N` | Skip — escalates if you keep pressing it |
+| `N` | Skip — a rejection; escalates if you keep pressing it |
+| `V` | Pass — advance without changing the vibe; marks the track `»`, moves nothing in the model |
 | `L` | Like; press again on a liked track to un-like |
 | `↑` / `↓` | Move the cursor through the session history |
 | `Enter` | Replay the track under the cursor — it becomes `↓ next:` |
