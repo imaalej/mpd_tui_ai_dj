@@ -26,8 +26,8 @@ A terminal-based DJ that learns your taste in real time and curates a continuous
 ║    ✓ Alice Coltrane – Journey in Satchidananda                     ║
 ║    ⏭ Kamasi Washington – Change of the Guard                       ║
 ╠════════════════════════════════════════════════════════════════════╣
-║ [SPACE] Pause  [N] Skip  [L] Like  [↑↓] History  [ENTER] Replay    ║
-║ [,.] Vol  [←→] Seek  [I] Info  [Q] Quit                            ║
+║ [SPACE] Pause  [N] Skip  [V] Pass  [L] Like  [↑↓] History          ║
+║ [ENTER] Replay  [,.] Vol  [←→] Seek  [I] Info  [Q] Quit            ║
 ╚════════════════════════════════════════════════════════════════════╝
 ```
 
@@ -100,7 +100,8 @@ mpc status   # should show your track count
 | Key | Action |
 |-----|--------|
 | `Space` | Play / Pause |
-| `N` | Skip track — escalates if you keep pressing it (see below) |
+| `N` | Skip track — a rejection; escalates if you keep pressing it (see below) |
+| `V` | Pass — move on to the queued track without changing the vibe |
 | `L` | Like current track — press again on a liked track to un-like it |
 | `↑` / `↓` | Move the cursor through the session history |
 | `Enter` | Play the track under the cursor again — it becomes `↓ next:` |
@@ -170,7 +171,9 @@ The weights (α, β, γ, δ) shift dynamically based on your behavior. Skip a fe
 
 ### Skipping, and what it means
 
-`N` is the only steering key. A single press says "not this song" — the session vector is nudged away from it and the queued track behind it is dropped and re-picked immediately.
+`N` is the steering key. A single press says "not this song" — the session vector is nudged away from it and the queued track behind it is dropped and re-picked immediately.
+
+`V` is its neutral counterpart: **Pass** means "not this song, but keep the vibe." It advances to the track already queued behind the current one and touches *none* of the model — no nudge to the session vector, no taste penalty, no exploration change, no escalation. Use `N` when the direction is wrong and `V` when the direction is fine but this particular track isn't. A passed track is marked `»` in the history.
 
 Keep pressing and it escalates, because *n* consecutive rejections is the system observing that the neighbourhood is wrong — better evidence than a separate key you would have to reach for after diagnosing your own dissatisfaction. Each press targets a fraction of the candidate pool that must come out different:
 
@@ -185,7 +188,7 @@ The important part is that those are *targets*, and the magnitude of the move is
 
 From the second press onward the session vector is projected back onto your library — replaced with the centre of its 25 nearest real tracks — so however hard you push, it cannot drift into a region no music occupies. A full listen ends the run and the escalation resets.
 
-*(An earlier `V` key existed for this. It blended the session vector halfway toward a random direction, which measurably landed it outside the music and turned over less than two presses of `N` do. It is gone.)*
+*(An earlier `V` key steered — a "vibe shift" that blended the session vector halfway toward a random direction, which measurably landed it outside the music and turned over less than two presses of `N` do. That behaviour is gone; the `V` key is now the neutral **Pass** above, which moves nothing.)*
 
 ### Exploration vs Exploitation
 
@@ -209,7 +212,7 @@ Nothing is shown before a track has played. The session vector starts at zero, a
 You can also ask for any track's descriptors from the command line:
 
 ```bash
-python3 generate_embeddings.py --describe "Arctic Monkeys"
+python3 src/generate_embeddings.py --describe "Arctic Monkeys"
 ```
 
 This replaced a mood phrase — *"focused cohesive vibe, deep in the zone"* — assembled from three heuristics, all invented against scales nobody measured. The mood word came from an entropy-like quantity that is always ≈ 55 for a 512-dimensional unit vector, so it returned *eclectic* every time and its other two branches were unreachable; the *warming up → building → deep in the zone* stage word was a track counter in a costume.
@@ -226,13 +229,13 @@ Below the console, the **Session** panel shows the one track queued ahead, then 
   ⏭ Kamasi Washington – Change of the Guard
 ```
 
-`♥` is a track you have liked, at any point, across sessions. `✓` is a full listen, `⏭` a skip, `♪` the track playing now. `↑↓` move the cursor and `ENTER` queues that track to play again next.
+`♥` is a track you have liked, at any point, across sessions. `✓` is a full listen, `⏭` a skip (`N`, a rejection), `»` a pass (`V`, moved on without changing the vibe), `♪` the track playing now. `↑↓` move the cursor and `ENTER` queues that track to play again next.
 
 This replaced an "Upcoming Queue" panel that listed ten tracks read from `mpc playlist` — which, with the playback modes the DJ now uses, was the session's *history* displayed above the current track and numbered as if it were the future. The panel shows the past because the past is the part that is true; at a queue depth of one there is no future to list.
 
 Exactly **one** track sits in the queue ahead of the current one, refilled as each song ends so playback never stops. That depth is deliberate: with ten queued tracks, every one of them had been scored under the weights that existed ten songs ago, so a skip or a like was inaudible until they drained. At depth one, feedback changes what plays *next*.
 
-Candidates are drawn from a pool of 100 nearest neighbours in embedding space and re-ranked by the full scoring function. The winner is not simply the top-scoring track — one is drawn by Boltzmann sampling over **rank**, `p(i) ∝ exp(−i/τ)`, with `τ` set by the exploration value and readable in `[I]` as "choosing from ~top 8". A strict argmax would replay the identical evening from the same starting state every time, which for a system built around an evolving session is the failure mode. Recently played tracks are excluded for at least 20 songs, and that exclusion now survives a restart.
+Candidates are drawn from a pool of 100 nearest neighbours in embedding space and re-ranked by the full scoring function. The winner is not simply the top-scoring track — one is drawn by Boltzmann sampling over **rank**, `p(i) ∝ exp(−i/τ)`, with `τ` set by the exploration value and readable in `[I]` as "choosing from ~top 8". A strict argmax would replay the identical evening from the same starting state every time, which for a system built around an evolving session is the failure mode. Recently played tracks — the last 50 selections — are excluded from the candidate pool outright, and that exclusion now survives a restart.
 
 ### What Persists Between Sessions
 

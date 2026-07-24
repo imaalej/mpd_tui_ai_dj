@@ -91,6 +91,50 @@ def test_the_ramp_composes_with_exploration_rather_than_being_overridden():
     assert sum(weights.values()) == pytest.approx(1.0)
 
 
+# ── the ramp is earned from positive evidence, not skips (audit B5) ──────────
+
+def test_skips_do_not_advance_the_beta_ramp(library):
+    """
+    A listener who only skips has expressed no positive preference, so the β ramp
+    must stay at zero — even though `total_updates` climbs with every skip.
+    """
+    taste = UserTaste(dimension=library.dimension)
+    for i in range(10):
+        taste.update_from_skip(library.get_embedding(library.track_list[i]))
+
+    assert taste.total_updates == 10        # skips are still counted overall
+    assert taste.positive_updates == 0      # but none of it is positive evidence
+    assert ExplorationController().taste_ramp(taste.positive_updates) == 0.0
+
+
+def test_only_likes_and_full_listens_are_positive_evidence(library):
+    taste = UserTaste(dimension=library.dimension)
+    taste.update_from_like(library.get_embedding(library.track_list[0]))
+    taste.update_from_full_listen(library.get_embedding(library.track_list[1]))
+    taste.update_from_skip(library.get_embedding(library.track_list[2]))
+
+    assert taste.positive_updates == 2
+    assert taste.total_updates == 3
+    assert taste.get_stats()['positive_updates'] == 2
+
+
+def test_a_skip_run_before_a_like_does_not_pre_earn_beta(library):
+    """
+    The concrete misbehaviour: skip nine times, then like once.  With the ramp
+    reading `total_updates` β would already be near full (10/20); reading
+    positive evidence it is 1/20, as a single like should buy.
+    """
+    taste = UserTaste(dimension=library.dimension)
+    for i in range(9):
+        taste.update_from_skip(library.get_embedding(library.track_list[i]))
+    taste.update_from_like(library.get_embedding(library.track_list[9]))
+
+    controller = ExplorationController()
+    assert taste.positive_updates == 1
+    assert controller.taste_ramp(taste.positive_updates) == pytest.approx(
+        1 / config.taste_ramp_updates)
+
+
 # ── the guard the ramp does NOT retire ───────────────────────────────────────
 
 def test_a_lone_skip_still_cannot_seed_the_taste_model(library):

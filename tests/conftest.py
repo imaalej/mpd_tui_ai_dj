@@ -17,8 +17,13 @@ import numpy as np
 import pytest
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-if str(REPO_ROOT) not in sys.path:
-    sys.path.insert(0, str(REPO_ROOT))
+# The application modules live under src/ (audit G2).  Putting src/ on the path
+# keeps the flat imports (`from config import config`) working from the test
+# process exactly as they do when start.sh runs `python3 src/main_tui.py` and
+# Python prepends the script's own directory.
+SRC_ROOT = REPO_ROOT / "src"
+if str(SRC_ROOT) not in sys.path:
+    sys.path.insert(0, str(SRC_ROOT))
 
 from config import config  # noqa: E402  (needs the path insert above)
 

@@ -72,8 +72,13 @@ class ExplorationController:
         β used to apply at full strength from the very first track, so a
         brand-new user's "long-term taste" carried 0.3 of every scoring decision
         while being a random direction (audit L7).  The seed is now zero, and
-        this ramps the weight in as updates accumulate so the handover is
+        this ramps the weight in as evidence accumulates so the handover is
         gradual rather than a cliff at the first like.
+
+        `taste_updates` should be *positive* evidence — likes and full listens
+        (`UserTaste.positive_updates`), not `total_updates` (audit B5).  A skip is
+        a negative signal and must not advance the ramp: otherwise a listener who
+        only skips would see β climb though they have expressed no preference.
         """
         return min(1.0, max(0, taste_updates) / config.taste_ramp_updates)
 

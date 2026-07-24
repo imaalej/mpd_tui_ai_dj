@@ -50,6 +50,21 @@ class UserTaste:
         """True once the taste vector carries any evidence at all."""
         return bool(np.any(self.taste_vector))
 
+    @property
+    def positive_updates(self) -> int:
+        """
+        Count of *positive* taste evidence — likes and full listens (audit B5).
+
+        This, not `total_updates`, is what the β ramp is earned from.
+        `total_updates` also counts skips, and a skip is a negative signal:
+        letting it advance the ramp raises the displayed "β earned" and the taste
+        weight for a listener who has expressed no positive preference at all.
+        `like_count` and `full_listen_count` are already maintained here and are
+        reset by `replay()`, so this stays consistent under an un-like replay for
+        free.
+        """
+        return self.like_count + self.full_listen_count
+
     def get_taste_vector(self) -> np.ndarray:
         """Get current taste vector (normalized)."""
         return self.taste_vector.copy()
@@ -287,6 +302,7 @@ class UserTaste:
         """Get statistics about taste model."""
         return {
             'total_updates': self.total_updates,
+            'positive_updates': self.positive_updates,
             'is_seeded': self.is_seeded(),
             'like_count': self.like_count,
             'skip_count': self.skip_count,

@@ -15,9 +15,55 @@ from pathlib import Path
 
 import pytest
 
-from mpd_controller import MPDController
+from mpd_controller import MPDController, parse_mpc_clock
 
-SOURCE = Path(__file__).resolve().parent.parent / "mpd_controller.py"
+SOURCE = Path(__file__).resolve().parent.parent / "src" / "mpd_controller.py"
+
+
+# ── time parsing, incl. the H:MM:SS form (audit F2) ──────────────────────────
+
+@pytest.mark.parametrize("clock,seconds", [
+    ("0:00", 0),
+    ("0:05", 5),
+    ("3:45", 225),
+    ("1:23", 83),
+    ("59", 59),            # a lone seconds field
+    ("1:05:30", 3930),     # the hour form the old regex could not read
+    ("2:00:00", 7200),
+    ("10:00:00", 36000),
+])
+def test_parse_mpc_clock_folds_minutes_and_hours(clock, seconds):
+    assert parse_mpc_clock(clock) == seconds
+
+
+def test_status_parsing_reads_a_track_over_an_hour():
+    """
+    F2: a track past an hour prints `H:MM:SS/H:MM:SS`.  The old
+    `(\\d+):(\\d+)/(\\d+):(\\d+)` matched a garbage substring, so position and
+    duration were wrong and completion never fired honestly for such a track.
+    """
+    fields = MPDController._parse_status_fields(
+        "volume: 40%   repeat: off\n[playing] #1/5   1:05:30/1:23:45 (78%)\n")
+    assert fields['state'] == 'playing'
+    assert fields['position'] == 3930      # 1:05:30
+    assert fields['duration'] == 5025      # 1:23:45
+    assert fields['position'] < fields['duration']
+    assert fields['volume'] == 40
+
+
+def test_status_parsing_still_reads_the_minutes_form():
+    fields = MPDController._parse_status_fields(
+        "volume: 90%\n[paused] #1/10   0:05/3:45 (2%)\n")
+    assert fields['state'] == 'paused'
+    assert fields['position'] == 5
+    assert fields['duration'] == 225
+    assert fields['volume'] == 90
+
+
+def test_status_parsing_reports_stopped_with_no_time():
+    fields = MPDController._parse_status_fields("volume: 50%\n")
+    assert fields['state'] == 'stopped'
+    assert 'position' not in fields and 'duration' not in fields
 
 
 def test_no_method_is_defined_twice():

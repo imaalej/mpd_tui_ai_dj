@@ -177,6 +177,38 @@ def test_a_skipped_track_is_marked_in_the_panel(tui):
     assert "⏭" in panel_text(tui)
 
 
+def test_pressing_v_passes_the_track_and_marks_it_in_the_panel(tui):
+    """
+    The [V] binding routes through the real `_handle_input` to `_pass_track`,
+    which advances via the orchestrator and marks the passed track `»` (audit
+    G1).  The orchestrator's MPD/queue advance is exercised by test_neutral_skip;
+    here the wiring under test is key → history mark, so the advance is stubbed.
+    """
+    mpd = start_playing(tui, tracks=3)
+    tui._update_display()
+    passed = mpd.queue[0]
+
+    tui.dj.neutral_skip_current_track = lambda: passed
+    tui._handle_input("v")
+    tui._update_display()
+
+    entry = next(e for e in tui.history.entries if e.track == passed)
+    assert entry.outcome == "»"
+    assert "»" in panel_text(tui)
+
+
+def test_a_pass_that_does_nothing_marks_nothing(tui):
+    """A pass the orchestrator refused (returns None) must not mark the panel."""
+    start_playing(tui, tracks=3)
+    tui._update_display()
+
+    tui.dj.neutral_skip_current_track = lambda: None
+    tui._handle_input("v")
+    tui._update_display()
+
+    assert all(e.outcome != "»" for e in tui.history.entries)
+
+
 def test_a_completed_track_is_marked_in_the_panel(tui):
     mpd = start_playing(tui, tracks=3)
     tui._update_display()
@@ -472,7 +504,7 @@ def test_the_palette_defines_exactly_the_attributes_the_widgets_use(tui):
 
     source = Path(tui.__module__.replace('.', '/') + '.py')
     if not source.exists():
-        source = Path(__file__).resolve().parent.parent / "tui.py"
+        source = Path(__file__).resolve().parent.parent / "src" / "tui.py"
     text = source.read_text()
 
     palette_block = re.search(r"palette = \[(.*?)\n        \]", text, re.S).group(1)

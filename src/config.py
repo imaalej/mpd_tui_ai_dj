@@ -47,6 +47,17 @@ class Config:
         self.session_decay_factor = 0.85       # Exponential decay for session vector updates
         self.session_influence_window = 5      # Number of recent tracks influencing session
 
+        # Fraction of a track that counts as a full listen (audit B1).  A track
+        # heard for three-quarters of its length is a genuine full listen; 90%
+        # was stricter than intended.  A flat fraction rather than the old
+        # max(0.9·duration, duration−10): the duration−10 term made *long* tracks
+        # stricter (a 4-minute track needed 3:50), the opposite of the intent, so
+        # it is gone.  A flat fraction also widens the poll window the completion
+        # detector must land in (audit B2).  A control constant — it shapes
+        # behaviour without asserting a measured fact — so it is a knob, not a
+        # claim, and re-tunable by listening.
+        self.full_listen_fraction = 0.75
+
         # Skip escalation (audit H9).  Consecutive rejections are the system
         # observing that the neighbourhood is wrong, so [N] escalates on its own
         # rather than waiting for a second key.  The schedule is written in
@@ -131,8 +142,11 @@ class Config:
         self.recent_history_size = 50          # Tracks to remember for anti-repetition
         self.minimum_replay_gap = 20           # Minimum tracks before replaying
         
-        # Persistence Paths
-        self.data_dir = Path(__file__).parent / 'data'
+        # Persistence Paths.  Anchored to the repo root (the parent of src/),
+        # not to this module's directory: the code lives in src/ but data/ stays
+        # at the top level, so every launch and every test resolves the same
+        # data/ regardless of the working directory (audit G2).
+        self.data_dir = Path(__file__).parent.parent / 'data'
         self.embeddings_file = self.data_dir / 'embeddings' / 'track_embeddings.npz'
         self.descriptors_file = self.data_dir / 'embeddings' / 'descriptors.npz'
         self.failed_tracks_file = self.data_dir / 'embeddings' / 'failed.txt'
@@ -211,6 +225,8 @@ class Config:
                  f"require 0 < tau_min <= tau_max, got {self.tau_min} / {self.tau_max}")
         _require(self.taste_ramp_updates >= 1,
                  f"taste_ramp_updates must be at least 1, got {self.taste_ramp_updates}")
+        _require(0 < self.full_listen_fraction <= 1,
+                 f"full_listen_fraction must be in (0, 1], got {self.full_listen_fraction}")
 
         # The skip schedule is the only input to the λ solver, so a schedule that
         # does not escalate would silently make [N] a no-op at every run length.

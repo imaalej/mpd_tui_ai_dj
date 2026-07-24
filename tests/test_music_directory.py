@@ -7,6 +7,7 @@ wrong value costs an entire embedding-generation run, so detection is read from
 MPD's own config and the answer is proved against real track paths.
 """
 
+import os
 from pathlib import Path
 
 import pytest
@@ -24,6 +25,21 @@ import music_directory as md
 ])
 def test_directive_forms_all_parse(line, expected):
     assert md.parse_music_directory(line) == expected
+
+
+def test_a_hash_inside_a_quoted_value_is_kept(tmp_path):
+    """
+    E3: MPD treats `#` as literal inside quotes, so a directory whose name
+    contains one must not be truncated at it.  The old `[^"#]` value class cut
+    it off.
+    """
+    assert md.parse_music_directory(
+        'music_directory "/mnt/music/#rare/set"') == '/mnt/music/#rare/set'
+
+
+def test_an_unquoted_value_still_stops_at_a_trailing_comment():
+    assert md.parse_music_directory(
+        'music_directory /mnt/music/set   # the good stuff') == '/mnt/music/set'
 
 
 def test_commented_out_directives_are_ignored():
@@ -62,6 +78,30 @@ def test_config_file_is_read_when_env_is_unset(tmp_path, monkeypatch):
     path, source = md.detect_music_directory()
     assert path == Path.home() / 'Music'      # ~ expanded
     assert source == str(conf)
+
+
+def test_a_config_value_dollar_var_is_taken_literally(tmp_path, monkeypatch):
+    """
+    E3: MPD does not expand `$VAR` in its config (only a leading `~`), so neither
+    do we — expanding it would rewrite a `$` MPD would have kept.
+    """
+    conf = tmp_path / 'mpd.conf'
+    conf.write_text('music_directory "/mnt/music/$MYVAR/x"\n')
+    monkeypatch.setattr(md, 'CONFIG_CANDIDATES', (str(conf),))
+    monkeypatch.delenv('MPD_MUSIC_DIR', raising=False)
+    monkeypatch.setenv('MYVAR', 'SHOULD_NOT_APPEAR')
+
+    path, _ = md.detect_music_directory()
+    assert path == Path('/mnt/music/$MYVAR/x')
+
+
+def test_our_own_env_override_still_expands_shell_style(monkeypatch):
+    """The MPD_MUSIC_DIR knob is ours, not MPD's, so shell-style expansion of it
+    is what a user setting it would expect."""
+    monkeypatch.setenv('MPD_MUSIC_DIR', '$HOME/Music')
+    path, source = md.detect_music_directory()
+    assert path == Path(os.path.expandvars('$HOME/Music'))
+    assert source == 'MPD_MUSIC_DIR'
 
 
 def test_earlier_candidates_win(tmp_path, monkeypatch):

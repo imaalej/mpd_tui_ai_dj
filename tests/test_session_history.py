@@ -10,14 +10,67 @@ against — in particular `test_enter_targets_the_row_under_the_cursor_not_the_
 first_track`.
 """
 
-from session_history import (MARK_LIKED, MARK_LISTENED, MARK_NONE, MARK_PLAYING,
-                             MARK_SKIPPED, SessionHistory)
+from session_history import (MARK_LIKED, MARK_LISTENED, MARK_NONE, MARK_PASSED,
+                             MARK_PLAYING, MARK_SKIPPED, SessionHistory)
 
 
 def played(history, *tracks):
     for track in tracks:
         history.note_playing(track)
     return history
+
+
+# ── A neutral pass (audit G1) ─────────────────────────────────────────────────
+
+
+def test_a_pass_marks_the_most_recent_play_of_the_track():
+    history = played(SessionHistory(), "a.flac", "b.flac")
+    assert history.mark_passed("a.flac") is True
+    entry = next(e for e in history.entries if e.track == "a.flac")
+    assert entry.outcome == MARK_PASSED
+    assert MARK_PASSED == "»"
+
+
+def test_a_pass_glyph_is_neither_a_skip_nor_a_listen():
+    """
+    The whole point of the mark: a pass is not a rejection (⏭) and not a full
+    listen (✓).  It has to read as its own thing.
+    """
+    assert MARK_PASSED not in (MARK_SKIPPED, MARK_LISTENED, MARK_PLAYING,
+                               MARK_LIKED, MARK_NONE)
+
+
+def test_a_pass_marks_the_latest_of_two_plays_of_the_same_track():
+    history = played(SessionHistory(), "a.flac", "b.flac", "a.flac")
+    history.mark_passed("a.flac")
+    outcomes = [e.outcome for e in history.entries]  # oldest first
+    assert outcomes == [None, None, MARK_PASSED]
+
+
+def test_a_pass_does_not_overwrite_a_full_listen():
+    """
+    If the track already crossed the completion threshold and earned ✓ before
+    the listener pressed [V], that happened and stands.
+    """
+    history = played(SessionHistory(), "a.flac", "b.flac")
+    history.apply_event('full_listen', 'a.flac')
+    assert history.mark_passed("a.flac") is False
+    entry = next(e for e in history.entries if e.track == "a.flac")
+    assert entry.outcome == MARK_LISTENED
+
+
+def test_a_pass_for_an_unknown_track_is_a_no_op():
+    history = played(SessionHistory(), "a.flac")
+    assert history.mark_passed("never-played.flac") is False
+
+
+def test_a_passed_track_shows_the_pass_mark_in_the_panel_rows():
+    history = played(SessionHistory(), "a.flac", "b.flac")
+    history.mark_passed("a.flac")
+    rows = {r['track']: r['marks'] for r in history.rows(current_track="b.flac")}
+    assert rows["a.flac"].endswith(MARK_PASSED)
+    # And it does not spuriously earn a heart.
+    assert rows["a.flac"] == MARK_NONE + MARK_PASSED
 
 
 # ── Recording what played ────────────────────────────────────────────────────

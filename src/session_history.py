@@ -35,6 +35,11 @@ MARK_LIKED = "♥"
 MARK_SKIPPED = "⏭"
 MARK_LISTENED = "✓"
 MARK_PLAYING = "♪"
+# A neutral pass (audit G1): the listener moved on with [V] without rejecting the
+# track.  Deliberately neither ⏭ (which reads as rejection and drives the
+# session vector away) nor ✓ (a full listen).  "You passed on this one, and the
+# vibe is untouched."
+MARK_PASSED = "»"
 MARK_NONE = " "
 
 # Maps a FeedbackHandler event type onto a session mark.  'like' is deliberately
@@ -128,6 +133,28 @@ class SessionHistory:
             if entry.track == track:
                 entry.outcome = mark
                 return True
+        return False
+
+    def mark_passed(self, track: str) -> bool:
+        """
+        Mark the most recent play of `track` as neutrally passed (audit G1).
+
+        A neutral skip touches none of the model — no session repel, no taste
+        penalty, no exploration change — so unlike `⏭` and `✓` it produces *no*
+        `FeedbackHandler` event, and there is nothing for `drain_events` to carry.
+        The mark is therefore set here directly, from the key handler.
+
+        Only an entry with no outcome yet is touched.  If the track already
+        crossed the full-listen threshold and earned `✓` before the listener
+        pressed `[V]`, that happened and stands — a pass does not un-count a
+        listen.  Returns True if an entry was marked.
+        """
+        for entry in reversed(self.entries):
+            if entry.track == track:
+                if entry.outcome is None:
+                    entry.outcome = MARK_PASSED
+                    return True
+                return False
         return False
 
     def drain_events(self, events: Sequence[dict], cursor: int) -> int:

@@ -489,7 +489,7 @@ class AdaptiveDJTUI:
         # the footer on `<`/`>`, and simple mode bound ↑↓ to volume while the
         # urwid mode had them unbound.  One set of bindings now, everywhere.
         footer_text = urwid.Text(
-            "[SPACE] Pause   [N] Skip   [L] Like   [↑↓] History   "
+            "[SPACE] Pause   [N] Skip   [V] Pass   [L] Like   [↑↓] History   "
             "[ENTER] Replay   [,.] Vol   [←→] Seek   [I] Info   [Q] Quit",
             align="center",
         )
@@ -562,6 +562,8 @@ class AdaptiveDJTUI:
             self._toggle_play_pause()
         elif key_lower == "n":
             self._skip_track()
+        elif key_lower == "v":
+            self._pass_track()
         elif key_lower == "l":
             self._like_track()
         elif key_lower == "i":
@@ -598,6 +600,24 @@ class AdaptiveDJTUI:
         be something a key handler can get wrong.
         """
         self.dj.skip_current_track()
+
+    def _pass_track(self):
+        """
+        [V].  Neutral skip: advance to the queued track without moving any vector.
+
+        The counterpart to `[N]`: where a skip is a rejection that repels the
+        session vector and escalates, a pass means "not this song, keep the
+        vibe" and touches none of the model.  The orchestrator owns the advance —
+        add-before-advance and the single `next`, the same C4 ordering the real
+        skip rests on — and returns the passed track so the history can mark it
+        `»`.  The mark is set here rather than drained from a feedback event
+        because a pass, by design, produces no feedback event.
+        """
+        passed = self.dj.neutral_skip_current_track()
+        if passed:
+            self.history.mark_passed(passed)
+            if self.use_urwid:
+                self._update_session_panel()
 
     def _like_track(self):
         """
@@ -702,13 +722,13 @@ class AdaptiveDJTUI:
         exploration = self.dj.exploration_controller.get_stats()
         selector = self.dj.track_selector.get_stats()
         weights = self.dj.exploration_controller.get_weights(
-            taste_updates=taste['total_updates'])
+            taste_updates=taste['positive_updates'])
 
         # τ is the effective number of candidates the sampler is choosing among.
         # Reporting it is the point of picking a rank-based rule: it is a true
         # statement about what the machine is doing, derived rather than named.
         tau = self.dj.track_selector.temperature(exploration['exploration'])
-        ramp = self.dj.exploration_controller.taste_ramp(taste['total_updates'])
+        ramp = self.dj.exploration_controller.taste_ramp(taste['positive_updates'])
 
         schedule = config.skip_turnover_schedule
         run = exploration['consecutive_skips']
@@ -780,9 +800,10 @@ class AdaptiveDJTUI:
             "─" * 50,
             "TASTE MODEL",
             f"  seeded           {'yes' if taste['is_seeded'] else 'no (no positive signal yet)'}",
-            f"  updates          {taste['total_updates']}",
+            f"  updates          {taste['total_updates']} "
+            f"({taste['positive_updates']} positive — likes + full listens)",
             f"  β earned         {ramp:.0%}   (full weight after "
-            f"{config.taste_ramp_updates} updates)",
+            f"{config.taste_ramp_updates} positive signals; skips do not count)",
             f"  likes            {taste['like_count']}",
             f"  full listens     {taste['full_listen_count']}",
             f"  skips            {taste['skip_count']}",
@@ -1360,7 +1381,7 @@ class AdaptiveDJTUI:
         # dispatch, via `decode_key()` into `_handle_input` (audit L9/M1c).
         # These used to disagree: ↑↓ were volume here and queue navigation
         # there, while the README said a third thing.
-        print("SPACE=Play/Pause  N=Next  L=Like  ↑↓=History  ENTER=Replay")
+        print("SPACE=Play/Pause  N=Next  V=Pass  L=Like  ↑↓=History  ENTER=Replay")
         print(",.=Vol  ←→=Seek  I=Info  Q=Quit")
         print("=" * 60)
         sys.stdout.flush()

@@ -40,6 +40,12 @@ class FeedbackHandler:
             'likes': 0,
             'full_listens': 0
         }
+        # Likes made *this session*, per track (audit B6).  `feedback_history`
+        # spans every previous session, so un-liking a track counts like-events
+        # across all of them; without this, retracting a like made on a prior
+        # night would decrement tonight's like tally.  This is the session-only
+        # view the counter needs.
+        self._session_likes_by_track = {}
     
     def process_skip(self, track_file: str) -> Optional[dict]:
         """
@@ -123,6 +129,8 @@ class FeedbackHandler:
         # Record feedback
         self._record_feedback('like', track_file)
         self.session_feedback_count['likes'] += 1
+        self._session_likes_by_track[track_file] = (
+            self._session_likes_by_track.get(track_file, 0) + 1)
         return True
 
     def process_unlike(self, track_file: str) -> Optional[dict]:
@@ -186,8 +194,12 @@ class FeedbackHandler:
         report['removed'] = removed
         self.save_feedback_history()
 
+        # Decrement the *session* like tally only by likes made this session for
+        # this track (audit B6) — `removed` counts every session on disk, so
+        # using it would subtract a prior night's likes from tonight's count.
+        session_removed = self._session_likes_by_track.pop(track_file, 0)
         self.session_feedback_count['likes'] = max(
-            0, self.session_feedback_count['likes'] - removed)
+            0, self.session_feedback_count['likes'] - session_removed)
 
         if exact:
             note = ""
@@ -285,3 +297,4 @@ class FeedbackHandler:
             'likes': 0,
             'full_listens': 0
         }
+        self._session_likes_by_track = {}

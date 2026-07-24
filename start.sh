@@ -122,7 +122,7 @@ fi
 # wrong directory wastes an entire embedding-generation run.
 header "Step 4/5 · Locating MPD's music directory"
 
-if MUSIC_DIR=$(python3 music_directory.py 2>/dev/null); then
+if MUSIC_DIR=$(python3 src/music_directory.py 2>/dev/null); then
   success "Music directory: $MUSIC_DIR"
 else
   warn "Could not read MPD's music_directory from its config."
@@ -138,7 +138,9 @@ else
     exit 1
   fi
   export MPD_MUSIC_DIR="$MUSIC_DIR"
-  success "Using $MUSIC_DIR (set MPD_MUSIC_DIR to make this permanent)"
+  success "Using $MUSIC_DIR for this run"
+  info "This only applies to the current launch. To make it stick, add"
+  info "  export MPD_MUSIC_DIR=\"$MUSIC_DIR\"   to your shell profile."
 fi
 
 # ── 5. Embeddings check ───────────────────────────────────────────────────────
@@ -186,13 +188,13 @@ if [ ! -f "$EMBED_FILE" ]; then
     fi
     echo ""
     info "Generating real embeddings — this will take a while …"
-    python3 generate_embeddings.py
+    python3 src/generate_embeddings.py
     success "Embeddings generated!"
     ;;
   *)
     echo ""
     echo "  Nothing to play against. Run this when you are ready:"
-    echo "      python3 generate_embeddings.py"
+    echo "      python3 src/generate_embeddings.py"
     exit 0
     ;;
   esac
@@ -207,7 +209,10 @@ echo ""
 echo "  Controls inside the TUI:"
 echo "    SPACE         Play / Pause"
 echo "    N             Skip track (escalates on consecutive presses)"
+echo "    V             Pass — move on without changing the vibe"
 echo "    L             Like current song"
+echo "    ↑ / ↓         Move through the session history"
+echo "    ENTER         Replay the track under the cursor"
 echo "    , / .         Volume down / up"
 echo "    ← / →         Seek backward / forward"
 echo "    I             Model info"
@@ -215,4 +220,4 @@ echo "    Q             Quit"
 echo ""
 sleep 1
 
-python3 main_tui.py
+python3 src/main_tui.py
