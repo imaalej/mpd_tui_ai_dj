@@ -464,7 +464,10 @@ def test_a_terminal_too_short_for_art_clears_instead_of_smearing(tui, fake_art,
 
     mpd = start_playing(tui, tracks=2)
     fake_art.art_for[mpd.queue[0]] = art
-    monkeypatch.setattr(tui.loop.screen, 'get_cols_rows', lambda: (100, 8))
+    # Five rows: with the header and footer both gone the Now Playing box gets
+    # more of the terminal, so "too short for art" is now genuinely tiny — at
+    # five rows the art area falls below MIN_ART_ROWS and geometry returns None.
+    monkeypatch.setattr(tui.loop.screen, 'get_cols_rows', lambda: (100, 5))
 
     tui._update_display()
 
@@ -475,53 +478,115 @@ def test_a_terminal_too_short_for_art_clears_instead_of_smearing(tui, fake_art,
 # ── L9: the bindings agree with each other ───────────────────────────────────
 
 
-def test_the_footer_advertises_exactly_the_keys_that_are_bound(tui):
+def test_the_keybind_popup_advertises_exactly_the_keys_that_are_bound(tui):
     """
     The footer, the README table and the fallback-mode bindings disagreed three
-    ways (audit L9).  A footer that advertises a key doing nothing is the same
-    dishonesty the rest of this rewrite removes — and so is a key that works but
-    is not advertised, which is what ↑↓ and ENTER were.
+    ways (audit L9).  The footer is gone; the `[K]` popup, generated from the one
+    `KEYBINDS` list, is the single advertisement now — and a hint for a key doing
+    nothing is the same dishonesty as a key that works but is unadvertised, which
+    is what ↑↓ and ENTER once were.
     """
-    footer = tui.frame.footer.base_widget.text
-    for advertised in ("[SPACE]", "[N]", "[V]", "[L]", "[↑↓]", "[ENTER]",
-                       "[+−]", "[T]", "[,.]", "[←→]", "[I]", "[Q]"):
-        assert advertised in footer
+    from tui import KEYBINDS
+
+    page = "\n".join(tui._keybind_lines())
+    for label, _desc in KEYBINDS:
+        assert label in page, f"{label} is in KEYBINDS but not on the page"
 
     # Every advertised key reaches a distinct dispatch target.  Recorded through
     # the real `_handle_input`, so a binding removed from the table fails here
-    # rather than quietly leaving the footer lying.  The pane cycle is `[T]`;
-    # F1/F2/F3 jump straight to a pane but are a deliberately unadvertised
-    # convenience, so they are not in this footer list.  ENTER routes to a single
-    # method whose *effect* follows the view (reset vs replay) — that branch has
-    # its own test; here the invariant is the fixed key → method table (§4).
+    # rather than quietly leaving the popup lying.  F1/F2/F3 jump straight to a
+    # pane (surfaced in the popup but not a single-letter key), so they are
+    # exercised in their own test, not here.  ENTER routes to a single method
+    # whose *effect* follows the view (reset vs replay) — that branch has its own
+    # test; here the invariant is the fixed key → method table (§4).
     fired = []
     for name in ('_toggle_play_pause', '_skip_track', '_pass_track',
                  '_like_track', '_arrow_up', '_arrow_down', '_zoom_in',
-                 '_zoom_out', '_enter_action', '_toggle_pane', '_volume_down',
-                 '_volume_up', '_seek_backward', '_seek_forward',
-                 '_show_model_info', '_quit'):
+                 '_zoom_out', '_enter_action', '_play_selected',
+                 '_cycle_scaffold', '_toggle_pane', '_show_keybinds',
+                 '_volume_down', '_volume_up', '_seek_backward',
+                 '_seek_forward', '_show_model_info', '_quit'):
         monkeypatched = (lambda n: lambda *a, **k: fired.append(n))(name)
         setattr(tui, name, monkeypatched)
 
-    for key in (" ", "n", "v", "l", "up", "down", "+", "-", "enter", "t",
-                ",", ".", "left", "right", "i", "q"):
+    for key in (" ", "n", "v", "l", "up", "down", "+", "-", "enter", "p", "b",
+                "t", "k", ",", ".", "left", "right", "i", "q"):
         before = len(fired)
         tui._handle_input(key)
         assert len(fired) == before + 1, f"[{key}] is advertised but does nothing"
 
     assert fired == ['_toggle_play_pause', '_skip_track', '_pass_track',
                      '_like_track', '_arrow_up', '_arrow_down', '_zoom_in',
-                     '_zoom_out', '_enter_action', '_toggle_pane', '_volume_down',
-                     '_volume_up', '_seek_backward', '_seek_forward',
-                     '_show_model_info', '_quit']
+                     '_zoom_out', '_enter_action', '_play_selected',
+                     '_cycle_scaffold', '_toggle_pane', '_show_keybinds',
+                     '_volume_down', '_volume_up', '_seek_backward',
+                     '_seek_forward', '_show_model_info', '_quit']
 
 
-def test_the_footer_wraps_rather_than_truncating_on_a_narrow_terminal(tui):
-    """It is a flow widget now, so a narrow terminal gets two rows of hints
-    instead of a silently clipped one."""
-    assert tui.frame.footer.rows((60,)) > 1
-    lines = rendered(tui, (60, 30))
-    assert "[Q] Quit" in "".join(lines[-2:])
+def test_the_keybind_popup_opens_over_the_tui_and_any_key_dismisses_it(tui,
+                                                                       monkeypatch):
+    """`[K]` swaps the loop widget to an Overlay and restores it on dismissal —
+    the same modal contract as `[I]`, since both run through the one helper."""
+    monkeypatch.setattr(tui.loop, 'draw_screen',
+                        lambda: seen.append(tui.loop.widget))
+    monkeypatch.setattr(tui.loop.screen, 'get_cols_rows', lambda: (100, 40))
+    monkeypatch.setattr(tui.loop.screen, 'get_input', lambda: ['x'])
+
+    seen = []
+    original = tui.loop.widget
+    lines = tui._show_keybinds()
+
+    assert isinstance(seen[0], urwid.Overlay), "the popup is drawn as an overlay"
+    assert tui.loop.widget is original, "any key dismisses it"
+    assert any("Quit" in line for line in lines)
+
+
+def test_the_confirm_modal_returns_true_only_on_enter_or_y(tui, monkeypatch):
+    """The yes/no modal `[P]` uses: ENTER/Y confirm, anything else cancels — and
+    it always restores the loop widget, like the info overlays."""
+    monkeypatch.setattr(tui.loop, 'draw_screen', lambda: None)
+    monkeypatch.setattr(tui.loop.screen, 'get_cols_rows', lambda: (100, 40))
+    original = tui.loop.widget
+
+    monkeypatch.setattr(tui.loop.screen, 'get_input', lambda: ['enter'])
+    assert tui._confirm("Play now?", ["ok?"]) is True
+    assert tui.loop.widget is original
+
+    monkeypatch.setattr(tui.loop.screen, 'get_input', lambda: ['x'])
+    assert tui._confirm("Play now?", ["ok?"]) is False
+    assert tui.loop.widget is original
+
+
+def test_p_plays_the_selected_track_only_after_confirmation(tui, monkeypatch):
+    """`[P]` plays the cloud's selected track — but only once the confirm modal
+    says yes, so a stray press cannot jump the playhead."""
+    played = []
+    monkeypatch.setattr(tui, '_cloud_visible', lambda: True)
+    monkeypatch.setattr(tui.cloud, 'selected_track', lambda: "artist/song.flac")
+    monkeypatch.setattr(tui.dj, 'play_track_now',
+                        lambda t: played.append(t) or t, raising=False)
+
+    monkeypatch.setattr(tui, '_confirm', lambda *a, **k: False)   # cancelled
+    tui._handle_input("p")
+    assert played == []
+
+    monkeypatch.setattr(tui, '_confirm', lambda *a, **k: True)    # confirmed
+    tui._handle_input("p")
+    assert played == ["artist/song.flac"]
+
+
+def test_p_does_nothing_with_no_selection(tui, monkeypatch):
+    """No point picked → `[P]` never even asks to confirm."""
+    asked = []
+    played = []
+    monkeypatch.setattr(tui, '_cloud_visible', lambda: True)
+    monkeypatch.setattr(tui.cloud, 'selected_track', lambda: None)
+    monkeypatch.setattr(tui, '_confirm', lambda *a, **k: asked.append(1) or True)
+    monkeypatch.setattr(tui.dj, 'play_track_now', lambda t: played.append(t),
+                        raising=False)
+
+    tui._handle_input("p")
+    assert asked == [] and played == []
 
 
 def test_the_palette_defines_exactly_the_attributes_the_widgets_use(tui):

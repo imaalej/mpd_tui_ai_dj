@@ -7,8 +7,9 @@ Two halves, mirroring the descriptor-bank tests:
     through the artifact, and an axis-less bank degrades gracefully.  These run
     everywhere, no model, no real data.
   * the real library, if built — the axes stored in `descriptors.npz` reproduce
-    `mood_axes.select_axes` (which is what `explore_mood_axes.py` now calls), so
-    the stored frame is provably the one the selection logic picks.
+    `mood_axes.select_axes` (the one selection path, called by
+    `generate_embeddings.py`), so the stored frame is provably the one the
+    selection logic picks.
 """
 
 import numpy as np
@@ -177,8 +178,8 @@ def real_artifacts():
 def test_stored_axes_reproduce_the_selection_on_the_real_library(real_artifacts):
     """
     The Phase 3 acceptance check: the frame stored at generation time is exactly
-    what `select_axes` picks from the same inputs — the logic `explore_mood_axes.py`
-    now shares.  So the stored axes cannot silently drift from the offline proof.
+    what `select_axes` picks from the same inputs.  So the stored axes cannot
+    silently drift from the selection logic.
     """
     stored, library = real_artifacts
     sel = select_axes(stored['text_embeddings'], stored['desc_labels'], library)

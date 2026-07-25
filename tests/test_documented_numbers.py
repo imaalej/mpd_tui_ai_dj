@@ -125,15 +125,14 @@ def test_the_gpu_figure_is_the_one_that_was_recorded():
 
 def test_macos_is_not_claimed_as_supported():
     """
-    The README said "A terminal (Linux or macOS)" and nothing had ever been run
-    there.  `start.sh`'s bash 4+ expansion — a hard syntax error on the bash 3.2
-    macOS ships — was fixed in Stage 0, but album art still has no path there
-    and nothing has been tested.  Either test it or drop the claim; this is the
-    claim being dropped.
+    The README once said "A terminal (Linux or macOS)" though nothing had ever
+    been run there and album art has no path on macOS.  The claim — and every
+    mention — is dropped: the README states Linux only, so a reader is never told
+    something the project cannot back up.
     """
     readme = _readme()
-    assert "(Linux or macOS)" not in readme
-    assert re.search(r"macOS is \*?untested", readme)
+    assert not re.search(r"mac ?os", readme, re.I), "README must not mention macOS"
+    assert re.search(r"\bLinux\b", readme), "README states Linux support"
 
 
 def test_start_sh_uses_no_bash_4_only_syntax():
@@ -178,6 +177,7 @@ def test_the_start_sh_control_banner_lists_every_binding():
         "Zoom",           # + / − (G3)
         "Reset",          # ENTER over the cloud (G3)
         "Replay",         # ENTER over the history  (the E1 omission)
+        "selected cloud track",  # P — play the clicked point now
         "Cycle panes",    # T (G3)
         "F1 / F2 / F3",   # direct pane jumps (G3)
         "mouse",          # right-drag / scroll / click / slider (G3)
@@ -185,6 +185,7 @@ def test_the_start_sh_control_banner_lists_every_binding():
         "Volume",         # , / .
         "Seek",           # ← / →
         "Model info",     # I
+        "Keybinding",     # K — the popup that replaced the footer
         "Quit",           # Q
     ]
     missing = [r for r in required if r not in banner]

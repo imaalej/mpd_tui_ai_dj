@@ -439,6 +439,26 @@ def test_clicking_empty_space_selects_nothing(widget):
     assert widget.selected_idx is None
 
 
+def test_selected_track_returns_the_picked_file_or_none(widget, scene):
+    _coords, _color, tracks = scene
+    assert widget.selected_track() is None, "nothing picked yet"
+    widget.selected_idx = 2
+    assert widget.selected_track() == tracks[2]
+    widget.clear_selection()
+    assert widget.selected_track() is None
+
+
+def test_the_readout_marks_a_selection_with_a_note_not_a_square(widget, scene):
+    """The selected-track readout leads with ♫; the currently-playing readout
+    leads with ♪ — distinct glyphs, and neither is the old ▣ square."""
+    _coords, _color, tracks = scene
+    widget.selected_idx = 1
+    lines = render_lines(widget.render((90, 26)))
+    readout = next(line for line in lines if tracks[1].split("/")[-1] in line)
+    assert "♫" in readout
+    assert "▣" not in readout
+
+
 # ── TUI integration ───────────────────────────────────────────────────────────
 
 
@@ -447,30 +467,48 @@ def _cloud_ready(tui):
         pytest.skip("mood axes unavailable (data/embeddings absent)")
 
 
-def test_the_cloud_is_the_default_body_and_renders(tui):
+def test_the_split_is_the_default_body_and_renders_the_cloud(tui):
+    from tui import BODY_SPLIT
+
     _cloud_ready(tui)
-    assert tui.body_view == BODY_CLOUD
+    assert tui.body_view == BODY_SPLIT
     canvas = tui.frame.render((100, 40), focus=True)
     text = "\n".join(row.decode("utf-8", "replace") for row in canvas.text)
+    # The split shows all three panels; the cloud (with its axis triad) is the
+    # right column.
     assert "Vibe Space" in text
-    # the axis triad is on the border title
+    assert "System Console" in text
+    assert "Session" in text
     for label in tui.axes.labels:
         assert label in text
 
 
-def test_the_pane_key_cycles_cloud_history_console(tui):
+def _rendered_text(tui, size=(100, 40)):
+    return "\n".join(r.decode("utf-8", "replace")
+                     for r in tui.frame.render(size, focus=True).text)
+
+
+def test_the_pane_key_cycles_split_cloud_history_console(tui):
+    from tui import BODY_SPLIT
+
     _cloud_ready(tui)
+    # Opens on the split.
+    assert tui.body_view == BODY_SPLIT
+    split_text = _rendered_text(tui)
+    assert "System Console" in split_text
+    assert "Session" in split_text
+    assert "Vibe Space" in split_text
+    tui._handle_input("t")
     assert tui.body_view == BODY_CLOUD
+    assert "Vibe Space" in _rendered_text(tui)
     tui._handle_input("t")
     assert tui.body_view == BODY_HISTORY
-    assert "Session" in "\n".join(
-        r.decode("utf-8", "replace")
-        for r in tui.frame.render((100, 40), focus=True).text)
+    assert "Session" in _rendered_text(tui)
     tui._handle_input("t")
     assert tui.body_view == BODY_CONSOLE
-    assert "System Console" in "\n".join(
-        r.decode("utf-8", "replace")
-        for r in tui.frame.render((100, 40), focus=True).text)
+    assert "System Console" in _rendered_text(tui)
+    tui._handle_input("t")                     # wraps back to the split
+    assert tui.body_view == BODY_SPLIT
     tui._handle_input("t")                     # wraps back to the cloud
     assert tui.body_view == BODY_CLOUD
 
@@ -505,6 +543,7 @@ def test_arrows_navigate_the_history_and_never_orbit_the_cloud(tui):
 
 def test_enter_resets_the_view_over_the_cloud(tui):
     _cloud_ready(tui)
+    tui._show_pane(BODY_CLOUD)   # full cloud: ENTER recentres (in the split it replays)
     tui.cloud.orbit(d_azimuth=1.0, d_tilt=0.4)
     tui.cloud.zoom_by(2.0)
     tui._handle_input("enter")
@@ -688,11 +727,67 @@ def test_animate_is_a_noop_off_the_cloud_view(tui, monkeypatch):
     assert drawn == [], "no cloud on screen means no cloud redraw"
 
 
+def test_animate_paints_the_cloud_in_the_split_view(tui, monkeypatch):
+    """The split keeps the cloud on screen, so the ambient orbit runs and its
+    column is repainted — `_cloud_visible`, not `_cloud_focused`, gates it."""
+    from tui import BODY_SPLIT
+
+    _cloud_ready(tui)
+    drawn = []
+    monkeypatch.setattr(tui.loop, "draw_screen", lambda: drawn.append(1))
+    monkeypatch.setattr(tui.loop, "set_alarm_in", lambda *a, **k: None)
+    tui.running = True
+
+    tui._set_body_view(BODY_SPLIT)
+    az_before = tui.cloud.azimuth
+    for _ in range(20):
+        tui._animate()
+
+    assert tui.cloud.azimuth != az_before, "the cloud orbits in the split too"
+    assert drawn, "and the split's cloud column is repainted"
+
+
+def test_opening_the_split_refreshes_both_panels(tui, monkeypatch):
+    """The split shows the history and the console together, so opening it must
+    rebuild both — not the exclusive one-panel refresh the toggles use."""
+    from tui import BODY_SPLIT
+
+    calls = []
+    monkeypatch.setattr(tui, "_update_session_panel",
+                        lambda: calls.append("history"))
+    monkeypatch.setattr(tui, "_update_console",
+                        lambda: calls.append("console"))
+    tui._set_body_view(BODY_SPLIT)
+    assert "history" in calls and "console" in calls
+
+
+def test_the_split_keeps_both_panels_live_on_the_periodic_tick(tui, monkeypatch):
+    """The 2 Hz refresh rebuilds both split panels, not just the one the toggle
+    views would show — otherwise the split would freeze one of them."""
+    from tui import BODY_SPLIT
+
+    _cloud_ready(tui)
+    mpd = tui.dj.mpd_controller
+    for track in mpd.known_tracks[:2]:
+        mpd.add_track(track)
+    mpd.play()
+    tui._set_body_view(BODY_SPLIT)
+
+    calls = []
+    monkeypatch.setattr(tui, "_update_session_panel",
+                        lambda: calls.append("history"))
+    monkeypatch.setattr(tui, "_update_console",
+                        lambda: calls.append("console"))
+    tui._update_display()
+    assert "history" in calls and "console" in calls
+
+
 # ── The cloud geometry follows the tree ───────────────────────────────────────
 
 
 def test_cloud_geometry_matches_the_rendered_panel(tui):
     _cloud_ready(tui)
+    tui._show_pane(BODY_CLOUD)   # full-body cloud: gx == 1 (the split case has its own test)
     for cols, rows in [(100, 40), (120, 50), (80, 30)]:
         geo = tui._cloud_geometry(cols, rows)
         assert geo is not None
@@ -703,6 +798,33 @@ def test_cloud_geometry_matches_the_rendered_panel(tui):
         title_row = next(i for i, l in enumerate(lines) if "Vibe Space" in l)
         assert gy == title_row + 1
         assert gx == 1
+
+
+def test_cloud_geometry_in_the_split_is_the_right_column(tui):
+    """In the split the cloud is the right column, so its hit rectangle is offset
+    past the left column and narrowed to the right one — read from the tree, so
+    the mouse still lands on the right point."""
+    from tui import BODY_SPLIT
+
+    _cloud_ready(tui)
+    tui._set_body_view(BODY_SPLIT)
+    cols, rows = 120, 40
+    widths = tui.split_box.column_widths((cols,))
+    left = sum(widths[:-1])
+
+    geo = tui._cloud_geometry(cols, rows)
+    assert geo is not None
+    gx, gy, gw, gh = geo
+    # One column into the right column (past the left column and the border).
+    assert gx == left + 1
+    assert gw == widths[-1] - 2
+
+    lines = [r.decode("utf-8", "replace")
+             for r in tui.frame.render((cols, rows), focus=True).text]
+    title_row = next(i for i, l in enumerate(lines) if "Vibe Space" in l)
+    assert gy == title_row + 1
+    # The title is drawn in the right half, not at the far left.
+    assert lines[title_row].index("Vibe Space") >= left
 
 
 def test_the_cloud_survives_a_dj_with_no_axes(dj_stub, fake_art, monkeypatch):

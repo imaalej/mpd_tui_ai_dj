@@ -1,0 +1,397 @@
+"""
+The cloud's spatial scaffold — the dim frame drawn behind the points so that
+orbiting reads as a volume turning rather than specks swimming.
+
+Same discipline as `test_vibe_cloud.py`: the geometry is asserted on its own
+output and the widget is rendered to real canvases.  Three properties get their
+own tests because each is silent when it breaks:
+
+  * **The frame can never recolour the data.**  Eight Braille dots share one cell
+    colour, so a scaffold that won a colour contest would repaint tracks grey and
+    nothing would raise.
+  * **The frame can never steal a click.**  Scaffold dots carry index −1; if they
+    reached the hit map, clicking a point over a grid line would select nothing.
+  * **The box closes on screen.**  A cube corner reaches 1.556·e vertically at the
+    default tilt against a 3.0σ half-panel, so without the fit shrink the top and
+    bottom corners are always cut and the "box" reads as a wall.
+"""
+
+import numpy as np
+import pytest
+
+import vibe_cloud as vc
+from tui import BODY_CLOUD, BODY_HISTORY
+
+
+BOXED = [m for m in vc.SCAFFOLD_MODES if m != "off"]
+SIZES = [(80, 24), (96, 30), (120, 40), (60, 20), (40, 12)]
+
+
+@pytest.fixture
+def scene(rng):
+    coords = rng.standard_normal((40, 3))
+    return coords, vc.point_rgb(coords), [f"a{i}/t{i:02d}.flac" for i in range(40)]
+
+
+@pytest.fixture
+def widget(scene):
+    coords, rgb, tracks = scene
+    return vc.VibeCloudWidget(coords, rgb, tracks,
+                              axis_labels=["Tone", "Saturation", "Organic"])
+
+
+# ── Geometry ──────────────────────────────────────────────────────────────────
+
+
+def test_off_draws_nothing_at_all(scene):
+    coords, rgb, _ = scene
+    plain = vc.compute_frame(coords, rgb, 96, 30, 0.7, 0.5)
+    off = vc.compute_frame(coords, rgb, 96, 30, 0.7, 0.5, scaffold="off")
+    assert np.array_equal(plain.bits, off.bits)
+    assert np.array_equal(plain.color, off.color)
+
+
+def test_every_mode_lights_more_cells_than_bare(scene):
+    coords, rgb, _ = scene
+    bare = int((vc.compute_frame(coords, rgb, 96, 30, 0.7, 0.5).bits != 0).sum())
+    for mode in BOXED:
+        lit = int((vc.compute_frame(coords, rgb, 96, 30, 0.7, 0.5,
+                                    scaffold=mode).bits != 0).sum())
+        assert lit > bare, f"{mode} drew nothing"
+
+
+def test_the_scaffold_never_wins_a_cell_a_point_owns(scene, monkeypatch):
+    """Repaint the frame in screaming red and re-render: not one cell that owns a
+    library point may change colour.  Comparing against a *no-scaffold* render
+    would not work — the box rescales the scene, so the points would land in
+    different cells — and this is the sharper question anyway."""
+    coords, rgb, _ = scene
+    for mode in BOXED:
+        before = vc.compute_frame(coords, rgb, 96, 30, 0.7, 0.5, scaffold=mode)
+        with monkeypatch.context() as m:
+            m.setattr(vc, "COL_SCAFFOLD_FAR", 0xFF0000)
+            m.setattr(vc, "COL_SCAFFOLD_NEAR", 0x00FF00)
+            after = vc.compute_frame(coords, rgb, 96, 30, 0.7, 0.5, scaffold=mode)
+        owned = before.hit >= 0
+        assert owned.any()
+        assert np.array_equal(after.color[owned], before.color[owned]), \
+            f"{mode}: a scaffold dot repainted a cell that belongs to a track"
+        assert not np.array_equal(after.color, before.color), \
+            f"{mode}: the repaint did not reach the frame — the test proves nothing"
+
+
+def test_the_scaffold_never_claims_a_hit(scene):
+    """The gnomon is screen-anchored and rescales nothing, so the hit map must
+    come out bit-identical to the no-scaffold render."""
+    coords, rgb, _ = scene
+    bare = vc.compute_frame(coords, rgb, 96, 30, 0.7, 0.5)
+    with_g = vc.compute_frame(coords, rgb, 96, 30, 0.7, 0.5, scaffold="gnomon",
+                              axis_labels=["Tone", "Saturation", "Organic"])
+    assert np.array_equal(bare.hit, with_g.hit)
+
+
+def test_every_mode_keeps_hits_pointing_at_real_tracks(scene):
+    coords, rgb, _ = scene
+    for mode in BOXED:
+        frame = vc.compute_frame(coords, rgb, 96, 30, 0.7, 0.5, scaffold=mode)
+        seen = frame.hit[frame.hit >= 0]
+        assert seen.size and seen.max() < len(coords)
+
+
+def test_rotating_the_camera_never_rescales_the_scene():
+    """**The one that makes people queasy.**  The fit used to be evaluated at the
+    current tilt, so dragging up and down zoomed the whole cloud — 11.5 to 19.5
+    dots/σ between the stops, a 70% swing under the hand, and a rotation read as a
+    lurching dolly.
+
+    Measured through the render, not the arithmetic: at azimuth 0 a point's screen
+    x is `cos·x + sin·z = x`, independent of tilt, so two points on the x axis must
+    keep exactly the same column separation at every tilt if the scale is fixed.
+    """
+    probe = np.array([[-2.5, 0.0, 0.0], [2.5, 0.0, 0.0]])
+    rgb = np.full((2, 3), 220, dtype=np.uint8)
+    spans = set()
+    for mode in ("off",) + tuple(BOXED):
+        for tilt in np.linspace(vc.TILT_MIN, vc.TILT_MAX, 15):
+            frame = vc.compute_frame(probe, rgb, 96, 30, 0.0, float(tilt),
+                                     scaffold=mode, extent=np.array([3.9, 2.0, 2.9]))
+            cols = np.where((frame.hit >= 0).any(axis=0))[0]
+            spans.add((mode, int(cols.max() - cols.min())))
+        widths = {w for m, w in spans if m == mode}
+        assert len(widths) == 1, \
+            f"{mode}: tilting rescaled the scene ({sorted(widths)} cells wide)"
+
+
+def test_zoom_is_the_only_thing_that_changes_the_scale():
+    """The corollary: `zoom` must still work, or the fix has frozen the camera."""
+    e = np.array([3.9, 2.0, 2.9])
+    base = vc.frame_scale(96, 30, 1.0, "cage", e)
+    assert vc.frame_scale(96, 30, 2.0, "cage", e) == pytest.approx(2 * base)
+    assert vc.frame_scale(96, 30, 0.5, "cage", e) == pytest.approx(0.5 * base)
+
+
+def test_the_box_closes_on_screen_at_the_pose_it_is_fitted_at():
+    """It is fitted once, at the tilt the view opens and resets to, and held.  So
+    that is the pose where the whole box has to be on the panel — at every
+    azimuth, since a spin must not change anything either."""
+    e = np.array([3.2, 1.5, 2.4])
+    corners = np.array([[x, y, z] for x in (-e[0], e[0]) for y in (-e[1], e[1])
+                        for z in (-e[2], e[2])], dtype=float)
+    rgb = np.full((8, 3), 200, dtype=np.uint8)
+    for azimuth in np.linspace(0, 2 * np.pi, 17):
+        R = vc.rotation_matrix(float(azimuth), vc.FIT_TILT)
+        flat = np.round(corners @ R.T, 9)
+        # Head-on, a back corner sits exactly behind a front one and loses the
+        # cell — occlusion, not clipping.  Assert over what *can* be seen.
+        expected = set()
+        for key in {tuple(p[:2]) for p in flat}:
+            same = [i for i, p in enumerate(flat) if tuple(p[:2]) == key]
+            expected.add(max(same, key=lambda i: flat[i][2]))
+
+        frame = vc.compute_frame(corners, rgb, 96, 30, float(azimuth),
+                                 vc.FIT_TILT, scaffold="cage", extent=e)
+        visible = set(int(i) for i in frame.hit[frame.hit >= 0])
+        assert expected <= visible, f"corner clipped at azimuth={azimuth:.2f}"
+
+
+def test_each_wall_is_the_far_face_of_its_pair():
+    """`walls` picks, per axis and per frame, the face whose offset moves it
+    *away* from the camera — which is what makes it unable to occlude anything
+    inside the box.  (Its own far corners still project in front of the origin;
+    that is perspective on a plane, not an occlusion.)"""
+    e, div = np.array([3.2, 1.5, 2.4]), vc.SCAFFOLD_DIV
+    per_axis = 2 * (div + 1)
+    for azimuth in np.linspace(0, 2 * np.pi, 12):
+        for tilt in (-1.0, 0.0, 0.5, 1.2):
+            R = vc.rotation_matrix(float(azimuth), float(tilt))
+            segs = vc._far_walls(R, e, div)
+            assert len(segs) == 3 * per_axis
+            for axis in range(3):
+                group = segs[axis * per_axis:(axis + 1) * per_axis]
+                value = group[0][0][axis]
+                assert abs(abs(value) - e[axis]) < 1e-9, \
+                    "a wall sat somewhere other than its own face"
+                assert all(a[axis] == value and b[axis] == value
+                           for a, b in group), "a wall segment left its plane"
+                assert value * R[2][axis] <= 0, \
+                    f"axis {axis} chose the near face at tilt={tilt}"
+
+
+def test_the_shadow_lies_on_the_floor(scene):
+    coords, _, _ = scene
+    R = vc.rotation_matrix(0.3, 0.5)
+    pts, weights = vc.scaffold_points("shadow", R, 20.0, coords)
+    assert len(pts) == len(coords)
+    assert np.allclose(pts[:, 1], -vc.library_extent(coords)[1])
+    assert np.allclose(weights, vc.SHADOW_WEIGHT), \
+        "the shadow must be dimmer than a ruled line, or it out-shouts the frame"
+
+
+def test_stippling_actually_thins_a_line():
+    """Spacing is the stand-in for opacity, so it has to change the dot count."""
+    R = vc.rotation_matrix(0.0, 0.0)
+    solid, _ = vc.scaffold_points("cage", R, 20.0, spacing=1.0)
+    dotted, _ = vc.scaffold_points("cage", R, 20.0, spacing=2.0)
+    sparse, _ = vc.scaffold_points("cage", R, 20.0, spacing=4.0)
+    assert len(solid) > len(dotted) > len(sparse)
+
+
+def test_axis_labels_are_drawn_as_glyphs_not_dots(scene):
+    coords, rgb, _ = scene
+    frame = vc.compute_frame(coords, rgb, 96, 30, 0.4, 0.5, scaffold="cage",
+                             axis_labels=["Tone", "Saturation", "Organic"])
+    text = "".join("".join(chr(g) if g >= 0 else " " for g in row)
+                   for row in frame.glyph)
+    for name in ("Tone", "Saturation", "Organic"):
+        assert name in text, f"{name} was not written into the grid"
+
+
+def test_the_gnomon_is_three_arms_in_a_corner(scene):
+    coords, rgb, _ = scene
+    frame = vc.compute_frame(coords, rgb, 96, 30, 0.4, 0.5, scaffold="gnomon",
+                             axis_labels=["Tone", "Saturation", "Organic"])
+    letters = [chr(g) for g in frame.glyph.ravel() if g >= 0]
+    assert sorted(letters) == ["O", "S", "T"]
+
+
+def test_the_gnomon_shades_by_which_way_an_arm_points():
+    """The arm pointing at the viewer must be brighter than the one pointing
+    away — that shading *is* the orientation cue."""
+    R = vc.rotation_matrix(0.0, 0.0)
+    dots_x, _, colours, _ = vc.gnomon_dots(R, 96, 30, ["Tone", "Sat", "Org"])
+    # At azimuth 0 / tilt 0, axis 2 points straight at the camera and axis 0 lies
+    # flat across it, so axis 2's arm must be the brightest of the three.
+    arm = len(dots_x) // 3
+    brightness = [int(colours[i * arm]) & 0xFF for i in range(3)]
+    assert brightness[2] > brightness[0]
+
+
+# ── The widget ────────────────────────────────────────────────────────────────
+
+
+def test_the_widget_renders_every_mode_at_every_size(widget):
+    for mode in ("off",) + tuple(BOXED):
+        widget.scaffold = mode
+        for cols, rows in SIZES:
+            canvas = widget.render((cols, rows))
+            assert canvas.cols() == cols and canvas.rows() == rows, \
+                f"{mode} broke the box at {cols}x{rows}"
+
+
+def test_the_widget_survives_degenerate_sizes_with_a_scaffold(widget):
+    widget.scaffold = "walls+floor+shadow"
+    for rows in range(1, 8):
+        assert widget.render((80, rows)).rows() == rows
+    widget.render((0, 10))
+    widget.render((10, 0))
+
+
+def test_the_panel_opens_on_a_frame_not_on_the_bare_cloud(widget):
+    """Opening on `off` would ship the unreadable state as the default and make
+    the fix a discovery."""
+    assert widget.scaffold == vc.SCAFFOLD_DEFAULT
+    assert vc.SCAFFOLD_DEFAULT != "off"
+    assert vc.SCAFFOLD_DEFAULT in vc.SCAFFOLD_MODES
+
+
+def test_cycling_walks_the_presets_and_wraps(widget):
+    start = vc.SCAFFOLD_MODES.index(widget.scaffold)
+    order = list(vc.SCAFFOLD_MODES[start + 1:]) + list(vc.SCAFFOLD_MODES[:start + 1])
+    assert [widget.cycle_scaffold() for _ in vc.SCAFFOLD_MODES] == order
+
+
+def test_cycling_forces_a_repaint(widget):
+    """The camera may be perfectly still when the frame changes, and the
+    animation alarm only repaints when the *pose* moved — so the mode change has
+    to invalidate the gate itself or the new frame never appears."""
+    widget.render((96, 30))
+    assert widget.pose_changed() is False
+    widget.cycle_scaffold()
+    assert widget.pose_changed() is True
+
+
+def test_an_unknown_combination_still_renders(widget):
+    widget.scaffold = "cage+nonsense+shadow"
+    assert widget.render((96, 30)).rows() == 30
+
+
+# ── Through the one binding table ─────────────────────────────────────────────
+
+
+def _cloud_ready(tui):
+    tui._show_pane(BODY_CLOUD)
+    assert tui.cloud is not None and tui.cloud.available
+
+
+def test_b_cycles_the_frame_only_over_the_cloud(tui):
+    _cloud_ready(tui)
+    start = tui.cloud.scaffold
+    tui._handle_input("b")
+    assert tui.cloud.scaffold != start
+    moved = tui.cloud.scaffold
+
+    tui._show_pane(BODY_HISTORY)
+    tui._handle_input("b")
+    assert tui.cloud.scaffold == moved, "[B] acted while the cloud was not up"
+
+
+def test_b_is_case_insensitive_like_every_other_binding(tui):
+    _cloud_ready(tui)
+    tui._handle_input("B")
+    assert tui.cloud.scaffold != vc.SCAFFOLD_DEFAULT
+
+
+# ── The frame has to clear the ground it is drawn on ──────────────────────────
+
+
+def test_the_frame_clears_the_terminal_background():
+    """The first cut of these colours was picked against a near-black browser
+    mock and came out at 0.93× the real terminal background's luminance — the far
+    half of the frame was darker than the ground it sat on, which is invisible.
+    The ratios are the claim; this is the test of it."""
+    bg = vc._luminance(vc.TERMINAL_BACKGROUND)
+    assert vc._luminance(vc.COL_SCAFFOLD_FAR) / bg == pytest.approx(2.0, abs=0.05)
+    assert vc._luminance(vc.COL_SCAFFOLD_NEAR) / bg == pytest.approx(6.0, abs=0.05)
+    assert vc._luminance(vc.COL_SCAFFOLD_LABEL) > vc._luminance(vc.COL_SCAFFOLD_NEAR)
+
+
+def test_the_frame_stays_visible_on_any_background():
+    """Derived, so it must re-derive — including on a pure black terminal, where
+    a pure ratio collapses to zero and the floor is the only thing left."""
+    for bg in (0x000000, 0x15141b, 0x1e1e2e, 0x2b3038):
+        far = vc._lift(bg, 2.0, 26.0)
+        near = vc._lift(bg, 6.0, 100.0)
+        assert vc._luminance(far) >= max(1.9 * vc._luminance(bg), 25.0)
+        assert vc._luminance(near) > vc._luminance(far) + 40
+        for shift in (16, 8, 0):
+            assert 0 <= (far >> shift) & 0xFF <= 255
+
+
+def test_the_shading_ramp_never_dips_below_the_far_colour(scene):
+    """`_shade_between` interpolates far→near, and the shadow's weight scales the
+    *near* end down — it must not push a dot below the far end, which is the
+    visibility floor everything else rests on."""
+    for w in (vc.SHADOW_WEIGHT, 1.0):
+        ramp = vc._shade_between(np.linspace(0, 1, 32) * w,
+                                 vc.COL_SCAFFOLD_FAR, vc.COL_SCAFFOLD_NEAR)
+        lums = [vc._luminance(int(c)) for c in ramp]
+        assert min(lums) >= vc._luminance(vc.COL_SCAFFOLD_FAR) - 0.5
+        assert lums == sorted(lums)
+
+
+# ── The box has to contain the library ────────────────────────────────────────
+
+
+def test_the_box_contains_every_track(rng):
+    """The complaint that produced this: a ±2σ cube left 55 of 674 tracks
+    outside it.  The box is now measured off the cloud, so *nothing* is outside
+    — on any cloud, including a lopsided one."""
+    for coords in (rng.standard_normal((500, 3)),
+                   rng.standard_normal((500, 3)) * [3.0, 0.4, 1.6],
+                   rng.standard_normal((500, 3)) + [1.0, -2.0, 0.5]):
+        e = vc.library_extent(coords)
+        assert (np.abs(coords) <= e).all(), "a track fell outside its own box"
+        assert (e >= np.abs(coords).max(axis=0)).all()
+
+
+def test_the_box_is_the_cloud_shape_not_a_cube(rng):
+    """A cube around a flat cloud is mostly empty volume, and since the box is
+    fitted to the panel that emptiness is paid for in how small the cloud is
+    drawn.  So the extents must differ per axis when the cloud does."""
+    coords = rng.standard_normal((400, 3)) * [3.0, 0.5, 1.5]
+    e = vc.library_extent(coords)
+    assert e[0] > 2 * e[1], "the box squared off a cloud that is not square"
+
+
+def test_a_degenerate_cloud_still_produces_a_usable_box():
+    """All tracks at one point is a division by zero waiting to happen."""
+    e = vc.library_extent(np.zeros((5, 3)))
+    assert (e >= vc.SCAFFOLD_EXTENT_FLOOR).all()
+    frame = vc.compute_frame(np.zeros((5, 3)), np.full((5, 3), 200, np.uint8),
+                             96, 30, 0.4, 0.5, scaffold="cage+triad")
+    assert (frame.bits != 0).any()
+
+
+def test_no_track_is_clipped_off_the_panel_when_a_box_is_up(rng):
+    """Fitting the *box* to the panel has to fit the cloud with it — otherwise
+    the frame is honest and the data is not.
+
+    Only the six extreme tracks are rendered, at the extent measured from the
+    whole cloud: with 300 points on a 96×30 grid an absent point is far more
+    likely to be occluded than clipped, and the test has to tell those apart.
+    At the fitted pose, since that is where the box is guaranteed to fit — past
+    it, a steep tilt is allowed to take corners off the panel rather than pull
+    the scene smaller under the hand.
+    """
+    coords = rng.standard_normal((300, 3)) * [3.4, 1.8, 2.6]
+    extent = vc.library_extent(coords)
+    edge = sorted({int(f(coords[:, a])) for a in range(3)
+                   for f in (np.argmin, np.argmax)})
+    probe = coords[edge]
+    rgb = vc.point_rgb(probe)
+    for azimuth in np.linspace(0, 2 * np.pi, 8):
+        frame = vc.compute_frame(probe, rgb, 96, 30, float(azimuth),
+                                 vc.FIT_TILT, scaffold="cage", extent=extent)
+        visible = set(int(i) for i in frame.hit[frame.hit >= 0])
+        assert visible == set(range(len(probe))), \
+            f"an outermost track was clipped at azimuth={azimuth:.2f}"

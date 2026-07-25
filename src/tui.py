@@ -3,13 +3,20 @@ Terminal User Interface - Adaptive Session AI DJ
 Full-featured TUI with real-time updates and responsive controls.
 
 Layout (rows, top to bottom):
-  [1]  Header bar
-  [N]  Now Playing  ── two columns, height packed to its own contents:
+  [N]  Now Playing  ── two columns, height packed to its own contents, always on:
          left:  album art area (fixed ART_COLS wide)
          right: status · track info · seek bar · descriptors · drift
-  [7]  Console      ── live state updates, fixed height
-  [M]  Session      ── `↓ next:` plus session history, takes what is left
-  [1]  Footer bar
+  [M]  Body slot    ── one `WidgetPlaceholder` taking the rest, showing one of:
+         split    ── console over history (left 35%) beside the cloud (right 65%)
+                     — the default; [T] cycles from here
+         cloud    ── the rotating 3-D vibe cloud, full width
+         history  ── `↓ next:` plus the session history
+         console  ── live state updates
+
+There is no header or footer: the "AI DJ" title bar and the keybinds bar were
+both removed (the bindings live in the `[K]` popup now), so the body starts at
+row 0 and the Frame's header/footer slots are empty.  `_main_pile_slots` reads
+those slots as 0 rows, so every geometry derivation below just follows.
 
 Two things about this file are the point of Stage 3 rather than incidental to it.
 
@@ -214,12 +221,55 @@ WHEEL_ZOOM_STEP = 1.12
 DRAG_AZIMUTH_GAIN = 0.03
 DRAG_TILT_GAIN = 0.06
 
-# The three body views the space below the Now Playing box can show.  The cloud
-# is the centrepiece and the default; history and console are one keypress away
-# (G3), which is what frees the full cell budget for the cloud to be legible.
+# The body views the space below the Now Playing box can show.  The cloud is the
+# centrepiece and the default; history and console are one keypress away (G3),
+# which is what frees the full cell budget for the cloud to be legible.  The
+# split shows all three at once — console over history in a narrow left column,
+# the cloud in the wide right column — for when you want the log and the history
+# in view *and* the cloud animating, at the cost of each being smaller.
 BODY_CLOUD = "cloud"
 BODY_HISTORY = "history"
 BODY_CONSOLE = "console"
+BODY_SPLIT = "split"
+
+# The split's left column takes this share of the body width; the cloud takes the
+# rest.  Weights, not fixed columns, so the ratio holds at every terminal size and
+# `_cloud_geometry` reads the resolved widths back out of the tree (audit H8).
+SPLIT_LEFT_WEIGHT = 35
+SPLIT_RIGHT_WEIGHT = 65
+
+# The console is a log tail, not the main event, so in the split it gets a fixed
+# five lines and the history takes everything else the left column has.  A given
+# height, not a weight: five lines of log plus the LineBox's top and bottom
+# border.  (`data/dj.log` is the durable copy, §4, so five on screen loses
+# nothing.)
+SPLIT_CONSOLE_ROWS = 5 + 2
+
+# The one list of key hints, shown by the `[K]` popup (`_show_keybinds`).  This
+# replaces the footer string, which was a third hand-maintained copy of the
+# bindings alongside the `_handle_input` chain and the README table (audit L9) —
+# now the popup is generated from this, and a test asserts every key here is
+# actually bound.  `(label, description)`; `↑↓` / `←→` / `+−` / `,.` each stand
+# for a pair the chain treats alike.  F1/F2/F3 jump straight to a pane.
+KEYBINDS = [
+    ("SPACE", "Play / pause"),
+    ("N", "Skip (reject — moves the vibe away)"),
+    ("V", "Pass (neutral — keep the vibe)"),
+    ("L", "Like / unlike the current track"),
+    ("↑↓", "Move the history cursor"),
+    ("ENTER", "Recentre the cloud / replay the selected track"),
+    ("P", "Play the selected cloud track now (asks to confirm)"),
+    ("+−", "Zoom the cloud"),
+    ("B", "Cycle the cloud's frame (ground / box / axes)"),
+    ("T", "Cycle the pane (cloud / history / console / split)"),
+    ("F1 F2 F3", "Jump straight to cloud / history / console"),
+    (",.", "Volume down / up"),
+    ("←→", "Seek back / forward"),
+    ("I", "Model info"),
+    ("K", "This keybinding list"),
+    ("Q", "Quit"),
+]
+
 
 # NOTE: `RIGHT_COL_ROWS` is deliberately gone.  It was the hand-counted height of
 # the Now Playing right-hand Pile, and the album art was pinned to it — so every
@@ -346,7 +396,10 @@ class AdaptiveDJTUI:
         # fallback text mode, which has no cloud.
         self.axes: Optional[MoodAxes] = None
         self.cloud: Optional[VibeCloudWidget] = None
-        self.body_view = BODY_CLOUD
+        # The split is the default: the log, the history and the animated cloud
+        # all on screen at once.  The full-body cloud, history and console are one
+        # `[T]` press away each.
+        self.body_view = BODY_SPLIT
         # Last mouse position during a drag-orbit, or None between drags.
         self._drag_last: Optional[tuple] = None
 
@@ -374,8 +427,6 @@ class AdaptiveDJTUI:
 
     def _setup_urwid(self):
         palette = [
-            ("header", "white,bold", "dark blue"),
-            ("footer", "white", "dark blue"),
             ("playing", "light green,bold", "default"),
             ("paused", "yellow,bold", "default"),
             ("track_info", "white", "default"),
@@ -393,12 +444,12 @@ class AdaptiveDJTUI:
             ("divider", "dark gray", "default"),
         ]
 
-        # ── Header ──
-        # A flow widget, not a Filler: `Frame` wants flow widgets for its header
-        # and footer, and a real flow widget can report its own `rows()` — which
-        # is what `_art_geometry()` reads instead of assuming 1 (H8).
-        self.header_text = urwid.Text("🎵 AI DJ", align="center")
-        self.header = urwid.AttrMap(self.header_text, "header")
+        # ── No header ──
+        # The "AI DJ" title bar is gone: it named the app to someone already
+        # running it and cost a row the cloud can use.  The Frame's `header` slot
+        # is left empty, and `_main_pile_slots` already reads `frame.header` as 0
+        # rows when it is None — so nothing else has to change for the body to
+        # move up (H8).
 
         # ── Now Playing: right column widgets ──
         self.status_text = urwid.Text(("paused", "⏸ Paused"))
@@ -406,7 +457,8 @@ class AdaptiveDJTUI:
         self.album_text = urwid.Text("Album: ---")
         self.track_text = urwid.Text("Track: ---")
         # The lookahead, right under the track labels — checking "what's next"
-        # by opening the history panel was cumbersome, so it lives in the header.
+        # by opening the history panel was cumbersome, so it lives in the
+        # always-visible Now Playing box.
         self.np_next_text = urwid.Text("Next:   ---")
 
         # The vibe readout, in two rows (audit H1b).  The first names the top
@@ -517,12 +569,37 @@ class AdaptiveDJTUI:
         # box above, on its own surface.
         self._build_cloud()
 
-        # One swappable slot below Now Playing: cloud (default), history, or
-        # console.  `WidgetPlaceholder` swaps the visible box; the whole slot is
-        # `WidgetDisable`d so ↑↓/ENTER fall through to the one shared dispatch
-        # table (`_handle_input`) instead of a ListBox eating them — the same
-        # reason the old console/session panels were disabled.
-        self.body_placeholder = urwid.WidgetPlaceholder(self.cloud_box)
+        # ── The split view (the fourth pane) ──
+        #
+        # Console over history in a narrow left column, the cloud in the wide
+        # right one.  It *reuses the same three LineBox widgets* as the full-body
+        # panes rather than building second copies: only one pane is ever in the
+        # render tree at a time (the placeholder below points at exactly one
+        # child), so a box reachable through `split_box` is not reachable through
+        # the placeholder in the same frame, and urwid's per-`(widget, size,
+        # focus)` canvas cache keeps the full-width and 35/65 renders apart.
+        self.split_box = urwid.Columns(
+            [
+                (
+                    "weight",
+                    SPLIT_LEFT_WEIGHT,
+                    urwid.Pile(
+                        [
+                            (SPLIT_CONSOLE_ROWS, self.console_box),
+                            ("weight", 1, self.session_box),
+                        ]
+                    ),
+                ),
+                ("weight", SPLIT_RIGHT_WEIGHT, self.cloud_box),
+            ]
+        )
+
+        # One swappable slot below Now Playing: the split (default), the full
+        # cloud, history, or console.  `WidgetPlaceholder` swaps the visible box;
+        # the whole slot is `WidgetDisable`d so ↑↓/ENTER fall through to the one
+        # shared dispatch table (`_handle_input`) instead of a ListBox eating
+        # them — the same reason the old console/session panels were disabled.
+        self.body_placeholder = urwid.WidgetPlaceholder(self.split_box)
 
         # ── Main layout ──
         #
@@ -541,27 +618,20 @@ class AdaptiveDJTUI:
             ]
         )
 
-        # ── Footer ──
-        # Reconciled with the README table and the fallback-mode bindings, which
-        # disagreed three ways (audit L9): the README listed volume on `,`/`.`,
-        # the footer on `<`/`>`, and simple mode bound ↑↓ to volume while the
-        # urwid mode had them unbound.  One set of bindings now, everywhere.
-        footer_text = urwid.Text(
-            "[SPACE] Pause  [N] Skip  [V] Pass  [L] Like  [↑↓] History  "
-            "[ENTER] Reset/Replay  [+−] Zoom  [T] Pane  "
-            "[,.] Vol  [←→] Seek  [I] Info  [Q] Quit",
-            align="center",
-        )
-        # A flow widget, so a narrow terminal wraps the hints onto a second row
-        # rather than silently truncating them — and so `rows()` reports the
-        # truth to `_art_geometry()`.
-        self.footer = urwid.AttrMap(footer_text, "footer")
+        # ── No footer ──
+        # The keybinds bar is gone; the same hints now live in the `[K]` popup
+        # (`_show_keybinds`), generated from the one `KEYBINDS` list.  A footer
+        # that permanently spends two or three rows to advertise keys the user
+        # learns once was the wrong trade against the cloud's height, and it was a
+        # third hand-maintained copy of the bindings (audit L9).  As with the
+        # header, the Frame's `footer` slot is left empty and `_main_pile_slots`
+        # reads it as 0 rows.
 
         # ── Frame ──
         self.frame = urwid.Frame(
             body=self.main_pile,
-            header=self.header,
-            footer=self.footer,
+            header=None,
+            footer=None,
         )
 
         self.loop = urwid.MainLoop(
@@ -605,6 +675,12 @@ class AdaptiveDJTUI:
         # (G3).  Both are non-blocking urwid alarms, so the fast one never
         # starves the session bookkeeping the slow one runs (§4).
         self.loop.set_alarm_in(ANIMATION_INTERVAL, self._animate)
+
+        # The default pane is the split, which shows the history and the console
+        # together — populate both once so the first frame is not two empty boxes
+        # before the 0.5 s tick fills them.
+        self._update_session_panel()
+        self._update_console()
 
     def _build_cloud(self):
         """
@@ -683,6 +759,12 @@ class AdaptiveDJTUI:
             self._like_track()
         elif key_lower == "i":
             self._show_model_info()
+        elif key_lower == "k":
+            self._show_keybinds()
+        elif key_lower == "p":
+            self._play_selected()
+        elif key_lower == "b":
+            self._cycle_scaffold()
         elif key_lower == "t":
             self._toggle_pane()
         elif key == "f1":
@@ -714,9 +796,11 @@ class AdaptiveDJTUI:
     #
     # The arrows always drive the session history (the cloud is orbited with the
     # mouse — right-drag — not the keyboard).  ENTER is the one focus-dependent
-    # key: it recentres the cloud when the cloud is up, and replays the focused
-    # track when the history is up.  It is still one binding table (§4): the key →
-    # this method is fixed, only ENTER's effect follows the view.
+    # key: it recentres the cloud only when the cloud is the *whole* body, and
+    # otherwise replays the focused track — so in the split, where the history is
+    # visible and keyboard-driven, ENTER replays and the mouse recentres.  It is
+    # still one binding table (§4): the key → this method is fixed, only ENTER's
+    # effect follows the view.
 
     def _arrow_up(self):
         self._history_scroll(-1)
@@ -730,12 +814,25 @@ class AdaptiveDJTUI:
         else:
             self._replay_focused()
 
+    def _cycle_scaffold(self):
+        """[B].  Cycle the spatial frame drawn behind the cloud.
+
+        Wherever the cloud is drawn, like the other camera keys — the full view
+        or the split's right column — and it prints the mode it moved to, because
+        the frame is a view setting with no other readout.
+        """
+        if not self._cloud_visible() or self.cloud is None:
+            return
+        mode = self.cloud.cycle_scaffold()
+        self.cloud._invalidate()
+        print(f"Cloud frame: {mode}", file=sys.stderr)
+
     def _zoom_in(self):
-        if self._cloud_focused():
+        if self._cloud_visible():
             self.cloud.zoom_by(KEY_ZOOM_STEP)
 
     def _zoom_out(self):
-        if self._cloud_focused():
+        if self._cloud_visible():
             self.cloud.zoom_by(1.0 / KEY_ZOOM_STEP)
 
     def _handle_mouse(self, event):
@@ -752,8 +849,12 @@ class AdaptiveDJTUI:
         Mouse coordinates are global screen cells, translated to the cloud's own
         rectangle (derived from the widget tree, like the album-art geometry)
         before reaching the widget.  Anything outside the cloud view is ignored.
+
+        Active wherever the cloud is visible (`_cloud_visible`), including the
+        split's right column — `_cloud_geometry` returns that narrower rectangle
+        there, so a click still lands on the right point.
         """
-        if not self._cloud_focused():
+        if not self._cloud_visible():
             return
         if len(event) < 4:
             return
@@ -892,6 +993,40 @@ class AdaptiveDJTUI:
         if self.dj.queue_manager.requeue_next(track):
             label = self._label_for(track)
             print(f"Replay: {label} queued next", file=sys.stderr)
+            if self.use_urwid:
+                self._update_session_panel()
+
+    def _play_selected(self):
+        """
+        [P].  Play the track selected in the vibe cloud *now*, after a confirm.
+
+        Selection is mouse-driven (click a point), so this only means anything
+        where the cloud is visible — the full pane or the split.  With nothing
+        picked it says so and stops.  Otherwise it asks first: `[P]` is one key
+        away from the camera keys, and jumping the playhead on a fat-fingered
+        press would be the kind of surprise the rest of this UI avoids.  The play
+        itself is `dj.play_track_now`, which queues-before-advancing and moves no
+        vector — the same C4 discipline the skips keep.
+        """
+        if not self._cloud_visible() or self.cloud is None:
+            return
+        track = self.cloud.selected_track()
+        if not track:
+            print("Play: click a point in the cloud to pick a track first",
+                  file=sys.stderr)
+            return
+        label = self._label_for(track)
+        if not self._confirm("Play now?", [
+            "",
+            "  Play this track now?  The current track is passed over.",
+            "",
+            f"    ♫ {label}",
+            "",
+            "  [Enter] play     ·     any other key cancels",
+        ]):
+            return
+        if self.dj.play_track_now(track):
+            print(f"Playing: {label}", file=sys.stderr)
             if self.use_urwid:
                 self._update_session_panel()
 
@@ -1082,7 +1217,7 @@ class AdaptiveDJTUI:
 
     def _show_model_info(self):
         """
-        [I].  Draw the inspector and block on it until a key dismisses it.
+        [I].  Draw the model inspector and block on it until a key dismisses it.
 
         Stage 2 sized this box to its contents after the sampling and skip rows
         overflowed a fixed 70% height and the last third was silently cut off.
@@ -1090,13 +1225,31 @@ class AdaptiveDJTUI:
         no longer enough: it is a ListBox now, and ↑↓ scroll it.  An inspector
         that hides part of what it is inspecting is worse than no inspector.
         """
-        lines = self._model_info_lines()
+        return self._run_text_overlay("Model Info", self._model_info_lines())
+
+    def _show_keybinds(self):
+        """
+        [K].  Draw the keybinding list and block on it until a key dismisses it.
+
+        This is where the bindings live now that the footer is gone — the one
+        `KEYBINDS` list rendered through the same modal idiom as `[I]`, so there
+        is a single place to read the keys and a single place that draws a
+        blocking overlay.
+        """
+        return self._run_text_overlay("Keybindings", self._keybind_lines())
+
+    def _keybind_lines(self) -> List[str]:
+        """The `[K]` page: every hint in `KEYBINDS`, key column padded to align."""
+        width = max(len(label) for label, _ in KEYBINDS)
+        return [f"  {label:<{width}}   {desc}" for label, desc in KEYBINDS]
+
+    def _run_text_overlay(self, title: str, lines: List[str]):
+        """
+        The `[I]` / `[K]` info modal: draw `lines`, scroll on ↑↓/page keys, close
+        on any other key.  In the fallback text mode there is no loop to block, so
+        it prints the page and holds it for a key — the same gesture with no urwid.
+        """
         if not self.use_urwid:
-            # The fallback mode had no `[I]` binding at all while this method
-            # already returned its lines for a non-urwid caller — a loose end
-            # rather than an intended asymmetry (§8, trap 4).  Print the page
-            # and hold it until a key, which is the same gesture the overlay
-            # makes in a terminal that has no loop to block.
             print("\033[2J\033[H", end="")
             for line in lines:
                 print(line)
@@ -1104,10 +1257,40 @@ class AdaptiveDJTUI:
             sys.stdout.flush()
             self._wait_for_any_key()
             return lines
+        # Any non-scroll key dismisses; the return value is ignored, the caller
+        # wants the lines back (the tests read them).
+        self._run_overlay(title, lines, lambda key: True)
+        return lines
 
+    def _confirm(self, title: str, lines: List[str]) -> bool:
+        """A yes/no modal on the same machinery: ENTER or Y confirms, any other
+        key cancels.  Used by `[P]` so an accidental press cannot hijack playback.
+
+        Only meaningful in urwid — its one caller is gated on the cloud being
+        visible, which the fallback text mode never is — so there it just says no.
+        """
+        if not self.use_urwid:
+            return False
+        return bool(self._run_overlay(
+            title, lines,
+            lambda key: isinstance(key, str) and key.lower() in ("enter", "y")))
+
+    def _run_overlay(self, title: str, lines: List[str], decide):
+        """
+        The shared modal core behind `[I]`, `[K]` and the `[P]` confirm.
+
+        A LineBox + ListBox in an Overlay, sized to its content but capped to the
+        screen so ↑↓/page keys scroll a page too tall to fit; a 0.5 s-timeout
+        input loop so a track that starts *and* finishes while the overlay is up
+        still reaches the history (its ✓ was otherwise dropped).  Scroll keys
+        scroll and mouse events are ignored; every other key is passed to
+        `decide(key)`, and the first non-None result closes the modal and is
+        returned.  So an info modal passes `lambda k: True` (any key closes,
+        result unused) and a confirm passes a predicate (close with True/False).
+        """
         walker = urwid.SimpleListWalker([urwid.Text(line) for line in lines])
         listbox = urwid.ListBox(walker)
-        overlay_box = urwid.LineBox(listbox, title="Model Info")
+        overlay_box = urwid.LineBox(listbox, title=title)
 
         _, screen_rows = self.loop.screen.get_cols_rows()
         box_rows = min(len(lines) + self._LINEBOX_BORDER,
@@ -1125,7 +1308,7 @@ class AdaptiveDJTUI:
         self.loop.widget = overlay
         # The album art is a separate X11/Wayland surface, not part of urwid's
         # canvas — so the overlay box draws *over* the TUI but leaves the cover
-        # sitting on top of the inspector (inspection F3).  Take it down while `[I]`
+        # sitting on top of it (inspection F3).  Take it down while the overlay
         # is open (nothing in the loop below re-sends it), and mark it dirty on
         # the way out so the next tick repaints it in place.
         if self.show_album_art:
@@ -1133,13 +1316,13 @@ class AdaptiveDJTUI:
         # Wake even with no keypress.  This loop owns the thread that runs the
         # session bookkeeping, and the overlay can stay open indefinitely now
         # that ↑↓ no longer dismiss it — without a timeout, a track that starts
-        # *and* finishes while `[I]` is up never reaches the history panel and
-        # its ✓ is dropped on the floor.  Stage 2's version closed on any key,
-        # so it could not be held open long enough for this to bite.
+        # *and* finishes while it is up never reaches the history panel and its ✓
+        # is dropped on the floor.
         try:
             self.loop.screen.set_input_timeouts(max_wait=0.5)
         except Exception:
             pass
+        result = None
         try:
             while True:
                 self.loop.draw_screen()
@@ -1147,15 +1330,18 @@ class AdaptiveDJTUI:
                 if not keys:
                     self._sync_session_state()
                     continue
-                dismissed = False
+                closed = False
                 for key in keys:
                     if key in self._INFO_SCROLL_KEYS:
                         listbox.keypress(self._overlay_inner_size(overlay), key)
                     elif isinstance(key, tuple):
-                        continue        # a mouse event; not a dismissal
+                        continue        # a mouse event; never a decision
                     else:
-                        dismissed = True
-                if dismissed:
+                        verdict = decide(key)
+                        if verdict is not None:
+                            result = verdict
+                            closed = True
+                if closed:
                     break
         finally:
             try:
@@ -1164,11 +1350,11 @@ class AdaptiveDJTUI:
                 pass
             self.loop.widget = orig
             # Force the cover back on the next `_render_art`: `clear()` above
-            # already dropped the render key, but a window resize while `[I]`
-            # was open could otherwise leave it stale.
+            # already dropped the render key, but a window resize while the
+            # overlay was open could otherwise leave it stale.
             if self.show_album_art:
                 self.album_art_renderer.force_redraw()
-        return lines
+        return result
 
     # ── Periodic update ───────────────────────────────────────────────────────
 
@@ -1258,9 +1444,10 @@ class AdaptiveDJTUI:
 
         Deliberately does *nothing* to the session vector, the history or MPD —
         it is a camera step, not a data event, keeping ambient motion and data
-        motion strictly separate (§4/G3).  Only the cloud view is animated; in
-        the history/console views there is nothing moving, so the redraw is
-        skipped and the terminal stays quiet.
+        motion strictly separate (§4/G3).  Only paints where the cloud is on
+        screen (`_cloud_visible`: the full cloud view or the split's right
+        column); in the history/console views there is nothing moving, so the
+        redraw is skipped and the terminal stays quiet.
 
         urwid caches every unchanged widget's canvas, so `draw_screen` here
         recomputes only the invalidated cloud and diffs its cells to the
@@ -1269,7 +1456,7 @@ class AdaptiveDJTUI:
         """
         if not self.running:
             return
-        if self._cloud_focused():
+        if self._cloud_visible():
             self.cloud.advance(ANIMATION_INTERVAL)
             # Repaint only when the camera moved enough to matter — a slow spin
             # crosses the threshold a few times a second, a drag every frame.
@@ -1281,31 +1468,36 @@ class AdaptiveDJTUI:
                     pass
         self.loop.set_alarm_in(ANIMATION_INTERVAL, self._animate)
 
-    # ── Body views: cloud / history / console (inspection G3) ─────────────────
+    # ── Body views: cloud / history / console / split (inspection G3) ─────────
 
-    # The three panes, in the order [T] cycles through them.  F1/F2/F3 jump
-    # straight to one (cloud/history/console) — a convenience not advertised in
-    # the footer, which shows only the [T] cycle.
-    _PANE_CYCLE = (BODY_CLOUD, BODY_HISTORY, BODY_CONSOLE)
+    # The panes, in the order [T] cycles through them: the split first (the
+    # default — log, history and cloud at once), then the three full-body views.
+    # F1/F2/F3 jump straight to one of the full-body three — a convenience
+    # surfaced only in the [K] popup, not in the cycle.
+    _PANE_CYCLE = (BODY_SPLIT, BODY_CLOUD, BODY_HISTORY, BODY_CONSOLE)
 
     def _set_body_view(self, view: str):
-        """Swap the body's visible panel and refresh it."""
+        """Swap the body's visible panel and refresh whatever it now shows."""
         self.body_view = view
         if not self.use_urwid:
             return
         box = {BODY_CLOUD: self.cloud_box,
                BODY_HISTORY: self.session_box,
-               BODY_CONSOLE: self.console_box}[view]
+               BODY_CONSOLE: self.console_box,
+               BODY_SPLIT: self.split_box}[view]
         self.body_placeholder.original_widget = box
-        if view == BODY_HISTORY:
+        # The split shows the history *and* the console *and* the cloud, so each
+        # refresh here is gated on "is this thing now visible", not on an
+        # exclusive match — otherwise the split would open with two stale panels.
+        if view in (BODY_HISTORY, BODY_SPLIT):
             self._update_session_panel()
-        elif view == BODY_CONSOLE:
+        if view in (BODY_CONSOLE, BODY_SPLIT):
             self._update_console()
-        else:
+        if view in (BODY_CLOUD, BODY_SPLIT):
             self.cloud._invalidate()
 
     def _toggle_pane(self):
-        """[T].  Cycle the body: cloud → history → console → cloud."""
+        """[T].  Cycle the body: split → cloud → history → console → split."""
         if not self.use_urwid:
             return
         try:
@@ -1320,11 +1512,24 @@ class AdaptiveDJTUI:
         if self.use_urwid:
             self._set_body_view(view)
 
-    def _cloud_focused(self) -> bool:
-        """True when the cloud is the visible, usable pane — so ENTER recentres it,
-        the mouse drives it, and the animation alarm paints it.
+    def _cloud_visible(self) -> bool:
+        """True when the cloud is on screen and usable — as the whole body or as
+        the split's right column.  Gates the ambient animation, the mouse
+        (orbit / zoom / inspect), the [B] frame cycle and the +/- zoom keys, all
+        of which act on the cloud wherever it is drawn.
 
         In the fallback text mode there is no cloud, so this is always False.
+        """
+        return (self.use_urwid and self.body_view in (BODY_CLOUD, BODY_SPLIT)
+                and self.cloud is not None and self.cloud.available)
+
+    def _cloud_focused(self) -> bool:
+        """True only when the cloud is the *whole* body — the one case where ENTER
+        recentres it rather than replaying the history track under the cursor.
+
+        Narrower than `_cloud_visible`: in the split the cloud is visible (so it
+        animates and takes the mouse) but not focused (so the keyboard drives the
+        history beside it, ENTER included).
         """
         return (self.use_urwid and self.body_view == BODY_CLOUD
                 and self.cloud is not None and self.cloud.available)
@@ -1433,14 +1638,15 @@ class AdaptiveDJTUI:
         self.descriptor_text.set_text(descriptor_line)
         self.drift_text.set_text(drift_line)
 
-        # Refresh only the body panel actually on screen.  The default view is
+        # Refresh only the body panels actually on screen.  The default view is
         # the cloud (redrawn on its own alarm), so the console and history panels
         # — up to ~260 Text widgets between them — are not rebuilt at 2 Hz for a
         # viewer who cannot see them; each is refreshed when toggled to, via
-        # `_set_body_view` (inspection G3).
-        if self.body_view == BODY_CONSOLE:
+        # `_set_body_view` (inspection G3).  The split shows both at once, so both
+        # rebuild here — the gates are inclusive, not exclusive.
+        if self.body_view in (BODY_CONSOLE, BODY_SPLIT):
             self._update_console()
-        elif self.body_view == BODY_HISTORY:
+        if self.body_view in (BODY_HISTORY, BODY_SPLIT):
             self._update_session_panel()
 
         # Album art
@@ -1565,6 +1771,12 @@ class AdaptiveDJTUI:
         hand-count it, so the mouse hit rectangle tracks the panels above it.  The
         cloud sits in the weight-1 body slot below the packed Now Playing box,
         inside a LineBox (one border row/column each side).
+
+        In the split view the body slot is a Columns, not the cloud's LineBox:
+        the cloud is the last (right) column, so its x-offset is the width of the
+        left column — read from `Columns.column_widths` rather than assumed — and
+        its width is the right column's, not the whole body's.  Everything else is
+        the same, because the cloud box still fills its column top to bottom.
         """
         slots = self._main_pile_slots(cols, rows)
         if slots is None:
@@ -1573,12 +1785,23 @@ class AdaptiveDJTUI:
 
         # The body slot is the one that is not the Now Playing box.
         for widget, y_top, height in slots:
-            if widget is not self.now_playing_box:
-                inner_w = cols - 2
-                inner_h = height - 2
-                if inner_w <= 0 or inner_h <= 0:
+            if widget is self.now_playing_box:
+                continue
+            if self.body_view == BODY_SPLIT:
+                # The cloud is the last column; offset x past the ones before it.
+                widths = self.split_box.column_widths((cols,))
+                if not widths:
                     return None
-                return 1, y_top + 1, inner_w, inner_h
+                cloud_x = sum(widths[:-1])
+                cloud_w = widths[-1]
+            else:
+                cloud_x = 0
+                cloud_w = cols
+            inner_w = cloud_w - 2
+            inner_h = height - 2
+            if inner_w <= 0 or inner_h <= 0:
+                return None
+            return cloud_x + 1, y_top + 1, inner_w, inner_h
         return None
 
     def _render_art(self, art_path):
@@ -1765,7 +1988,7 @@ class AdaptiveDJTUI:
         # These used to disagree: ↑↓ were volume here and queue navigation
         # there, while the README said a third thing.
         print("SPACE=Play/Pause  N=Next  V=Pass  L=Like  ↑↓=History  ENTER=Replay")
-        print(",.=Vol  ←→=Seek  I=Info  Q=Quit")
+        print(",.=Vol  ←→=Seek  I=Info  K=Keys  Q=Quit")
         print("=" * 60)
         sys.stdout.flush()
 

@@ -7,7 +7,7 @@ A terminal DJ for MPD that picks tracks from CLAP audio embeddings and adapts to
 write. Everything is derived from what the audio actually sounds like, and everything the interface
 tells you has to be something the system can back up.
 
-**Status.** Feature-complete and stable. 668 tests, green, ~20 s. It plays continuously, adapts on
+**Status.** Feature-complete and stable. 712 tests, green, ~20 s. It plays continuously, adapts on
 the next track, says what it is playing, restores your MPD state on every exit path, and shows the
 whole library as a rotating 3-D mood cloud with a session comet. Coverage on all three interfaces
 (player, urwid display, fallback text mode).
@@ -211,8 +211,10 @@ projected back with `snap()` = `normalise(mean(top-25 library embeddings by dot(
 - **The album-art geometry is derived from the widget tree,** not hand-counted. Two of four original
   hand-counted constants were wrong. Same for the `[I]` overlay's inner size, which asks
   `Overlay.calculate_padding_filler()` / `top_w_size()` rather than recomputing the arithmetic.
-  **The footer is a flow widget and its `rows()` feeds `_art_geometry()`**, so its wrapped height —
-  which varies with terminal width — is part of the derivation.
+  **There is no header or footer** (the "AI DJ" title and the keybinds bar are gone; the keys live in
+  the `[K]` popup). `_main_pile_slots` still reads `frame.header`/`frame.footer` and treats an empty
+  slot as 0 rows, so the derivation is unchanged and would follow a header or footer straight back if
+  one were ever re-added.
 - **The drift figure is a count of held words, not a cosine.** The cosine has p10 = 0.948 and median
   = 0.989 over 40 real sessions, so it reads as "0.99" forever — the same compressed-scale defect the
   readout exists to fix. The cosine is still computed and shown in `[I]` with its distribution beside
@@ -220,10 +222,12 @@ projected back with `snap()` = `normalise(mean(top-25 library embeddings by dot(
 - **The display layer owns its own state, deliberately.** `vibe_readout.py` and `session_history.py`
   are pure modules that nothing behind the display reads. Putting either behind the display would
   split a display concern across a component that cannot see it.
-- **Any code path that blocks the loop stops observing the session.** `[I]` handles this with
-  `screen.set_input_timeouts(max_wait=0.5)` plus `_sync_session_state()` on every timeout wake —
-  without which a track that starts *and* finishes while the overlay is open never reaches the history
-  panel. **A new modal must do the same.**
+- **Any code path that blocks the loop stops observing the session.** `[I]`, `[K]` and the `[P]`
+  confirm handle this with `screen.set_input_timeouts(max_wait=0.5)` plus `_sync_session_state()` on
+  every timeout wake — without which a track that starts *and* finishes while the overlay is open never
+  reaches the history panel. All three go through one core, `_run_overlay(title, lines, decide)` (the
+  info modals via the `_run_text_overlay` wrapper, the confirm via `_confirm`), so there is a single
+  place that gets this right. **A new modal must reuse it.**
 - **Both interfaces share one binding table.** `decode_key()`/`decode_keys()` turn terminal bytes into
   urwid's key names and `_handle_input` dispatches for both. A binding cannot exist in one interface
   and not the other. Do not reintroduce a second `if key == …` ladder.
@@ -242,9 +246,23 @@ projected back with `snap()` = `normalise(mean(top-25 library embeddings by dot(
   is free for picking), zoom is **scroll**, and an on-panel **orbit-speed slider** (0 = static, starts
   slow) is set by left-click/drag. So `↑/↓` always move the history cursor. `ENTER` is the one
   focus-dependent key: `_handle_input` routes it to a single method (`_enter_action`) that resets the
-  cloud when the cloud is up and replays the focused track when the history is up — still one binding
-  table. `[T]` cycles the body pane (cloud → history → console); `F1/F2/F3` jump straight to one
-  (unadvertised). `←/→` stay seek; `+/−` zoom.
+  cloud only when the cloud is the whole body and otherwise replays the focused history track — so in
+  the split, where the history is on screen, `ENTER` replays and the mouse recentres — still one binding
+  table. `[T]` cycles the body pane (**split → cloud → history → console**; the split is the default);
+  `F1/F2/F3` jump straight to one of the three full-body panes (unadvertised in the cycle). `←/→` stay
+  seek. `+/−`, `[B]`, `[P]` and the mouse act on the cloud **wherever it is drawn** — the full pane or
+  the split's right column — gated on `_cloud_visible`, while `_cloud_focused` (full pane only) gates
+  just `ENTER`'s recentre. The split's cloud animates, and `_cloud_geometry` returns the narrower
+  right-column rectangle there so a click still lands on the right point.
+- **`[P]` plays a clicked point now, and it is a skip variant by construction.** `play_track_now`
+  (`main_tui.py`) is the neutral pass with a *chosen* lookahead: `requeue_next(track)` seats the
+  listener's pick (bypassing the selector's replay-exclusion window), then one `next` steps onto it —
+  add-before-advance, no `play()`, no model change. It is fired behind a `_confirm` modal because `[P]`
+  sits among the camera keys and jumping the playhead on a fat-fingered press would be the kind of
+  surprise the rest of this UI avoids. Selection is mouse-only, so `[P]` no-ops off the cloud.
+- **The selection readout leads with `♫`, the current-track readout with `♪`.** Both are width-1, so
+  the readout's `line[:cols].ljust(cols)` (codepoint-based) is exact; do not swap in a width-2 emoji
+  note (`🎵`) or the padding drifts a cell.
 - **The cloud paints 24-bit `AttrSpec`s and needs `set_terminal_properties(colors=TRUECOLOR)`.**
   Without it urwid down-converts every colour to the nearest of 16 and the cloud goes muddy — declare
   the capability, never emit raw ANSI into the text. **256 is not enough**: its 6×6×6 cube collapsed
@@ -255,6 +273,53 @@ projected back with `snap()` = `normalise(mean(top-25 library embeddings by dot(
   32 levels per channel caps it at 32,768 and is imperceptible.
 - **Absent mood axes are not fatal.** `MoodAxes.load()` returns `None` and the widget draws a rebuild
   message while the rest of the app plays on.
+- **The scaffold sits behind the data by construction, not by tuning.** The frame
+  `[B]` draws (ground · box + axes · marks + ground + axes) is splatted with a large
+  *negative* depth bump, so its dots light their Braille cells but **lose every colour
+  contest** — a cell holding a track keeps the track's colour. It carries index −1, so
+  it can never claim a click either. Both are silent when broken: a frame that won
+  would repaint tracks grey and nothing would raise.
+- **The frame's colours are derived from the terminal background, not chosen.**
+  They were first picked against the near-black `#05070b` of a design-time browser
+  mock, which put `COL_SCAFFOLD_FAR` at **0.93×** the luminance of the real
+  terminal's background (`#15141b`) — the far half of the frame was *darker than
+  the ground it sat on*, i.e. invisible, and on this terminal it was. `_lift()`
+  now solves the blend exactly (luminance is linear in it) for a stated contrast
+  ratio over `TERMINAL_BACKGROUND`, with an absolute floor so a pure-black
+  terminal still gets a visible frame. **Change `TERMINAL_BACKGROUND` and the
+  three colours re-derive.** The cloud's own points were checked at the same time
+  and need nothing: the library's darkest track is luminance 75.9, so even
+  depth-shaded to `SHADE_MIN` it clears this background by 1.47×.
+- **"Lower opacity" is a dim colour plus stippling.** Braille has no alpha and eight
+  dots share one cell colour. So a faint line is 24-bit's near-background grey
+  (`COL_SCAFFOLD_FAR/NEAR`, depth-interpolated) *and* `SCAFFOLD_SPACING` — one sample
+  every two dots. The cast shadow additionally carries `SHADOW_WEIGHT`, because a
+  674-point mass at line brightness out-shouts the frame it sits in.
+- **The box is the library's own bounding box, and it must close on screen.** It began
+  as a ±2σ cube, which left **55 of 674 tracks outside it** — and a cube is the wrong
+  shape here: Tone spans ±3.74σ, Saturation ±1.94, Organic ±2.82, so a cube containing
+  all of it is **61% volume the library never occupies**. That matters because the box
+  is *fitted to the panel*, so empty volume is paid for in how small the cloud is drawn:
+  a containing cube costs 52% of the old scale, the measured box 76%. `library_extent()`
+  measures it once per library (`max|coord| × 1.04`, floored so a degenerate cloud cannot
+  divide by zero) and it re-fits as the collection grows.
+- **`frame_scale()` is blind to the camera, and that is the invariant.** The camera is
+  not in its signature. When the fit was evaluated at the *current* tilt, dragging up and
+  down rescaled the whole scene — 11.5 → 19.5 dots/σ between the stops, a 70% swing under
+  the hand — and a rotation read as a lurching dolly. It was reported as motion sickness,
+  which is exactly what it was. **Rotation must be rotation:** a 3-D viewer's projection
+  scale is a property of the scene and the viewport, never of where the camera is looking
+  from. So the box is fitted once at the reference pose (`FIT_TILT` = `DEFAULT_TILT`, the
+  tilt the view opens and resets to) and held; tilt far past it and the box's corners
+  leave the panel, which is what looking at a box from a steep angle should do. Azimuth
+  is worst-cased into the x–z diagonal for the same reason. **Only `zoom` may scale.**
+  The fit uses **both** panel dimensions, which is what makes a non-cubic box worth
+  having — a wide flat box uses the panel's width (73%, was 56%) instead of paying for it
+  in height. The budget is `half − 1`, not `half`: a dot rounded exactly onto `dot_h` is
+  one index past the end and vanishes, a corner missing for one dot of greed.
+- **The panel opens on a frame, not on `off`.** Opening bare would ship the unreadable
+  state as the default and make the fix a discovery. `off` is the first stop in the
+  `[B]` ring.
 - **Markers are single dots distinguished by colour, never by size.** Fatter billboarded markers
   (squares, discs, rings) always face the camera, which flattens the cloud into a swimming plane. Depth
   is carried by shading; clicking uses a nearest-within-radius search, not a bigger target.
@@ -359,8 +424,8 @@ without them still loads for the readout, and `MoodAxes.load()` returns `None` (
 are absent. They are selected and calibrated **against this library** and re-fit with a cheap
 `--descriptors-only` rebuild — seconds, text tower only, no audio re-embedding. The choice of triad is
 per-user: another library can favour a different one (here Intensity and Saturation correlate 0.98, so
-only one of the pair can be used). `explore_mood_axes.py` imports the same selection from
-`mood_axes.py`, so the offline diagnostic and the stored artifact cannot drift.
+only one of the pair can be used). `generate_embeddings.py` calls `mood_axes.select_axes` to pick and
+store the triad, so the selection logic and the stored artifact cannot drift.
 
 **Reading the axes:** `from mood_axes import MoodAxes; axes = MoodAxes.load()` → `axes.labels`,
 `axes.directions`, `axes.coordinates(v)`. `coordinates` takes **either** a single `(512,)` centred
@@ -491,12 +556,24 @@ CPU mel extraction, so `--workers` matters more than `--batch-size`; on CPU the 
 Scaling: 1.5 ms at 96×28 → 7.1 ms at 300×80 (cells dominate); `compute_frame` is 0.1 ms at 674 points
 and 9.4 ms at 50,000 (so the library size is nowhere near a limit).
 
+The scaffold's cost is the cells it lights, not its arithmetic (96×30, `widget.render()`):
+
+```
+  off                    2.25 ms    353 lit cells        0 scaffold dots
+  floor+shadow           2.80 ms    544                1084
+  cage+triad             3.32 ms    549                 788
+  corners+floor+triad    3.38 ms    577                1088
+  walls+floor+shadow     3.58 ms    766                2314   (explored, not shipped)
+```
+
+So the frame costs ~25–40% of a repaint and leaves the ~144 fps animation alarm two
+thirds of its budget. `compute_frame` itself stays under 0.8 ms in every mode.
+
 ---
 
 ## 8 · Testing
 
-`python3 -m pytest tests` — **668 tests, green, ~20 s** (measured 2026-07-24; the archived docs
-said 651, which had drifted).
+`python3 -m pytest tests` — **712 tests, green, ~20 s** (measured 2026-07-24).
 
 The suite is behavioural, not existence checks. Two of the worst defects in this project's history
 survived a green suite of the latter. What that means in practice, and what to preserve:
@@ -586,18 +663,22 @@ Delete `data/state/` before measuring anything about a cold start.
 | `L` | Like; press again on a liked track to un-like |
 | `↑` / `↓` | Move the cursor through the session history |
 | `+` / `−` | Zoom the cloud in / out |
-| `Enter` | Over the cloud: reset the view. Over the history: replay the focused track |
-| `T` | Cycle the body pane: cloud → history → console → cloud |
-| `F1`/`F2`/`F3` | Jump straight to cloud / history / console (unadvertised in the footer) |
+| `Enter` | Over the full cloud: reset the view. Otherwise (history or split): replay the focused track |
+| `P` | Play the selected cloud point now (asks to confirm); the current track is passed over, no model change |
+| `B` | Cycle the frame behind the cloud: none → ground → box + axes → marks + ground + axes |
+| `T` | Cycle the body pane: split → cloud → history → console → split |
+| `F1`/`F2`/`F3` | Jump straight to cloud / history / console (unadvertised in the cycle) |
 | `,` / `.` | Volume down / up |
 | `←` / `→` | Seek ∓10 s |
 | `I` | Model state (descriptors, sampling, taste, exploration, weights); `↑↓` scrolls |
+| `K` | This keybinding list; `↑↓` scrolls, any other key closes |
 | `Q` | Quit |
-| mouse | Over the cloud: right-drag to orbit, scroll to zoom, left-click a point to inspect it, drag the orbit-speed slider |
+| mouse | Over the cloud (full pane or split's right column): right-drag to orbit, scroll to zoom, left-click a point to inspect it, drag the orbit-speed slider |
 
-The footer, the README table, `start.sh`'s launch banner and both interfaces advertise this list
-(F1–F3 are a deliberately unadvertised convenience). Tests drive every row through the real key
-handler, and `test_documented_numbers` guards the `start.sh` banner so it cannot drift.
+The `[K]` popup (generated from the one `KEYBINDS` list), the README table, `start.sh`'s launch banner
+and both interfaces advertise this list (F1–F3 are a deliberately unadvertised convenience). Tests drive
+every row through the real key handler, and `test_documented_numbers` guards the `start.sh` banner so it
+cannot drift.
 
 ---
 
@@ -645,9 +726,11 @@ on.
 - **The turnover schedule means little until the session settles.** The first `[N]` press turns over
   **100%** of the pool against its 5% target on a cold session. Consistent with the settling curve in
   §7, but it is the extreme of it. **Worth a measurement of its own before the schedule is retuned.**
-- **The Session panel draws no content rows at 80×24** when it is the visible pane. The header, the
-  packed Now Playing box and the two-row footer consume all 24. The layout renders — nothing crashes —
-  but the panel is a border.
+- **The Session panel is tight at 80×24 but no longer empty.** Removing the header and the keybinds
+  footer gave those rows back: the packed Now Playing box (~16 rows) now leaves the body ~8, so the
+  panel shows a handful of history rows where it used to be just a border. It was empty when the header
+  and a two-row footer also drew from the 24. The split is tighter still — each left cell gets half of
+  that body — and it likewise renders without crashing.
 - **macOS is untested.** `start.sh` uses no bash 4+ syntax so it would probably run, but nothing has
   been run there and album art cannot work (ueberzug is X11/Wayland only). The README says Linux.
 - **`[I]`'s fallback page and the urwid overlay are two pieces of code.** They agree on content; only
@@ -661,7 +744,7 @@ on.
   another point's colour**). Solid block characters (half blocks, sextants) buy AA and per-subpixel
   colour and **look far worse** — a filled rectangle is a mosaic tile, and the cloud's appeal is small
   crisp specks. **Braille has both the finest grid and the smallest mark; it is the right primitive
-  and close to the ceiling.** The browser preview in `archive/` is ~20–40× more pixels; only real
+  and close to the ceiling.** The design-time browser preview was ~20–40× more pixels; only real
   pixels close that, and Alacritty has neither sixel nor the kitty protocol, so the sole route is an
   `ueberzugpp` overlay — at which point the cloud stops being a urwid widget (no clipping, no
   z-order, broken under tmux multi-client). Not pursued. Do not re-derive this by switching
@@ -690,8 +773,17 @@ on.
 - Fedora, Python 3.14.6, numpy 1.26.4, urwid 3.0.5, transformers 5.1.0, torch/torchaudio.
 - Terminal: **Alacritty 0.17** inside **tmux 3.7b**. tmux reports the client as RGB-capable
   (`terminal-features` includes `RGB`) even though the inner `TERM` is `screen-256color`, so 24-bit
-  colour passes through. Alacritty supports neither sixel nor the kitty graphics protocol — which is
-  why album art needs an `ueberzugpp` X11 overlay.
+  colour passes through — verified, not assumed. Alacritty supports neither sixel nor the kitty
+  graphics protocol — which is why album art needs an `ueberzugpp` X11 overlay.
+- **Background `#15141b`** (Alacritty + the Aura theme). It is not decoration: the vibe cloud's
+  frame is derived from it (§4), and a screenshot taken on a darker ground flatters every dim
+  colour in the panel by a factor of three.
+- **The terminal font must cover U+2800–U+28FF**, or every cell of the cloud is drawn by whatever
+  fontconfig falls back to. Two common defaults do **not** cover it — `Noto Sans Mono` (the system
+  monospace default here, so an Alacritty with no `font.normal.family` set renders the whole cloud
+  through a fallback) and `DejaVu Sans Mono`. `Iosevka Nerd Font Mono` does, and its 0.5 em advance
+  against Noto's 0.6 em also packs the dots ~17% tighter, which is most of the difference between a
+  cloud that reads as a mass and one that reads as scattered specks.
 - MPD's real `music_directory` is `/mnt/storage/music`, read from `~/.config/mpd/mpd.conf` by
   `music_directory.py` rather than assumed. `/var/lib/mpd/music` is a symlink to it — the reason the
   old hardcoded default worked, and the reason it hid.
@@ -705,13 +797,16 @@ on.
 start.sh                  the only entry point
 PROJECT.md                this file
 README.md                 user-facing setup + usage
+docs/                     README assets: images/ (vibe-space frames) + DEMO.md
 src/                      every application module (flat imports, src/ on sys.path)
-tests/                    668 tests; conftest.py owns the fixtures and the state isolation
+tests/                    conftest.py owns the fixtures and the state isolation
 data/embeddings/          track_embeddings.npz, descriptors.npz, failed.txt  (not committed)
 data/state/               learned state; regenerated by listening  (not committed)
 data/dj.log               the durable diagnostic copy
-archive/                  frozen design references — do not edit
-explore_mood_axes.py      offline: pick and analyse the mood-axis triad for a library
-vibe_cloud_demo.py        offline: the Braille render as a standalone script
-render_terminal_frames.py offline: baked-frame terminal mock
+scratch_*                 offline render scratch; gitignored, safe to delete
 ```
+
+The offline explorers used to plan the vibe cloud (browser preview, scaffold
+stills, standalone Braille render) lived at the repo root; they were throwaway
+tooling and were removed once the widget shipped — they are in git history if
+ever needed.
