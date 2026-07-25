@@ -225,10 +225,11 @@ def test_adding_a_row_above_the_columns_moves_the_art_down(tui):
 
 def test_a_taller_footer_does_not_move_the_art(tui):
     """
-    The footer is a flow widget so it wraps rather than truncating (L9).  It sits
-    below everything the art is measured from, so wrapping must not shift the
-    image — but it does shrink the body, so this also proves the clip below is
-    measured from the right place.
+    There is no footer by default any more, but `_main_pile_slots` still reads
+    `frame.footer` when one is present.  A footer sits below everything the art
+    is measured from, so adding (or wrapping) one must not shift the image — it
+    only shrinks the body, so this also proves the clip below is measured from
+    the right place.
     """
     tall = tui._art_geometry(80, 40)
     tui.frame.footer = urwid.AttrMap(

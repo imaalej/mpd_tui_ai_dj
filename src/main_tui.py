@@ -344,6 +344,51 @@ class AdaptiveDJWithTUI:
 
         return track_file
 
+    def play_track_now(self, track):
+        """
+        Play a listener-chosen track immediately — the point they picked in the
+        vibe cloud (`[P]`).
+
+        The same shape as `neutral_skip_current_track`, and for the same reasons:
+        **add before advancing** (audit C4), no `play()` anywhere, and no model
+        change — choosing a track to hear is not feedback about the one playing,
+        so nothing is repelled, penalised or escalated.  The one difference is
+        *what* gets queued: `requeue_next` puts the chosen track in the lookahead
+        slot (and deliberately hides it from the selector, so the replay-exclusion
+        window cannot block it), and then a single `next` steps onto it.
+
+        Returns the track that was passed over (for the caller to note in the
+        history), or None if nothing could be advanced.
+        """
+        status = self.mpd_controller.get_status()
+        state = status.get('state')
+        track_file = status.get('track_file')
+
+        # `mpc next` on a stopped player is an error that changes nothing.
+        if state not in ('playing', 'paused') or not track_file:
+            return None
+
+        # Stamped so the completion detector cannot count this partially-heard
+        # track as a full listen — the same guard the skips use.
+        self._last_skip_time = time.time()
+
+        # Add-before-advance: seat the chosen track as the lookahead first, so the
+        # queue is 2-deep when `next` fires and cannot empty (which would stop MPD
+        # with no `play()` to recover).
+        if not self.queue_manager.requeue_next(track):
+            print("Play: could not queue the chosen track, staying put",
+                  file=sys.stderr)
+            return None
+
+        self.mpd_controller.next_track()
+
+        # `mpc next` while paused advances *and* resumes playing (verified live);
+        # re-pause to honour the user's play state.  `mpc pause` is idempotent.
+        if state == 'paused':
+            self.mpd_controller.pause()
+
+        return track_file
+
     def run(self):
         """Main event loop with TUI."""
         self.running = True

@@ -38,8 +38,9 @@ older `descriptors.npz` without them still loads for the readout, and
 `MoodAxes.load` returns `None` (reported, never a crash) when they are absent —
 the same "absent is not fatal" discipline the descriptor bank itself follows.
 
-`explore_mood_axes.py` (repo root, a throwaway diagnostic) imports the selection
-from here so the offline proof and the stored artifact cannot diverge.
+`select_axes` is the one place the triad is chosen — `generate_embeddings.py`
+calls it when it builds the descriptor bank, so the stored artifact and the
+selection logic cannot diverge.
 """
 
 import itertools
@@ -121,8 +122,7 @@ def select_axes(text_embeddings: np.ndarray,
     """
     Choose the most usable legible triad for this library and calibrate it.
 
-    Mirrors `explore_mood_axes.py`'s balanced pick exactly (the script now imports
-    this function): score every triad by orthogonality × mean signal, where
+    The balanced pick: score every triad by orthogonality × mean signal, where
 
         orthogonality = det of the triad's z-score correlation submatrix
                         (1 = mutually orthogonal, → 0 = flat / a pancake)

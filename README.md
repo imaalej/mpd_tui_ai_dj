@@ -2,10 +2,10 @@
 
 A terminal-based DJ that learns your taste in real time and curates a continuously evolving queue from your own music library — no streaming service, no account, no ads. Just MPD and your files.
 
+![the DJ in action](docs/demo.gif)
+
 ```
 ╔════════════════════════════════════════════════════════════════════╗
-║                            🎵 AI DJ                                 ║
-╠════════════════════════════════════════════════════════════════════╣
 ║  ♪ Now Playing                                                     ║
 ║  ┌─────────────┐   ▶ Playing        Vol: 72%                       ║
 ║  │  [cover]    │   Artist:  Floating Points                        ║
@@ -24,21 +24,39 @@ A terminal-based DJ that learns your taste in real time and curates a continuous
 ║                        ⠉⠓⠒⠒⠒⠋⠁ ●←         the comet is your vibe.  ║
 ║  ♪ Floating Points – LesAlpx    T +0.4  S −0.3  O +1.1             ║
 ║  ⟳ orbit [━━━━●───────────────────────────────────────]   12%     ║
-╠════════════════════════════════════════════════════════════════════╣
-║ [SPACE] Pause  [N] Skip  [V] Pass  [L] Like  [↑↓] History          ║
-║ [ENTER] Reset/Replay  [+−] Zoom  [T] Pane                          ║
-║ [,.] Vol  [←→] Seek  [I] Info  [Q] Quit                            ║
 ╚════════════════════════════════════════════════════════════════════╝
+                              [K] for keys
 ```
 
-The body below the header is a live **vibe cloud** — an auto-rotating 3-D point
-cloud of your whole library in mood space, with a comet tracing your session's
-trajectory. It carries the full screen; `[T]` cycles the body between the cloud,
-the session history and the console (or `F1`/`F2`/`F3` jump straight to one), so
-each gets the whole panel when you want it. The next track shows on the `Next:`
-line in the header, so you never have to leave the cloud to see what's coming.
-**Right-drag** to orbit, **scroll** to zoom, **click** a point to see which track
-it is, and drag the **orbit slider** to set the spin speed (it starts slow).
+The body below Now Playing opens on a **split** view — the console over the
+session history in a narrow left column, and a live **vibe cloud** in the wide
+right one. The cloud is an auto-rotating 3-D point cloud of your whole library in
+mood space, with a comet tracing your session's trajectory. `[T]` cycles the body
+from the split to the full-screen cloud, history, and console in turn (or
+`F1`/`F2`/`F3` jump straight to one), so each gets the whole panel when you want
+it. The next track shows on the `Next:` line in Now Playing, so you never have to
+leave the cloud to see what's coming. **Right-drag** to orbit, **scroll** to zoom,
+**click** a point to see which track it is (and press **`[P]`** to play it), and
+drag the **orbit slider** to set the spin speed (it starts slow).
+
+There is no title bar and no keybinds footer — press **`[K]`** for the full list
+of keys, over whatever pane you are on.
+
+`[B]` cycles the frame drawn behind the cloud, from a bare cloud to a ruled floor,
+a labelled wireframe box, and crop-marks:
+
+<table>
+  <tr>
+    <td align="center" width="50%"><img src="docs/images/frame-none.png" width="100%"><br><code>off</code> — bare cloud</td>
+    <td align="center" width="50%"><img src="docs/images/frame-ground.png" width="100%"><br><code>ground</code> — floor + shadow <em>(default)</em></td>
+  </tr>
+  <tr>
+    <td align="center" width="50%"><img src="docs/images/frame-box-axes.png" width="100%"><br><code>box + axes</code> — wireframe + labelled axes</td>
+    <td align="center" width="50%"><img src="docs/images/frame-marks.png" width="100%"><br><code>marks + ground + axes</code></td>
+  </tr>
+</table>
+
+<sub>Design-time browser preview; the terminal draws the same cloud in Braille (the banner above shows the terminal look). A selected point reads out as <code>♫ artist – title</code>, the playing track as <code>♪</code>.</sub>
 
 ---
 
@@ -50,12 +68,9 @@ it is, and drag the **orbit slider** to set the spin speed (it starts slow).
   claim it, and nothing had ever been run there. `start.sh` no longer uses any bash 4+ syntax, so it
   should survive the bash 3.2 macOS ships, but album art will not work: the only two working
   renderers are `ueberzug` and `ueberzugpp`, and both draw into an X11/Wayland surface.
-- **Album art under tmux with more than one attached client is not supported.** ueberzug/ueberzugpp
-  position the cover in absolute terminal coordinates against a single output surface; tmux multiplexing
-  across clients of differing geometry has no single truth for where a given cell is, so the cover
-  renders in one client only and attaching or detaching another can knock it out until a resize brings
-  it back. This is a limitation of overlay image protocols under tmux, not something the app can fix —
-  a single attached client (tmux or not) is the supported case.
+- **Album art needs a single attached client** (tmux or not). ueberzug/ueberzugpp draw the cover in
+  absolute coordinates against one output surface, so tmux with multiple attached clients of differing
+  geometry can knock the cover out until a resize — a limitation of overlay image protocols, not the app.
 - **About 1.3 GB of free disk** for the first run — 1.15 GB of model cache and a 46 MB embedding file.
   See "First run" below for where that goes.
 - A GPU is optional. See the table below for what it costs without one.
@@ -120,46 +135,40 @@ mpc status   # should show your track count
 | `L` | Like current track — press again on a liked track to un-like it |
 | `↑` / `↓` | Move the cursor through the session history |
 | `+` / `−` | Zoom the cloud in / out |
-| `Enter` | **Over the cloud:** reset the view. **Over the history:** replay the track under the cursor — it becomes `↓ next:` |
+| `Enter` | **Over the full cloud:** reset the view. **Otherwise (history or split):** replay the track under the cursor — it becomes `↓ next:` |
+| `P` | Play the point selected in the cloud **now** — asks to confirm first; the current track is passed over with no penalty |
 | `B` | Cycle the frame drawn behind the cloud: none → ground → box + axes → marks + ground + axes |
-| `T` | Cycle the body pane: cloud → history → console → cloud |
+| `T` | Cycle the body pane: split → cloud → history → console → split |
 | `F1` / `F2` / `F3` | Jump straight to the cloud / history / console pane |
 | `,` / `.` | Volume down / up |
 | `←` / `→` | Seek backward / forward 10s |
 | `I` | Show model state (descriptors, sampling, taste, exploration, weights) — `↑↓` scrolls it |
+| `K` | Show this keybinding list — `↑↓` scrolls it, any other key closes |
 | `Q` | Quit |
 | mouse | Over the cloud: **right-drag** to orbit, **scroll** to zoom, **left-click** a point to inspect its track, and drag the **orbit-speed slider** at the bottom |
 
 The camera is a mouse instrument — right-drag to orbit, scroll to zoom — so the
 arrows are free to always mean "move the history cursor". `Enter` is the one key
-that does two things: it recentres the cloud when the cloud is up, and replays the
-focused track when the history is up. That is a focus mode, not a second binding
-table — the key reaches one dispatch method, which acts on whichever view is
-showing. Everything else means the same thing everywhere.
+that does two things: it recentres the cloud when the cloud is the whole body, and
+otherwise replays the focused history track — so in the split, where the history
+is on screen and keyboard-driven, `Enter` replays and the mouse recentres. That is
+a focus mode, not a second binding table — the key reaches one dispatch method,
+which acts on whichever view is showing. Everything else means the same thing
+everywhere. `B`, `+`/`−` and the mouse act on the cloud wherever it is drawn, the
+full pane or the split's right column.
 
-These are the same bindings in the urwid interface and in the plain-text fallback,
-and the footer advertises exactly this list. They are not merely documented as the
-same: the fallback decodes terminal bytes into key names and then calls the *same*
-dispatch method the urwid mode does, so a binding cannot exist in one interface and
-not the other. A test drives every row of the table through the real key handler,
-and a second one drives them through a pty into the fallback mode, because the
-footer, this table and the fallback used to disagree three ways.
+The bindings are identical in the urwid interface and the plain-text fallback (both
+dispatch through one handler, so a key cannot exist in one and not the other), and
+the `[K]` popup is generated from that one list.
 
-**What un-liking does to the model.** Retracting a like is not a negative update.
-The taste vector is a normalised moving average, so subtracting the same weight
-does not return it to where it was — and in the case that matters most, it fails
-outright: retract your only like and a subtraction leaves your long-term taste
-still pointing exactly at the track you just rejected, because normalising `0.9·e`
-gives back `e`. So `L` removes the like from your feedback history and *recomputes*
-the taste model from what is left. The result is the model you would have had if
-you had never pressed the key, exactly.
-
-There is one exception, and it tells you when it happens. The feedback history is
-capped at 1000 events, so a long-running listener's history may no longer account
-for their whole taste model — recomputing from a partial history would move the
-vector for reasons unrelated to this track. When that is the case the retraction
-is display-only: the heart goes and the like leaves the history, but the taste
-model is left alone, and the console says so.
+**What un-liking does to the model.** Retracting a like is not a negative update — a
+normalised moving average can't be un-added (subtract your only like and the taste
+vector still points exactly at the track you just rejected). So `L` removes the like
+from your feedback history and *recomputes* taste from what's left: the model you'd
+have had if you'd never pressed the key. The one exception is a history capped at
+1000 events, where a recompute from a partial history would move the vector for
+unrelated reasons — there the retraction is display-only (the heart goes, the model
+stays), and the console says so.
 
 ---
 
@@ -215,8 +224,6 @@ The important part is that those are *targets*, and the magnitude of the move is
 
 From the second press onward the session vector is projected back onto your library — replaced with the centre of its 25 nearest real tracks — so however hard you push, it cannot drift into a region no music occupies. A full listen ends the run and the escalation resets.
 
-*(An earlier `V` key steered — a "vibe shift" that blended the session vector halfway toward a random direction, which measurably landed it outside the music and turned over less than two presses of `N` do. That behaviour is gone; the `V` key is now the neutral **Pass** above, which moves nothing.)*
-
 ### Exploration vs Exploitation
 
 A single **exploration value** (0.1–0.7) controls how adventurous the DJ is. It increases with every skip and decreases with every full listen, meaning it self-calibrates to your engagement. If you're in a zone and letting tracks run, it narrows in. If you're skipping around, it opens up and reaches further from your established taste.
@@ -242,8 +249,6 @@ You can also ask for any track's descriptors from the command line:
 python3 src/generate_embeddings.py --describe "Arctic Monkeys"
 ```
 
-This replaced a mood phrase — *"focused cohesive vibe, deep in the zone"* — assembled from three heuristics, all invented against scales nobody measured. The mood word came from an entropy-like quantity that is always ≈ 55 for a 512-dimensional unit vector, so it returned *eclectic* every time and its other two branches were unreachable; the *warming up → building → deep in the zone* stage word was a track counter in a costume.
-
 ### The Session panel
 
 Below the console, the **Session** panel shows the one track queued ahead, then what has actually played, newest first:
@@ -256,9 +261,7 @@ Below the console, the **Session** panel shows the one track queued ahead, then 
   ⏭ Kamasi Washington – Change of the Guard
 ```
 
-`♥` is a track you have liked, at any point, across sessions. `✓` is a full listen, `⏭` a skip (`N`, a rejection), `»` a pass (`V`, moved on without changing the vibe), `♪` the track playing now. `↑↓` move the cursor and `ENTER` queues that track to play again next.
-
-This replaced an "Upcoming Queue" panel that listed ten tracks read from `mpc playlist` — which, with the playback modes the DJ now uses, was the session's *history* displayed above the current track and numbered as if it were the future. The panel shows the past because the past is the part that is true; at a queue depth of one there is no future to list.
+`♥` is a track you have liked, at any point, across sessions. `✓` is a full listen, `⏭` a skip (`N`, a rejection), `»` a pass (`V`, moved on without changing the vibe), `♪` the track playing now. `↑↓` move the cursor and `ENTER` queues that track to play again next. It lists the past rather than a queue because at a depth of one track ahead there is no future to show.
 
 Exactly **one** track sits in the queue ahead of the current one, refilled as each song ends so playback never stops. That depth is deliberate: with ten queued tracks, every one of them had been scored under the weights that existed ten songs ago, so a skip or a like was inaudible until they drained. At depth one, feedback changes what plays *next*.
 

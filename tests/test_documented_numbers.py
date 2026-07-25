@@ -178,6 +178,7 @@ def test_the_start_sh_control_banner_lists_every_binding():
         "Zoom",           # + / − (G3)
         "Reset",          # ENTER over the cloud (G3)
         "Replay",         # ENTER over the history  (the E1 omission)
+        "selected cloud track",  # P — play the clicked point now
         "Cycle panes",    # T (G3)
         "F1 / F2 / F3",   # direct pane jumps (G3)
         "mouse",          # right-drag / scroll / click / slider (G3)
@@ -185,6 +186,7 @@ def test_the_start_sh_control_banner_lists_every_binding():
         "Volume",         # , / .
         "Seek",           # ← / →
         "Model info",     # I
+        "Keybinding",     # K — the popup that replaced the footer
         "Quit",           # Q
     ]
     missing = [r for r in required if r not in banner]

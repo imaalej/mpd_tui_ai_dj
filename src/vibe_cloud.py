@@ -7,7 +7,7 @@ Two halves live here, split so the arithmetic is testable without a tty:
   * **Pure geometry** (`rotation_matrix`, `point_rgb`, `compute_frame`, `hit_test`)
     — turns `(N, 3)` mood coordinates into a grid of Braille cells with a colour
     and a source-point index per cell.  No urwid, no I/O.  This is the part the
-    unit tests drive, the way `explore_mood_axes.py` drives `mood_axes.select`.
+    unit tests drive directly, without constructing a widget or a screen.
   * **The urwid box widget** (`VibeCloudWidget`) — wraps the geometry, owns the
     camera and comet state, renders to a canvas and answers mouse hits.  Guarded
     on `URWID_AVAILABLE` exactly like `tui.py`, so importing this module in the
@@ -29,8 +29,8 @@ Where the numbers come from (all derived, none invented — §1):
     "never blur ambient and data motion".
 
 Rendering is Braille (2×4 dots per character cell) so one 90×30 panel is a
-360×120 dot canvas — coarse next to the browser preview in `archive/`, but the
-honest terminal target (see `archive/NOTES.md`).
+360×120 dot canvas — coarse next to the browser preview built during design, but
+the honest terminal target.
 """
 
 import math
@@ -146,8 +146,8 @@ SCAFFOLD_SPACING = 2.0         # dots between line samples: 1 = solid, 2 = dotte
 
 # **The frame's colours are derived from the terminal background, not chosen.**
 #
-# They were chosen once, against the near-black `#05070b` an archived browser mock
-# used, and the result was `COL_SCAFFOLD_FAR` at 0.93× the luminance of the real
+# They were chosen once, against the near-black `#05070b` a design-time browser
+# mock used, and the result was `COL_SCAFFOLD_FAR` at 0.93× the luminance of the real
 # terminal's background — the far half of the frame rendered *darker than the
 # ground it sat on*, which is invisible, and on this listener's terminal it was.
 # Exactly the §1 defect: a constant calibrated against a scale nobody measured.
@@ -208,10 +208,9 @@ _WORLD_SCAFFOLDS = frozenset(
 # rather than zooms.  See `frame_scale`.
 FIT_TILT = DEFAULT_TILT
 
-# The presets `[B]` cycles, chosen by eye from the ten the offline explorer
-# renders (`explore_cloud_scaffold.py`).  Tokens compose with '+', so a
-# combination needs no new constant and the ones not in this list — `walls`,
-# `gnomon` — stay reachable from the explorer without shipping as a stop.
+# The presets `[B]` cycles, chosen by eye from the ten candidate frames.  Tokens
+# compose with '+', so a combination needs no new constant, and the ones not in
+# this list — `walls`, `gnomon` — stay renderable without shipping as a stop.
 #
 #   ground   the horizon reading: a ruled floor and the library's cast shadow.
 #            A point's distance from its own shadow is its height.
@@ -1042,6 +1041,15 @@ if URWID_AVAILABLE:
         def clear_selection(self) -> None:
             self.selected_idx = None
 
+        def selected_track(self) -> Optional[str]:
+            """The file of the currently selected point, or None if nothing is
+            selected — so a key handler can act on a selection made by an earlier
+            click, not only on `select_at`'s immediate return value."""
+            if (self.selected_idx is None
+                    or self.selected_idx >= len(self.track_files)):
+                return None
+            return self.track_files[self.selected_idx]
+
         def slider_at(self, col: int, row: int) -> Optional[float]:
             """
             If local cell `(col, row)` lands on the orbit-speed slider track,
@@ -1189,7 +1197,7 @@ if URWID_AVAILABLE:
                 c = self.coords[idx]
                 coord = "  ".join(f"{lab[:1]} {c[k]:+.1f}"
                                   for k, lab in enumerate(self.axis_labels))
-                tag = "▣" if self.selected_idx is not None else "♪"
+                tag = "♫" if self.selected_idx is not None else "♪"
                 line = f"{tag} {label}   {coord}"
             else:
                 line = ("right-drag orbit · scroll / +− zoom · click a point · "
