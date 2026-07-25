@@ -18,7 +18,7 @@ a labelled wireframe box, and crop-marks:
   </tr>
 </table>
 
-<sub>Design-time browser preview; the gif above is the live terminal render (Braille). A selected point reads out as <code>♫ artist – title</code>, the playing track as <code>♪</code>.</sub>
+<sub>A selected point reads out as <code>♫ artist – title</code>, the playing track as <code>♪</code>.</sub>
 
 The body below Now Playing opens on a **split** view — the console over the
 session history in a narrow left column, and a live **vibe cloud** in the wide
@@ -79,8 +79,6 @@ Every number here is measured on this machine against a 674-track library, not e
 `start.sh` refuses to begin a run that cannot finish, checking free space against the same figures.
 
 Tracks are enumerated from `mpc listall`, so the embedding keys are exactly the paths MPD will be asked to play. Files MPD cannot decode are skipped and listed in `data/embeddings/failed.txt` with the reason, rather than disappearing silently.
-
-There is no "demo mode" with random vectors. Random embeddings make every similarity, every novelty score and every learned preference meaningless while the interface keeps presenting them as insight — it looks like it works, and none of it does.
 
 You only ever run this once. The result is saved to `data/embeddings/`.
 

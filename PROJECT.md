@@ -797,7 +797,7 @@ on.
 start.sh                  the only entry point
 PROJECT.md                this file
 README.md                 user-facing setup + usage
-docs/                     README assets: images/ (vibe-space frames) + DEMO.md
+docs/                     README assets: demo.gif + images/ (vibe-space frames)
 src/                      every application module (flat imports, src/ on sys.path)
 tests/                    conftest.py owns the fixtures and the state isolation
 data/embeddings/          track_embeddings.npz, descriptors.npz, failed.txt  (not committed)
