@@ -4,29 +4,21 @@ A terminal-based DJ that learns your taste in real time and curates a continuous
 
 ![the DJ in action](docs/demo.gif)
 
-```
-╔════════════════════════════════════════════════════════════════════╗
-║  ♪ Now Playing                                                     ║
-║  ┌─────────────┐   ▶ Playing        Vol: 72%                       ║
-║  │  [cover]    │   Artist:  Floating Points                        ║
-║  │             │   Album:   Promises                               ║
-║  │             │   Track:   ❤ LesAlpx                              ║
-║  │             │   Next:    Pharoah Sanders – The Creator …        ║
-║  └─────────────┘   [████████████░░░░░░░░░░░░]  3:12 / 8:44         ║
-║                    ♪ hypnotic · nocturnal · sparse                 ║
-╠═ ♁ Vibe Space · Tone · Saturation · Organic ══════════════════════╣
-║                        ⢀⠴⠋⠉⠉⠙⠲⢄                                     ║
-║                    ⢠⠞⠁ ⢀⣀⡠⠤⠤⡀ ⠈⠳⡄        the whole library,       ║
-║                   ⡞  ⡴⠋⠁⢠⡆   ⠙⢦  ⢹⡄       projected onto three     ║
-║                  ⢸  ⣸⠁ ⢀⣼⣷⣄   ⠈⣇  ⡇       legible mood axes,       ║
-║                   ⢧⡀ ⠹⣄ ⠈⠛⠁ ⢀⡴⠋ ⣰⠇       auto-rotating, coloured  ║
-║                    ⠙⠦⣄⡈⠙⠒⠒⠚⠋ ⣠⠴⠋         by its own coordinates;  ║
-║                        ⠉⠓⠒⠒⠒⠋⠁ ●←         the comet is your vibe.  ║
-║  ♪ Floating Points – LesAlpx    T +0.4  S −0.3  O +1.1             ║
-║  ⟳ orbit [━━━━●───────────────────────────────────────]   12%     ║
-╚════════════════════════════════════════════════════════════════════╝
-                              [K] for keys
-```
+`[B]` cycles the frame drawn behind the cloud, from a bare cloud to a ruled floor,
+a labelled wireframe box, and crop-marks:
+
+<table>
+  <tr>
+    <td align="center" width="50%"><img src="docs/images/frame-none.png" width="100%"><br><code>off</code> — bare cloud</td>
+    <td align="center" width="50%"><img src="docs/images/frame-ground.png" width="100%"><br><code>ground</code> — floor + shadow <em>(default)</em></td>
+  </tr>
+  <tr>
+    <td align="center" width="50%"><img src="docs/images/frame-box-axes.png" width="100%"><br><code>box + axes</code> — wireframe + labelled axes</td>
+    <td align="center" width="50%"><img src="docs/images/frame-marks.png" width="100%"><br><code>marks + ground + axes</code></td>
+  </tr>
+</table>
+
+<sub>Design-time browser preview; the gif above is the live terminal render (Braille). A selected point reads out as <code>♫ artist – title</code>, the playing track as <code>♪</code>.</sub>
 
 The body below Now Playing opens on a **split** view — the console over the
 session history in a narrow left column, and a live **vibe cloud** in the wide
@@ -42,32 +34,13 @@ drag the **orbit slider** to set the spin speed (it starts slow).
 There is no title bar and no keybinds footer — press **`[K]`** for the full list
 of keys, over whatever pane you are on.
 
-`[B]` cycles the frame drawn behind the cloud, from a bare cloud to a ruled floor,
-a labelled wireframe box, and crop-marks:
-
-<table>
-  <tr>
-    <td align="center" width="50%"><img src="docs/images/frame-none.png" width="100%"><br><code>off</code> — bare cloud</td>
-    <td align="center" width="50%"><img src="docs/images/frame-ground.png" width="100%"><br><code>ground</code> — floor + shadow <em>(default)</em></td>
-  </tr>
-  <tr>
-    <td align="center" width="50%"><img src="docs/images/frame-box-axes.png" width="100%"><br><code>box + axes</code> — wireframe + labelled axes</td>
-    <td align="center" width="50%"><img src="docs/images/frame-marks.png" width="100%"><br><code>marks + ground + axes</code></td>
-  </tr>
-</table>
-
-<sub>Design-time browser preview; the terminal draws the same cloud in Braille (the banner above shows the terminal look). A selected point reads out as <code>♫ artist – title</code>, the playing track as <code>♪</code>.</sub>
-
 ---
 
 ## Requirements
 
 - **Python 3.9+**
 - **MPD** (Music Player Daemon) + **MPC** — must be running with your music library indexed
-- **Linux.** Developed and run on Fedora with Python 3.14. macOS is *untested* — the README used to
-  claim it, and nothing had ever been run there. `start.sh` no longer uses any bash 4+ syntax, so it
-  should survive the bash 3.2 macOS ships, but album art will not work: the only two working
-  renderers are `ueberzug` and `ueberzugpp`, and both draw into an X11/Wayland surface.
+- **Linux** with X11 or Wayland — album art is drawn by `ueberzug` / `ueberzugpp`, which need a graphical surface. Developed on Fedora with Python 3.14.
 - **Album art needs a single attached client** (tmux or not). ueberzug/ueberzugpp draw the cover in
   absolute coordinates against one output surface, so tmux with multiple attached clients of differing
   geometry can knock the cover out until a resize — a limitation of overlay image protocols, not the app.
@@ -96,7 +69,7 @@ The music directory is read from MPD's own config (`~/.config/mpd/mpd.conf`, `/e
 Every number here is measured on this machine against a 674-track library, not estimated:
 
 | | Measured |
-|---|---|
+| --- | --- |
 | Model cache after the first run | **1.15 GB** (1,232,327,859 bytes) |
 | Why it is twice the model's size | The repo's `main` carries only `pytorch_model.bin` (614.5 MB); transformers ≥ 5 also fetches the safetensors conversion from `refs/pr/3` (614.4 MB), and both stay cached |
 | Embedding pass, RTX 3070 | **5 min 23 s** — 674 tracks, 24,494 windows, 75.8 windows/s |
@@ -117,7 +90,6 @@ You only ever run this once. The result is saved to `data/embeddings/`.
 # Ubuntu/Debian
 sudo apt install mpd mpc
 
-
 # Point MPD at your music and build the database
 mpc update
 mpc status   # should show your track count
@@ -128,7 +100,7 @@ mpc status   # should show your track count
 ## Controls
 
 | Key | Action |
-|-----|--------|
+| ----- | -------- |
 | `Space` | Play / Pause |
 | `N` | Skip track — a rejection; escalates if you keep pressing it (see below) |
 | `V` | Pass — move on to the queued track without changing the vibe |
@@ -214,7 +186,7 @@ The weights (α, β, γ, δ) shift dynamically based on your behavior. Skip a fe
 Keep pressing and it escalates, because *n* consecutive rejections is the system observing that the neighbourhood is wrong — better evidence than a separate key you would have to reach for after diagnosing your own dissatisfaction. Each press targets a fraction of the candidate pool that must come out different:
 
 | consecutive skips | turns over | reads as |
-|---|---|---|
+| --- | --- | --- |
 | 1 | 5% | "not this song" |
 | 2 | 20% | "not this corner either" |
 | 3 | 50% | "this is the wrong direction" |
